@@ -157,9 +157,19 @@ def validate(gguf: GGUFFile) -> None:
     for name, (shape, kind) in expected.items():
         info = gguf.tensors[name]
         stored = info.type_id in GGUF_FORMATS_BY_TYPE
-        if info.shape != shape or (kind == "blocks") != stored or (
-            kind != "blocks" and info.type_name != kind
-        ):
+        is_ssm_pair = name.endswith(("ssm_alpha.weight", "ssm_beta.weight"))
+        if info.shape != shape:
+            raise ValueError(f"{gguf.path}: {name} is {info.type_name} {info.shape}")
+        if is_ssm_pair:
+            # GGUF community releases disagree on this pair: GSQ-RCO ships BF16,
+            # agentionai Q8_0, mudler APEX Q3_K. Accept any stored block type
+            # and dequantize on read.
+            if not stored and info.type_name != "BF16":
+                raise ValueError(f"{gguf.path}: {name} is {info.type_name} {info.shape}")
+        elif kind == "blocks":
+            if not stored:
+                raise ValueError(f"{gguf.path}: {name} is {info.type_name} {info.shape}")
+        elif info.type_name != kind:
             raise ValueError(f"{gguf.path}: {name} is {info.type_name} {info.shape}")
     end = max(info.offset + info.nbytes for info in gguf.tensors.values())
     if gguf.data_bytes_available < end:
@@ -297,7 +307,11 @@ def text_sources(
             gguf, g + "ssm_out.weight", (HIDDEN, GDN_VALUE_DIM), rows()
         )
         for role, tensor in (("a_projection", "ssm_alpha.weight"), ("b_projection", "ssm_beta.weight")):
-            words = untile(gguf.read_bf16_words(g + tensor), 1)
+            if gguf.info(g + tensor).type_name == "BF16":
+                words = untile(gguf.read_bf16_words(g + tensor), 1)
+            else:
+                vals = _dequantize(gguf, g + tensor, 0, GDN_VALUE_HEADS)
+                words = untile(vals.to(torch.bfloat16).view(torch.int16).numpy(), 1)
             direct[n + role] = array_source(
                 torch.from_numpy(np.ascontiguousarray(words.view(np.int16))).view(
                     torch.bfloat16
