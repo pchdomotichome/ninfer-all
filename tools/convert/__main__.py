@@ -21,6 +21,7 @@ from .recipe import Recipe
 from .sources.gguf import GGUFFile
 from .sources.safetensors import SafetensorsSource
 from .gguf_blocks import RECIPES as GGUF_RECIPES
+from .gguf_blocks_moe import RECIPES as GGUF_MOE_RECIPES
 from .ternary import RECIPES as TERNARY_RECIPES
 
 
@@ -89,7 +90,13 @@ def _recipe_parts(value: str):
 
 
 def _function(value: str):
-    recipes = {**RECIPES, **TERNARY_RECIPES, **GGUF_RECIPES, **QWEN4_EXP_GGUF_RECIPES}
+    recipes = {
+        **RECIPES,
+        **TERNARY_RECIPES,
+        **GGUF_RECIPES,
+        **GGUF_MOE_RECIPES,
+        **QWEN4_EXP_GGUF_RECIPES,
+    }
     if value in recipes:
         return recipes[value]
     filename, function = _recipe_parts(value)
