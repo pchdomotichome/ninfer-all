@@ -429,7 +429,16 @@ def _moe_layer(gguf: GGUFFile, g: str, p: str, experts: int) -> dict[str, tuple[
     out[p + "input_norm"] = (_norm(gguf, g + "attn_norm.weight", True), False)
     out[p + "post_attention_norm"] = (_norm(gguf, g + "post_attention_norm.weight", True), False)
     out[p + "moe/router"] = (_read_float_words(gguf, g + "ffn_gate_inp.weight"), False)
-    out[p + "moe/shared_score"] = (_read_float_words(gguf, g + "ffn_gate_inp_shexp.weight"), False)
+    # The logical parameter is (1, HIDDEN), not (HIDDEN,): the builder adds it
+    # with a leading row so the shared gate multiplies the FFN input as a matrix.
+    out[p + "moe/shared_score"] = (
+        _direct(
+            gguf.read_direct(g + "ffn_gate_inp_shexp.weight").astype(np.float32).reshape(1, HIDDEN),
+            torch.bfloat16,
+            g + "ffn_gate_inp_shexp.weight",
+        ),
+        False,
+    )
     return out
 
 
