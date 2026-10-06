@@ -4,9 +4,9 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <limits>
 #include <iterator>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -320,9 +320,19 @@ ChatTurn parse_assistant_blocks(const Json& content) {
             }
             const std::string thinking =
                 require_string(block, "thinking", "messages", "thinking block");
-            // NInfer has no encrypted reasoning state to restore. The wire signature is therefore
-            // intentionally outside the lowered request; only visible Thinking reaches the model.
-            assistant.reasoning_content += thinking;
+            // Visible Thinking text is the prompt. A block returned under display:"omitted" has
+            // empty text and carries its reasoning in an NInfer signature; any other signature is
+            // transport metadata and stays outside the lowered request.
+            std::optional<std::string> hidden;
+            if (thinking.empty() && block.contains("signature") &&
+                block.at("signature").is_string()) {
+                try {
+                    hidden = decode_thinking_signature(block.at("signature").get<std::string>());
+                } catch (const std::invalid_argument& error) {
+                    bad_request(error.what(), "messages", "invalid_thinking_signature");
+                }
+            }
+            assistant.reasoning_content += hidden ? *hidden : thinking;
         } else if (type == "redacted_thinking") {
             if (cache_boundary(block, "messages")) {
                 bad_request("cache_control is not valid on redacted_thinking blocks", "messages",
@@ -510,9 +520,13 @@ void normalize_tool_history(std::vector<ParsedMessage>& messages) {
         paired_result_turn[index + 1U] = true;
     }
 
+    // A history whose opening turn was trimmed may start with the results of calls it no longer
+    // shows. Only System messages can precede that opening User turn.
+    std::size_t opening = 0;
+    while (opening < messages.size() && messages[opening].role == ChatRole::System) { ++opening; }
     for (std::size_t index = 0; index < messages.size(); ++index) {
         if (result_counts[index] == 0 || paired_result_turn[index]) { continue; }
-        if (index == 0 && messages[index].role == ChatRole::User) { continue; }
+        if (index == opening && messages[index].role == ChatRole::User) { continue; }
         const ParsedToolResult& result =
             std::get<ParsedToolResult>(messages[index].user_blocks.front());
         invalid_tool_history("tool_result id '" + result.tool_use_id +
@@ -581,21 +595,9 @@ void parse_messages(const Json& body, GenerationRequest& request) {
         }
     }
 
-    for (std::size_t index = 0; index < roles.size();) {
-        if (roles[index] != ChatRole::System) {
-            ++index;
-            continue;
-        }
-        const std::size_t begin = index;
-        while (index < roles.size() && roles[index] == ChatRole::System) { ++index; }
-        if (begin == 0 || roles[begin - 1U] != ChatRole::User ||
-            (index < roles.size() && roles[index] != ChatRole::Assistant)) {
-            bad_request("system messages must follow a user message and be final or precede an "
-                        "assistant message",
-                        "messages", "invalid_message_order");
-        }
-    }
-
+    // A System message may sit anywhere in the history and renders as its own turn at that
+    // position, so an appended one leaves the rendered prefix intact for reuse. The one position it
+    // cannot take is between a tool_use and its tool_result; normalize_tool_history() rejects that.
     std::vector<ParsedMessage> parsed;
     parsed.reserve(messages.size());
     for (std::size_t index = 0; index < messages.size(); ++index) {
@@ -840,27 +842,21 @@ void lower_tools(const Json& body, GenerationRequest& request) {
 
     // A forced choice is executed by writing the call opener into the generation prompt, and that
     // opener carries the tool name. `any` over several tools leaves the name to the model, which
-    // is the part NInfer cannot constrain.
+    // NInfer cannot constrain, so it is advisory: the tools stay offered under automatic selection.
+    // Qwen Code sends it for every JSON side query (permission classifier, session title,
+    // next-speaker check), which a 400 would break.
     if (selection.kind == ToolSelectionKind::Named) {
         request.tool_choice.forced_name = selection.name;
-    } else if (selection.kind == ToolSelectionKind::Any) {
-        if (request.tools.size() != 1) {
-            bad_request("tool_choice.type='any' over several tools leaves the tool to the model, "
-                        "which NInfer cannot constrain; select the tool by name instead",
-                        "tool_choice", "tool_choice_not_supported");
-        }
+    } else if (selection.kind == ToolSelectionKind::Any && request.tools.size() == 1) {
         request.tool_choice.forced_name = request.tools.front().name;
     }
 
-    if (selection.disable_parallel && !request.tools.empty()) {
-        bad_request("disable_parallel_tool_use=true requires at most one tool call, which NInfer "
-                    "cannot guarantee",
-                    "tool_choice", "parallel_tool_use_not_supported");
-    }
+    // Honoured as parallel_tool_calls=false is on the OpenAI endpoints: decoding is not
+    // constrained, so the response keeps the first call and drops the rest.
+    if (selection.disable_parallel) { request.parallel_tool_calls = false; }
 }
 
-void parse_thinking(const Json& body, GenerationRequest& request, ParsePurpose purpose,
-                    int effective_max_tokens) {
+void parse_thinking(const Json& body, GenerationRequest& request) {
     if (!body.contains("thinking") || body.at("thinking").is_null()) { return; }
     const Json& thinking = body.at("thinking");
     if (!thinking.is_object() || !thinking.contains("type") || !thinking.at("type").is_string()) {
@@ -877,9 +873,10 @@ void parse_thinking(const Json& body, GenerationRequest& request, ParsePurpose p
         if (!budget || *budget < 1024) {
             bad_request("thinking.budget_tokens must be an integer of at least 1024", "thinking");
         }
-        if (purpose == ParsePurpose::Messages && *budget >= effective_max_tokens) {
-            bad_request("thinking.budget_tokens must be less than max_tokens", "thinking");
-        }
+        // Unlike the Anthropic API, a budget at or above max_tokens is accepted: the output limit
+        // is reached before the budget, so it never takes effect (effective_thinking_budget keeps
+        // it unchanged when capacity <= budget). Clients such as Qwen Code send a fixed budget
+        // while shrinking max_tokens to the context window left.
         request.thinking_budget = static_cast<std::uint32_t>(*budget);
     } else {
         bad_request("thinking.type must be 'disabled', 'adaptive', or 'enabled'", "thinking");
@@ -897,22 +894,27 @@ void parse_thinking(const Json& body, GenerationRequest& request, ParsePurpose p
             bad_request("thinking.display is valid only when thinking is adaptive or enabled",
                         "thinking");
         }
-        if (purpose == ParsePurpose::Messages && display == "omitted") {
-            bad_request("thinking.display='omitted' requires encrypted hidden-reasoning restore "
-                        "semantics that NInfer does not provide",
-                        "thinking", "thinking_display_not_supported");
-        }
     }
+}
+
+bool thinking_display_omitted(const Json& body) {
+    if (!body.contains("thinking") || !body.at("thinking").is_object()) { return false; }
+    const Json& thinking = body.at("thinking");
+    return thinking.contains("display") && thinking.at("display") == "omitted";
 }
 
 void parse_effort(const Json& body, GenerationRequest& request, ParsePurpose purpose) {
     if (!body.contains("output_config") || body.at("output_config").is_null()) { return; }
     const Json& config = body.at("output_config");
     if (!config.is_object()) { bad_request("output_config must be an object", "output_config"); }
+    // count_tokens counts the prompt only; the output format does not change it.
     if (purpose == ParsePurpose::Messages && config.contains("format") &&
         !config.at("format").is_null()) {
         request.structured_output =
             parse_structured_output(config.at("format"), false, "output_config.format");
+        // The Messages API always follows a schema strictly (declared properties only).
+        request.structured_output.strict =
+            request.structured_output.kind == StructuredOutputKind::JsonSchema;
     }
     if (!config.contains("effort") || config.at("effort").is_null()) { return; }
     if (!config.at("effort").is_string()) {
@@ -952,8 +954,11 @@ void parse_generation_fields(const Json& body, GenerationRequest& request) {
         (*request.sampling.top_p < 0.0 || *request.sampling.top_p > 1.0)) {
         bad_request("top_p must be in [0,1]", "top_p");
     }
-    if (request.sampling.top_k && (*request.sampling.top_k < 0 || *request.sampling.top_k > 20)) {
-        bad_request("top_k must be in [0,20]", "top_k");
+    if (request.sampling.top_k && *request.sampling.top_k < 0) {
+        bad_request("top_k must not be negative", "top_k");
+    }
+    if (request.sampling.top_k) {
+        request.sampling.top_k = clamp_request_top_k(*request.sampling.top_k);
     }
 }
 
@@ -989,7 +994,10 @@ void apply_anthropic_prompt_cache_policy(const Json& body, GenerationRequest& re
 
     const std::optional<CacheBoundary::Ttl> automatic_ttl = cache_boundary(body, "cache_control");
     if (!automatic_ttl) { return; }
-    request.allow_engine_automatic_shared_prefixes = false;
+    // The automatic cache_control boundary governs one marker at the end of the prompt; the
+    // Engine's discovery of repeated prefixes (published after their second sighting) stays on
+    // beside it, as on the OpenAI endpoints, so callers that send a fresh conversation per request
+    // still reuse a shared preamble.
 
     std::optional<CacheBoundary>* automatic_target = nullptr;
     for (auto turn = request.messages.rbegin(); turn != request.messages.rend(); ++turn) {
@@ -1027,12 +1035,11 @@ void apply_anthropic_prompt_cache_policy(const Json& body, GenerationRequest& re
                       .ttl      = *automatic_ttl};
 }
 
-void parse_common_prompt(const Json& body, GenerationRequest& request, ParsePurpose purpose,
-                         int effective_max_tokens) {
+void parse_common_prompt(const Json& body, GenerationRequest& request, ParsePurpose purpose) {
     lower_tools(body, request);
     parse_system(body, request);
     parse_messages(body, request);
-    parse_thinking(body, request, purpose, effective_max_tokens);
+    parse_thinking(body, request);
     parse_effort(body, request, purpose);
     apply_anthropic_prompt_cache_policy(body, request);
     if (body.contains("container") && !body.at("container").is_null()) {
@@ -1051,6 +1058,7 @@ void parse_common_prompt(const Json& body, GenerationRequest& request, ParsePurp
         }
         request.preserve_thinking = body.at("preserve_thinking").get<bool>();
     }
+    request.graft = parse_graft_field(body);
 }
 
 } // namespace
@@ -1074,11 +1082,11 @@ AnthropicMessagesRequest parse_anthropic_messages_request(const Json& body,
         if (*max_tokens < 0) { bad_request("max_tokens must be positive", "max_tokens"); }
         result.generation.max_tokens = *max_tokens;
     } else {
-        result.generation.max_tokens = limits.default_max_tokens;
+        apply_default_output_limit(result.generation, limits);
     }
 
-    parse_common_prompt(body, result.generation, ParsePurpose::Messages,
-                        result.generation.max_tokens);
+    parse_common_prompt(body, result.generation, ParsePurpose::Messages);
+    result.hide_thinking = thinking_display_omitted(body);
     parse_generation_fields(body, result.generation);
     return result;
 }
@@ -1088,8 +1096,7 @@ AnthropicCountTokensRequest parse_anthropic_count_tokens_request(const Json& bod
     AnthropicCountTokensRequest result;
     result.model                           = parse_model(body);
     result.generation.tool_name_max_length = kMaxToolNameLength;
-    parse_common_prompt(body, result.generation, ParsePurpose::CountTokens,
-                        std::numeric_limits<int>::max());
+    parse_common_prompt(body, result.generation, ParsePurpose::CountTokens);
     return result;
 }
 

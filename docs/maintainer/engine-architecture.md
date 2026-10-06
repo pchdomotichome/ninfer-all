@@ -121,6 +121,15 @@ Frontend 拥有模型家族的输入与输出语义：
 Frontend 可以预览一次模型输出将产生的语义效果，但只有 Engine 完成提交后才能发布该效果。
 Frontend 不拥有等待队列、cache catalog 或物理模型状态。
 
+结构化输出（`OutputOptions::format`，JSON object/schema）同样属于 Frontend：它在提交线程上用模型
+tokenizer 编译语法（XGrammar，按语法文本缓存），`OutputSession` 持有随 preview/commit 推进的 matcher，
+并以 `runtime::TokenMaskSource` 的形式暴露给 Program。Engine 在每次 `decode`/`advance_prefill`
+调用中按行借出这些 source；Program 在每个采样决策前向其索取 mask（投机轮按每个验证列、以该列之前的
+draft 为前缀计算），经 `SamplingConfig::token_mask` 交给采样 Op。Program 只读取 mask，不推进 matcher
+状态；因此 preview 永远不会看到语法外的 token，第 6.2 节的 accepted-prefix 规则不变。DFlash/DFlash2
+在轮内产生 draft，其 round 分为 proposal、target verify、accept 三段 CUDA Graph，受约束的轮在后两段
+之间读取 draft 并上传 mask。
+
 ### 2.3 Engine
 
 Engine 是请求控制平面，拥有：
@@ -222,6 +231,15 @@ Frontend 和 Parameters，最后释放 Model backing。Reader 与上传 staging 
 
 权重、State/KV backing、block-table matrices、workspace 与 CUDA Graph resources 在 Engine 开始接受请求前
 建立。运行期改变 ownership、mapping、frontier 与 replica placement，但不重建这些大块 Device allocations。
+
+启用模型挂起（`EngineOptions::suspend`）时，这些 Device allocations 位于固定虚拟地址（`core/vmm.h` 的
+`VmmRegion` 与两个 eviction pool），物理内存可以释放与重建而地址不变，因此 Parameters、Program 的
+tensor 视图与已捕获的 CUDA Graph 保持有效。挂起只在 Engine 空闲时进行：Program 把各 rank persistent
+arena 中除空闲 KV 页之外的字节复制到 host（`DeviceSnapshot`），然后释放 persistent、workspace 与权重的
+物理内存；恢复时在原地址重新映射，从 artifact（materializer 保留 Reader 与 device placement，按加载
+时的 direct-I/O 路径重新上传）或 host 副本恢复权重，再写回 persistent 字节。workspace 在请求之间不承载
+状态，恢复后直接使用新的物理内存。ModelInstance 编排两者的顺序与失败回滚；EngineCore 持有挂起状态、
+snapshot 和自动恢复策略，worker 在挂起期间不执行任何单元。
 
 ### 3.5 固定执行与原生参数
 
@@ -436,6 +454,11 @@ Engine 对每行输出进行 Frontend preview，形成 accepted-prefix decision�
 `Program::commit` 或 `Program::abort_pending` 消费整个 batch。Program 同时提交或回滚该 prefix
 对应的 Main/backend KV、recurrent state、RNG 和 speculative state。
 
+投机轮的 recurrent fold 在 commit 中入队到 Program stream 后即返回，不等待设备完成：之后读写该 state
+的 decode、capture、transfer 与 prefill 都在同一 stream 上排在它之后，host 不读取 fold 的结果。只有
+terminal DFlash 行经 pinned ingress 追加 context 时才在 commit 内同步，因为下一轮提交会改写该 ingress。
+fold 的设备错误在下一次同步时作为执行失败报告。
+
 非取消行遵循：
 
 ```text
@@ -522,6 +545,18 @@ Cancellation 不修改 in-flight mapping，也不从未完成的 active state �
 Cleanup 顺序必须先终止 Program 中未决的 resource/model transaction，再释放 active state，最后清空
 ResourceManager 与完成所有 request response。内部不变量错误不能降级成 cache miss、等待或重试。
 
+Worker 捕获的 host 侧异常（CUDA 错误直接终止进程，不会到达这里）先同步 device（恢复与锁存都会释放
+物理状态，二者都必须先等待已发出的工作），再尝试恢复而不是永久锁存：执行同样的 Program cleanup 与
+ResourceManager 清空，以错误完成 active lanes 与 materializing request，保留尚未触及物理状态的 FIFO
+队列。只有 cleanup 后 Program 没有打开的 transaction、`physical_usage()` 的 Device/Host State 与 KV
+占用全部为零时才继续服务；否则，或第三次连续失败（其间没有未取消的请求发布成功结果）时，才锁存为
+Engine-wide failure，`is_available()` 此后为 false。
+恢复清空整个 context cache 而不是把不变量错误解释成 cache miss；启动时 pinned 的 prompt graft 随之
+释放，因此在确认物理占用为零之后按启动时的同一路径重新注入并登记为 external shared prefix，失败则锁存；`RuntimeStats::engine_recoveries`
+计数每次恢复。修复后的缺陷不再能从公开 API 触发，因此 `runtime/engine/worker_fault.h` 提供验证
+接缝：`arm_worker_failures(N)` 让随后 N 个 prefill unit 在 Program 执行后抛出，使恢复必须释放持有
+live KV 与 State 的 lane；未启用时每个 prefill unit 只多一次 relaxed atomic load。
+
 ---
 
 ## 8. 物理执行的顶层约束
@@ -539,7 +574,10 @@ ResourceManager 与完成所有 request response。内部不变量错误不能�
   KV plane、GDN state、replay records 和 workspace，位于各自设备上；仍然是一个 Program、一个 KV page
   allocator（每个 plane 绑定一个 rank）、一个 Scheduler 和一个 commit 序列。embedding、head、round state、
   sampling 和 MTP 留在 rank 0，residual 经 `StageLink` 逐 stage 传递并由最后一个 stage 送回。KV 容量取各设备
-  可承载页数的最小值。设计与限制见 [pipeline-parallel-plan.md](pipeline-parallel-plan.md)。
+  可承载页数的最小值。产物为许多 Use 只存一份的 auxiliary（输入列 gather、Hadamard 符号向量）只物化在
+  rank 0；Model 为每个读取它的其他 rank 保留一份副本（`AuxiliaryReplicas`，两个模型族共用），Use 读取
+  权重所在设备上的那一份，因此没有 P2P 的设备之间也不会跨卡访存。设计与限制见
+  [pipeline-parallel-plan.md](pipeline-parallel-plan.md)。
 
 容量查询消费与执行同源的逐层参数和 Use。Allocation scope 同时用于布局计算与实际执行；
 顺序互斥的 scratch 取峰值，跨阶段仍活跃的数据计入完整存活期。Vision handoff 保留至 Text
@@ -644,6 +682,11 @@ captures D2H draft transfer, a CUDA host function that fills all reachable prefi
 transfer, then target verification. The host function calls no CUDA API; it captures exceptions
 for rethrow after stream synchronization and before any token can be published. All node addresses
 belong to Program and outlive graph replay.
+
+Draft frames are compact at each round's actual proposal width, which may be narrower than the
+maximum ngram/copy window. D2H staging must preserve the fixed host-row pitch used by the grammar
+callback; a contiguous whole-frame copy cannot substitute for row-strided transfer. Graph replay
+must retain this mapping for every compact row, independently of its physical lane.
 
 SamplingConfig carries an optional bitset pointer and column stride. Column i describes the
 grammar after drafts[0..i). The mask is applied before penalties and sampling filters. After an

@@ -43,6 +43,14 @@ inline constexpr std::size_t kMatrixActivationSlack = 128 * sizeof(block_q8_1_mm
 template <ggml_type type>
 std::size_t matrix_fixup_bytes_impl(int rows, int columns);
 
+template <ggml_type type>
+bool moe_matrix_fits_impl(int rows, int k, bool tail);
+
+template <ggml_type type>
+void moe_matrix_product_impl(const void* const* experts, std::int64_t row_bytes, int rows, int k,
+                             const MoeRouting& routing, int max_active, int pairs, int max_columns,
+                             bool tail, const void* activation, float* out, cudaStream_t stream);
+
 // Where and how the vector kernel (ggml_bridge_vec.cuh) writes its rows.
 struct VecStore {
     __nv_bfloat16* bf16;
@@ -62,6 +70,31 @@ struct VecArgs {
     const half2* ds;       // [columns][k / 32]
     VecStore out;
 };
+
+// The vector kernel's MoE form (ggml_bridge_vec.cuh moe_kernel).
+struct MoeVecArgs {
+    const std::uint8_t* const* first;  // expert table (the gate table when fused)
+    const std::uint8_t* const* second; // fused: the up table
+    std::int64_t row_bytes;
+    int rows;
+    int k;
+    const std::int32_t* bounds;
+    const std::int32_t* sorted;
+    const std::int32_t* active;
+    const std::int32_t* active_count;
+    int column_group;
+    int per_token;
+    const std::int8_t* qs; // [columns][k]
+    const half2* ds;       // [columns][k / 32]
+    __nv_bfloat16* out_bf16;
+    float* out_f32;
+    unsigned long long* weighted;
+    const float* weights;
+    const float* gate;
+};
+
+template <ggml_type type>
+void moe_launch(const MoeVecArgs& args, int max_active, int chunk, bool fused, cudaStream_t stream);
 
 // Byte offset of the scales inside a planar vector activation of `columns` x `k`.
 [[nodiscard]] constexpr std::size_t vec_scales_offset(int k, int columns) {

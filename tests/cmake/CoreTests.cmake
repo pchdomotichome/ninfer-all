@@ -2,6 +2,9 @@
 # include root. It proves that the public product headers stand alone.
 add_executable(ninfer_public_api_test "${CMAKE_CURRENT_LIST_DIR}/../test_public_api.cpp")
 target_include_directories(ninfer_public_api_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
+# It links the public Engine, as a consumer does, for the out-of-line definitions the options
+# own (PrefixCacheSaveControl).
+target_link_libraries(ninfer_public_api_test PRIVATE ninfer::engine)
 add_test(NAME ninfer_public_api_test COMMAND ninfer_public_api_test)
 
 ninfer_add_test(ninfer_wide_math_test
@@ -39,9 +42,14 @@ ninfer_add_test(ninfer_evictable_weight_pool_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_evictable_weight_pool.cu"
   LIBRARIES ninfer_core)
 
+ninfer_add_test(ninfer_suspend_memory_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_suspend_memory.cu"
+  LIBRARIES ninfer_core CUDA::cuda_driver)
+
 set_tests_properties(
   ninfer_arena_ranks_test
   ninfer_device_buffer_visibility_test
+  ninfer_suspend_memory_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
 ninfer_add_test(ninfer_disk_kv_store_test
@@ -50,10 +58,6 @@ ninfer_add_test(ninfer_disk_kv_store_test
 
 ninfer_add_test(ninfer_disk_kv_bridge_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_disk_kv_bridge.cpp"
-  LIBRARIES ninfer_core)
-
-ninfer_add_test(ninfer_token_logprobs_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_token_logprobs.cpp"
   LIBRARIES ninfer_core)
 
 ninfer_add_test(ninfer_device_test       SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_device.cpp"
@@ -69,13 +73,19 @@ foreach(mode flags IN ZIP_LISTS sync_modes sync_flags)
   set_tests_properties(ninfer_device_sync_${mode}_test PROPERTIES
     ENVIRONMENT "NINFER_CUDA_SYNC=${mode}" SKIP_RETURN_CODE 77)
 endforeach()
-foreach(mode IN ITEMS invalid empty)
-  add_test(NAME ninfer_device_sync_${mode}_test COMMAND ${device_test_command} --invalid-sync)
-endforeach()
+add_test(NAME ninfer_device_sync_invalid_test COMMAND ${device_test_command} --invalid-sync)
 set_tests_properties(ninfer_device_sync_invalid_test PROPERTIES
   ENVIRONMENT "NINFER_CUDA_SYNC=invalid")
-set_tests_properties(ninfer_device_sync_empty_test PROPERTIES
-  ENVIRONMENT "NINFER_CUDA_SYNC=")
+
+# A present-but-empty NINFER_CUDA_SYNC is only reachable through CTest's ENVIRONMENT property on
+# POSIX. On Windows, CTest sets test-process environment variables the way `_putenv` /
+# SetEnvironmentVariable does: an empty value deletes the variable, so the child sees it unset
+# rather than empty-and-invalid. There is no Windows-side way to express "set to empty" here.
+if(NOT WIN32)
+  add_test(NAME ninfer_device_sync_empty_test COMMAND ${device_test_command} --invalid-sync)
+  set_tests_properties(ninfer_device_sync_empty_test PROPERTIES
+    ENVIRONMENT "NINFER_CUDA_SYNC=")
+endif()
 
 ninfer_add_test(ninfer_decode_graph_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_graph.cpp"
   LIBRARIES ninfer_core)
@@ -127,4 +137,28 @@ add_test(NAME ninfer_chat_templates_test
 
 ninfer_add_test(ninfer_structured_output_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../text/test_structured_output.cpp"
+  LIBRARIES ninfer_text ninfer::json)
+
+ninfer_add_test(ninfer_unicode_scalar_output_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../text/test_unicode_scalar_output.cpp"
+  LIBRARIES ninfer_text ninfer::json)
+
+add_executable(ninfer_native_schema_probe "${CMAKE_CURRENT_LIST_DIR}/../text/native_schema_probe.cpp")
+target_link_libraries(ninfer_native_schema_probe PRIVATE ninfer_text ninfer::json)
+ninfer_test_includes(ninfer_native_schema_probe)
+
+add_executable(ninfer_schema_normalization_probe "${CMAKE_CURRENT_LIST_DIR}/../text/schema_normalization_probe.cpp")
+ninfer_test_includes(ninfer_schema_normalization_probe)
+target_link_libraries(ninfer_schema_normalization_probe PRIVATE ninfer_text ninfer::json)
+
+ninfer_add_test(ninfer_unique_strings_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../text/test_unique_strings.cpp"
+  LIBRARIES ninfer_text ninfer::json)
+
+ninfer_add_test(ninfer_structured_unique_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../text/test_structured_unique.cpp"
+  LIBRARIES ninfer_text ninfer::json)
+
+ninfer_add_test(ninfer_unique_strings_masks_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../text/test_unique_strings_masks.cpp"
   LIBRARIES ninfer_text ninfer::json)

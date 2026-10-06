@@ -244,31 +244,12 @@ class GGUFFile:
             )
         return self._map[start:stop]
 
-    @staticmethod
-    def _block_rows_and_columns(info: TensorInfo) -> tuple[int, int]:
-        """The block matrix a tensor exposes to row access, for any rank.
-
-        ggml stores ``ne[0]`` as the contiguous axis and quantizes along it, and
-        :attr:`TensorInfo.shape` is ``ne`` reversed, so the block axis is
-        ``shape[-1]``. Everything before it is rows: a rank-3 routed-expert
-        tensor like ``ffn_up_exps`` is ``ne = (2048, 512, 256)`` -- hidden,
-        intermediate, expert -- and reports ``shape == (256, 512, 2048)``. Its
-        block matrix is 131072 rows of 2048, not 256 rows: taking ``shape[0]``
-        as the row count, as this used to, puts every row range outside the
-        tensor as soon as the expert axis is present.
-
-        For a rank-2 tensor this is exactly ``shape``, so nothing changes for
-        the dense models the row sources were written against.
-        """
-        if not info.shape:
-            raise ValueError(f"{info.name}: row access needs a shaped tensor")
-        columns = info.shape[-1]
-        if columns <= 0:
-            raise ValueError(f"{info.name}: {columns} columns is not a block axis")
-        return info.elements // columns, columns
-
     def _row_bytes(self, info: TensorInfo) -> int:
-        _, columns = self._block_rows_and_columns(info)
+        if len(info.shape) < 2:
+            raise ValueError(
+                f"{info.name}: row access requires rank 2 or more, got {info.shape}"
+            )
+        columns = info.shape[-1]
         block_elements, block_bytes = BLOCK_GEOMETRY[info.type_id]
         if columns % block_elements:
             raise ValueError(f"{info.name}: {columns} columns are not whole blocks")
@@ -301,12 +282,16 @@ class GGUFFile:
     def read_blocks(
         self, name: str, row_begin: int = 0, row_end: int | None = None
     ) -> np.ndarray:
-        """Rows ``[row_begin, row_end)`` of a ggml block matrix as ``uint8 [rows, row_bytes]``."""
+        """Rows ``[row_begin, row_end)`` of a ggml block matrix as ``uint8 [rows, row_bytes]``.
+
+        A stack of matrices (an expert bank ``[experts, rows, k]``) is addressed by its flattened
+        rows, matrix-major, as the file stores them.
+        """
 
         info = self.info(name)
         if info.type_id not in BLOCK_FORMATS:
             raise ValueError(f"{name}: {info.type_name} is not a stored block format")
-        rows, _ = self._block_rows_and_columns(info)
+        rows = prod(info.shape[:-1])
         end = rows if row_end is None else row_end
         if not 0 <= row_begin <= end <= rows:
             raise ValueError(f"{name}: row range [{row_begin},{end}) is outside {rows}")

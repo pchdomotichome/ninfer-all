@@ -13,7 +13,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -43,14 +42,12 @@ private:
     ApiError error_;
 };
 
-// An output limit that only the context bounds: the Engine clamps every request to its capacity.
-inline constexpr int kUnboundedOutputTokens = std::numeric_limits<int>::max();
-
 // Server-side context needed while parsing/validating a request.
 struct RequestLimits {
-    int default_max_tokens = 8192;
-    // Accept top_logprobs for the first generated token (--first-token-logprobs).
-    bool first_token_logprobs = false;
+    // --default-max-tokens: the fixed budget of a request that omits its limit. Unset, such a
+    // request receives the Engine's concurrent lane budget once its prompt is prepared.
+    std::optional<int> default_max_tokens;
+    int max_context = 8192; // --max-context, the upper bound of any derived budget
     // Continue a trailing Chat Completions assistant message in place (--assistant-prefill).
     bool assistant_prefill = false;
     // Responses input: assistant message content or reasoning after function_call Items joins
@@ -192,9 +189,33 @@ requested_reasoning_effort_name(RequestedReasoningEffort effort) noexcept {
 // bounding prompt rendering and the streaming parser.
 inline constexpr std::size_t kMaximumToolNameLength = 256;
 
+// The sampler's candidate domain: each block reduces its vocabulary tile to 20 candidates
+// (kSamplerFastCandidates), and the runtime contract accepts top_k in [1,20]. A request top_k above
+// it is clamped rather than refused: llama.cpp and Ollama default to 40 (Strata caps at 64), and
+// with top_p or min_p active over the full vocabulary the nucleus almost always closes inside 20
+// candidates, so the wider value selects the same token nearly always. The effective value is what
+// reaches the Engine and the request log. Negative values stay errors.
+inline constexpr int kSamplerTopKCap = 20;
+
+[[nodiscard]] constexpr int clamp_request_top_k(int top_k) noexcept {
+    return top_k > kSamplerTopKCap ? kSamplerTopKCap : top_k;
+}
+
+// One piece of a raw prompt: text the artifact's tokenizer encodes, or a token id used as it is.
+struct RawPromptPiece {
+    std::string text;
+    std::optional<ninfer::TokenId> token;
+};
+
 struct GenerationRequest {
     NgramSessionHints ngram_session;
     std::vector<ChatTurn> messages;
+    // A raw prompt (llama.cpp's /completion, OpenAI's legacy /v1/completions) instead of messages:
+    // generation continues it directly, with no chat template and no reasoning block.
+    std::optional<std::vector<RawPromptPiece>> raw_prompt;
+    // llama.cpp's cache_prompt: false keeps the request out of the context cache, neither reusing
+    // a cached prefix nor retaining its own.
+    bool cache_prompt = true;
     std::vector<ToolDefinition> tools;
     std::size_t tool_name_max_length = kMaximumToolNameLength;
     ToolChoice tool_choice;
@@ -205,11 +226,17 @@ struct GenerationRequest {
     // Caller-supplied stop tokens and stop strings still apply.
     bool ignore_eos = false;
     int max_tokens                       = 0; // resolved budget; zero means immediate output limit
+    // The request omitted its limit and the server has no fixed default: GenerationService replaces
+    // max_tokens (then the --max-context upper bound) with Engine::concurrent_output_budget().
+    bool derive_output_budget = false;
     std::optional<bool> enable_thinking;      // unset => use the server default
     std::optional<std::uint32_t> thinking_budget;
     std::optional<RequestedReasoningEffort> reasoning_effort;
     std::optional<bool> preserve_thinking;
     std::string chat_template_kwargs_json;
+    // NInfer extension: name of a phantom-kv graft loaded with --graft. Unset => use the server's
+    // --default-graft (if any); an empty name explicitly selects no graft.
+    std::optional<std::string> graft;
     ninfer::PromptContinuationMode continuation = ninfer::PromptContinuationMode::NewAssistantTurn;
     bool private_cache_boundary_at_prompt_end   = false;
     bool allow_engine_automatic_shared_prefixes = true;
@@ -221,8 +248,15 @@ struct GenerationRequest {
     // Sampling from the token after the reasoning block closes (a `post_thinking` object).
     std::optional<SamplingParams> post_thinking;
     StructuredOutputOptions structured_output;
-    // Log probabilities of the first generated token with this many alternatives; zero is off.
-    std::uint32_t first_token_top_logprobs = 0;
+    // Each generated content token's log probability, with `top_logprobs` (0 to
+    // kMaximumTokenLogprobs) of its most likely alternatives in the response.
+    bool logprobs    = false;
+    int top_logprobs = 0;
+
+    // The alternatives each reported token carries, absent unless the request asked for logprobs.
+    [[nodiscard]] std::optional<int> reported_top_logprobs() const noexcept {
+        return logprobs ? std::optional<int>(top_logprobs) : std::nullopt;
+    }
 
     [[nodiscard]] bool uses_tools() const noexcept {
         return !tools.empty() && tool_choice.mode != ToolChoiceMode::None;
@@ -245,5 +279,11 @@ struct GenerationRequest {
         return false;
     }
 };
+
+// The output limit of a request that omitted one.
+inline void apply_default_output_limit(GenerationRequest& request, const RequestLimits& limits) {
+    request.derive_output_budget = !limits.default_max_tokens.has_value();
+    request.max_tokens           = limits.default_max_tokens.value_or(limits.max_context);
+}
 
 } // namespace ninfer::serve

@@ -9,6 +9,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -128,11 +129,23 @@ int test_envelope_and_field_policy() {
     body["temperature"] = 1.01;
     failures += check(api_param([&] { (void)parse(body); }) == "temperature",
                       "Anthropic temperature range was not enforced");
+    // top_k above the sampler's 20-candidate domain is clamped, not refused: llama.cpp and Ollama
+    // default to 40. Negative values are still an error.
+    for (const auto& [requested, effective] : {std::pair{40, 20}, std::pair{20, 20}}) {
+        body          = base_request();
+        body["top_k"] = requested;
+        failures += check(parse(body).generation.sampling.top_k == effective,
+                          "top_k above the candidate domain was not clamped to 20");
+    }
     body          = base_request();
-    body["top_k"] = 21;
+    body["top_k"] = -1;
     failures += check(api_param([&] { (void)parse(body); }) == "top_k",
-                      "Engine top_k range was not enforced");
+                      "negative top_k was accepted");
     body                  = base_request();
+    body["post_thinking"] = Json{{"top_k", 64}};
+    failures += check(parse(body).generation.post_thinking->top_k == 20,
+                      "post_thinking top_k above the candidate domain was not clamped to 20");
+    body                     = base_request();
     body["post_thinking"]    = Json{{"temperature", 0.2}, {"top_p", 0.9}};
     const auto post_thinking = parse(body).generation.post_thinking;
     failures += check(post_thinking && post_thinking->temperature == 0.2 &&
@@ -145,8 +158,9 @@ int test_envelope_and_field_policy() {
     body["output_config"] =
         Json{{"format", Json{{"type", "json_schema"}, {"schema", Json{{"type", "object"}}}}}};
     failures += check(parse(body).generation.structured_output.kind ==
-                          ninfer::StructuredOutputKind::JsonSchema,
-                      "Anthropic schema retained");
+                              ninfer::StructuredOutputKind::JsonSchema &&
+                          parse(body).generation.structured_output.strict,
+                      "Anthropic schema retained and always strict");
     body["output_config"] = Json{{"format", Json{{"type", "json_schema"}}}};
     failures += check(api_code([&] { (void)parse(body); }) == "invalid_response_format",
                       "structured output was silently downgraded");
@@ -279,6 +293,94 @@ Json tool_result(std::string id, std::string content, bool is_error = false) {
                 {"tool_use_id", std::move(id)},
                 {"content", std::move(content)},
                 {"is_error", is_error}};
+}
+
+Json message(const char* role, Json content) {
+    return Json{{"role", role}, {"content", std::move(content)}};
+}
+
+std::vector<ninfer::ChatRole> roles_of(const GenerationRequest& request) {
+    std::vector<ninfer::ChatRole> roles;
+    for (const ChatTurn& turn : request.messages) { roles.push_back(turn.role); }
+    return roles;
+}
+
+int test_system_message_positions() {
+    using ninfer::ChatRole;
+    int failures = 0;
+
+    // Shapes that used to be rejected: each System message now renders in place.
+    Json body        = base_request();
+    body["messages"] = Json::array(
+        {message("user", "a"), message("system", "between users"), message("user", "b")});
+    GenerationRequest request = parse(body).generation;
+    failures += check(roles_of(request) == std::vector<ChatRole>{ChatRole::User, ChatRole::System,
+                                                                  ChatRole::User} &&
+                          request.messages[1].content[0].text == "between users" &&
+                          request.messages[2].content[0].text == "b",
+                      "a System message between two User messages was not kept in place");
+    failures += check(prompt(request).messages.size() == 3,
+                      "a System message between User messages did not translate");
+
+    body["messages"] = Json::array(
+        {message("user", "q"), message("assistant", "a"), message("system", "reminder")});
+    request = parse(body).generation;
+    failures += check(roles_of(request) == std::vector<ChatRole>{ChatRole::User,
+                                                                  ChatRole::Assistant,
+                                                                  ChatRole::System} &&
+                          request.continuation == ninfer::PromptContinuationMode::NewAssistantTurn,
+                      "a final System message after an Assistant turn was not kept in place");
+
+    body["messages"] = Json::array({message("user", "q"), message("assistant", "a"),
+                                    message("system", "reminder"), message("user", "next")});
+    request          = parse(body).generation;
+    failures += check(roles_of(request) == std::vector<ChatRole>{ChatRole::User,
+                                                                  ChatRole::Assistant,
+                                                                  ChatRole::System, ChatRole::User},
+                      "a System message between Assistant and User turns was not kept in place");
+
+    body["system"]   = "top level";
+    body["messages"] = Json::array({message("system", "leading"), message("user", "q")});
+    request          = parse(body).generation;
+    failures += check(roles_of(request) == std::vector<ChatRole>{ChatRole::System,
+                                                                  ChatRole::System, ChatRole::User} &&
+                          request.messages[0].content[0].text == "top level" &&
+                          request.messages[1].content[0].text == "leading",
+                      "a leading in-array System message did not follow the top-level system text");
+    body.erase("system");
+
+    // Appending a turn after a trailing reminder only extends the history, so the earlier
+    // request's turns stay an exact prefix and remain reusable.
+    Json first        = base_request();
+    first["messages"] = Json::array(
+        {message("user", "q"), message("assistant", "a"), message("system", "reminder 1")});
+    Json second = first;
+    second["messages"].push_back(message("user", "follow-up"));
+    const GenerationRequest before = parse(first).generation;
+    const GenerationRequest after  = parse(second).generation;
+    bool prefix                    = after.messages.size() == before.messages.size() + 1U;
+    for (std::size_t index = 0; prefix && index < before.messages.size(); ++index) {
+        prefix = before.messages[index].role == after.messages[index].role &&
+                 before.messages[index].content[0].text == after.messages[index].content[0].text;
+    }
+    failures += check(prefix, "appending after a System reminder rewrote the earlier history");
+
+    // A System message still cannot separate a tool_use from its tool_result.
+    body["messages"] =
+        Json::array({message("user", "q"), message("assistant", Json::array({tool_use("toolu_a")})),
+                     message("system", "interrupting"),
+                     message("user", Json::array({tool_result("toolu_a", "result")}))});
+    failures += check(api_code([&] { (void)parse(body); }) == "invalid_tool_history",
+                      "a System message between tool_use and tool_result was accepted");
+
+    // A trimmed history may still open with orphan tool results after leading System messages.
+    body["messages"] =
+        Json::array({message("system", "leading"),
+                     message("user", Json::array({tool_result("toolu_gone", "result")})),
+                     message("user", "continue")});
+    failures += check(api_code([&] { (void)parse(body); }).empty(),
+                      "orphan opening tool results after a leading System message were rejected");
+    return failures;
 }
 
 int test_tool_history() {
@@ -420,13 +522,34 @@ int test_tools() {
     Json two_tools      = ordinary_tool();
     two_tools["name"]   = "search";
     body["tools"]       = Json::array({ordinary_tool(), two_tools});
+    // any over several tools is advisory: Qwen Code sends it for its JSON side queries, and the
+    // tools stay offered under automatic selection.
+    body["tool_choice"]              = Json{{"type", "any"}};
+    const GenerationRequest advisory = parse(body).generation;
+    failures += check(advisory.uses_tools() && advisory.tool_choice.mode == ToolChoiceMode::Auto &&
+                          advisory.tool_choice.forced_name.empty() &&
+                          prompt(advisory).options.tool_jsons.size() == 2,
+                      "any over several tools was rejected or did not keep the tools offered");
+    body          = base_request();
     body["tool_choice"] = Json{{"type", "any"}};
-    failures += check(api_code([&] { (void)parse(body); }) == "tool_choice_not_supported",
-                      "any over several tools stays rejected");
-    body["tools"]       = Json::array({ordinary_tool()});
-    body["tool_choice"] = Json{{"type", "auto"}, {"disable_parallel_tool_use", true}};
-    failures += check(api_code([&] { (void)parse(body); }) == "parallel_tool_use_not_supported",
-                      "active single-tool-call guarantee was silently downgraded");
+    failures += check(api_param([&] { (void)parse(body); }) == "tool_choice",
+                      "tool_choice any without tools was accepted");
+    // disable_parallel_tool_use is honoured as parallel_tool_calls=false: the response keeps the
+    // first call. It is still type-checked.
+    body["tools"] = Json::array({ordinary_tool()});
+    for (const Json& choice : {Json{{"type", "auto"}, {"disable_parallel_tool_use", true}},
+                               Json{{"type", "any"}, {"disable_parallel_tool_use", true}}}) {
+        body["tool_choice"]            = choice;
+        const GenerationRequest single = parse(body).generation;
+        failures += check(single.uses_tools() && !single.parallel_tool_calls,
+                          "disable_parallel_tool_use did not limit the response to one call");
+    }
+    body["tool_choice"] = Json{{"type", "auto"}, {"disable_parallel_tool_use", false}};
+    failures += check(parse(body).generation.parallel_tool_calls,
+                      "disable_parallel_tool_use=false limited the response to one call");
+    body["tool_choice"] = Json{{"type", "auto"}, {"disable_parallel_tool_use", "yes"}};
+    failures += check(!api_param([&] { (void)parse(body); }).empty(),
+                      "a non-boolean disable_parallel_tool_use was accepted");
 
     body          = base_request();
     body["tools"] = Json::array({Json{{"type", "web_search_20250305"}, {"name", "web_search"}}});
@@ -492,15 +615,35 @@ int test_thinking_and_count_tokens() {
                              options.execution.thinking.budget == 1024,
                          "request Thinking budget did not reach Engine options");
 
-    body["thinking"]["budget_tokens"] = 4096;
+    // A budget at or above max_tokens is accepted and passed on; the output limit ends thinking
+    // first. Qwen Code sends a fixed budget while shrinking max_tokens to the context left.
+    for (const int budget : {4096, 128000}) {
+        body["thinking"]["budget_tokens"] = budget;
+        const GenerationRequest over      = parse(body).generation;
+        failures += check(over.enable_thinking == true && over.max_tokens == 4096 &&
+                              over.thinking_budget == static_cast<std::uint32_t>(budget),
+                          "Thinking budget at or above max_tokens was rejected or altered");
+    }
+    body["thinking"]["budget_tokens"] = 1023;
     failures += check(api_param([&] { (void)parse(body); }) == "thinking",
-                      "Thinking budget equal to max_tokens was accepted");
+                      "Thinking budget below 1024 was accepted");
     body["thinking"] = Json{{"type", "future"}};
     failures += check(api_param([&] { (void)parse(body); }) == "thinking",
                       "unknown Thinking mode defaulted to enabled");
     body["thinking"] = Json{{"type", "adaptive"}, {"display", "omitted"}};
-    failures += check(api_code([&] { (void)parse(body); }) == "thinking_display_not_supported",
-                      "hidden Thinking was accepted without restore semantics");
+    const AnthropicMessagesRequest hidden = parse(body);
+    failures += check(hidden.hide_thinking && hidden.generation.enable_thinking == true &&
+                          !parse(base_request()).hide_thinking,
+                      "display:omitted was not parsed as hidden adaptive Thinking");
+    body["thinking"] = Json{{"type", "adaptive"}, {"display", "summarized"}};
+    failures += check(!parse(body).hide_thinking, "display:summarized hid the Thinking text");
+    body["thinking"] = Json{{"type", "adaptive"}, {"display", "future"}};
+    failures += check(api_param([&] { (void)parse(body); }) == "thinking",
+                      "unknown Thinking display was accepted");
+    body["thinking"] = Json{{"type", "disabled"}, {"display", "omitted"}};
+    failures += check(api_param([&] { (void)parse(body); }) == "thinking",
+                      "display was accepted with disabled Thinking");
+    body["thinking"] = Json{{"type", "adaptive"}, {"display", "omitted"}};
 
     body["max_tokens"]                        = 0;
     body["temperature"]                       = "ignored for counting";
@@ -594,6 +737,9 @@ int test_content_and_cache_hints() {
                           translated.context_cache.markers[1].location ==
                               ninfer::PromptCacheMarkerLocation::MessagePartBoundary,
                       "message-part cache boundary was not represented in PromptInput");
+    failures += check(request.allow_engine_automatic_shared_prefixes &&
+                          translated.context_cache.allow_engine_automatic_shared_prefixes,
+                      "automatic cache_control turned off Engine prefix discovery");
 
     body                           = base_request();
     body["messages"][0]["content"] = Json::array(
@@ -791,13 +937,134 @@ int test_stream() {
     return failures;
 }
 
+int test_graft_extension() {
+    Json body     = base_request();
+    body["graft"] = "product";
+    int failures  = check(parse(body).generation.graft == "product",
+                          "Messages graft name was not parsed");
+    body["graft"] = "";
+    failures += check(parse(body).generation.graft == "",
+                      "empty Messages graft did not explicitly select none");
+    body["graft"] = nullptr;
+    failures += check(!parse(body).generation.graft, "null Messages graft was not left unset");
+    body["graft"] = Json::array();
+    failures += check(api_param([&] { (void)parse(body); }) == "graft",
+                      "non-string Messages graft was accepted");
+    return failures;
+}
+
+// Every remainder class of the Base64 codec, plus multi-byte UTF-8 and control bytes.
+int test_hidden_reasoning_signature() {
+    int failures = 0;
+    for (const std::string reasoning :
+         {std::string(), std::string("a"), std::string("ab"), std::string("abc"),
+          std::string("abcd"),
+          std::string("na\xC3\xAFve \xE2\x80\x94 \xE6\x80\x9D\xE8\x80\x83\n\t\"quoted\"") +
+              std::string(1, '\0') + "nul"}) {
+        const std::string signature = encode_thinking_signature(reasoning);
+        failures += check(decode_thinking_signature(signature) == reasoning,
+                          "hidden-reasoning signature did not round-trip");
+    }
+    // RFC 4648 test vectors pin the alphabet and padding independently of the decoder.
+    failures += check(encode_thinking_signature("foobar") == "ninfer-reasoning.v1:Zm9vYmFy" &&
+                          encode_thinking_signature("fooba") == "ninfer-reasoning.v1:Zm9vYmE=" &&
+                          encode_thinking_signature("foob") == "ninfer-reasoning.v1:Zm9vYg==",
+                      "hidden-reasoning signature is not standard Base64");
+    failures +=
+        check(!decode_thinking_signature("msg_0123456789abcdef") &&
+                  !decode_thinking_signature("") && !decode_thinking_signature("EuYBCkQIARgCKkD"),
+              "a foreign signature was interpreted as hidden reasoning");
+    for (const char* malformed :
+         {"ninfer-reasoning.v1:Zm9", "ninfer-reasoning.v1:Zm9v!mFy", "ninfer-reasoning.v1:Zg=A",
+          "ninfer-reasoning.v1:=m9v", "ninfer-reasoning.v1:Zm9vYg==Zm9v"}) {
+        bool threw = false;
+        try {
+            (void)decode_thinking_signature(malformed);
+        } catch (const std::invalid_argument&) { threw = true; }
+        failures += check(threw, std::string("malformed signature was accepted: ") + malformed);
+    }
+    return failures;
+}
+
+int test_hidden_reasoning_round_trip() {
+    const AnthropicResponseIdentity identity =
+        make_anthropic_response_identity("req_hidden", "claude-local");
+    const GenerationOutcome outcome = sample_outcome();
+
+    const Json aggregate =
+        Json::parse(make_anthropic_messages_response(identity, outcome, /*hide_thinking=*/true));
+    const Json& block = aggregate["content"][0];
+    int failures = check(block["type"] == "thinking" && block["thinking"] == "" &&
+                             decode_thinking_signature(block["signature"].get<std::string>()) ==
+                                 outcome.reasoning &&
+                             aggregate["content"][1]["text"] == "answer",
+                         "aggregate hidden Thinking leaked text or lost its signature");
+
+    AnthropicMessagesStream stream(identity, 100, /*hide_thinking=*/true);
+    std::vector<std::string> events{stream.start()};
+    const auto append = [&](std::vector<std::string> values) {
+        events.insert(events.end(), std::make_move_iterator(values.begin()),
+                      std::make_move_iterator(values.end()));
+    };
+    append(stream.reasoning_delta("tho"));
+    append(stream.reasoning_delta("ught"));
+    append(stream.content_delta("answer"));
+    append(stream.finish(outcome));
+    bool saw_thinking_delta = false;
+    std::optional<std::string> streamed;
+    for (const std::string& wire : events) {
+        const Json parsed = parse_event(wire);
+        if (parsed.at("type") != "content_block_delta") { continue; }
+        if (parsed["delta"]["type"] == "thinking_delta") { saw_thinking_delta = true; }
+        if (parsed["delta"]["type"] == "signature_delta") {
+            streamed = decode_thinking_signature(parsed["delta"]["signature"].get<std::string>());
+        }
+    }
+    failures += check(!saw_thinking_delta && streamed == outcome.reasoning,
+                      "streamed hidden Thinking leaked text or lost its signature");
+
+    // The client returns the block it received; lowering restores the reasoning from it.
+    Json body        = base_request();
+    body["thinking"] = Json{{"type", "adaptive"}, {"display", "omitted"}};
+    body["messages"].push_back(
+        Json{{"role", "assistant"},
+             {"content", Json::array({block, Json{{"type", "text"}, {"text", "answer"}}})}});
+    body["messages"].push_back(Json{{"role", "user"}, {"content", "next"}});
+    const auto assistant_reasoning = [](const GenerationRequest& request) {
+        const auto assistant = std::ranges::find_if(request.messages, [](const ChatTurn& turn) {
+            return turn.role == ninfer::ChatRole::Assistant;
+        });
+        return assistant == request.messages.end() ? std::optional<std::string>()
+                                                   : assistant->reasoning_content;
+    };
+    failures += check(assistant_reasoning(parse(body).generation) == outcome.reasoning,
+                      "hidden reasoning was not restored from the returned block");
+
+    // Visible text wins, a foreign signature stays metadata, a corrupt NInfer one is a 400.
+    body["messages"][1]["content"][0] =
+        Json{{"type", "thinking"}, {"thinking", "visible"}, {"signature", block["signature"]}};
+    failures += check(assistant_reasoning(parse(body).generation) == "visible",
+                      "visible Thinking text lost to its signature");
+    body["messages"][1]["content"][0] =
+        Json{{"type", "thinking"}, {"thinking", ""}, {"signature", "EuYBCkQIARgCKkD"}};
+    failures += check(assistant_reasoning(parse(body).generation) == std::string(),
+                      "a foreign signature produced reasoning");
+    body["messages"][1]["content"][0] =
+        Json{{"type", "thinking"}, {"thinking", ""}, {"signature", "ninfer-reasoning.v1:Zm9"}};
+    failures += check(api_code([&] { (void)parse(body); }) == "invalid_thinking_signature",
+                      "a corrupt hidden-reasoning signature was accepted");
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
+    failures += test_graft_extension();
     failures += test_envelope_and_field_policy();
     failures += test_message_normalization();
     failures += test_attribution_system_block();
+    failures += test_system_message_positions();
     failures += test_tool_history();
     failures += test_tools();
     failures += test_prompt_object_order();
@@ -807,6 +1074,8 @@ int main() {
     failures += test_aggregate_and_errors();
     failures += test_tool_call_presentation();
     failures += test_stream();
+    failures += test_hidden_reasoning_signature();
+    failures += test_hidden_reasoning_round_trip();
     if (failures != 0) {
         std::cerr << failures << " Anthropic adapter checks failed\n";
         return 1;

@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -134,7 +136,7 @@ Json prompt_progress_json(std::uint32_t total, std::uint32_t cached, std::uint32
                 {"time_ms", elapsed_ns / 1000000ULL}};
 }
 
-const char* finish_reason(ninfer::FinishReason reason) {
+const char* finish_reason(ninfer::FinishReason reason) noexcept {
     switch (reason) {
     case ninfer::FinishReason::OutputLimit:
     case ninfer::FinishReason::ContextCapacity:
@@ -192,66 +194,12 @@ CompletionUsage usage_from(const GenerationOutcome& outcome) {
     };
 }
 
-// A token's bytes as JSON text: an invalid or truncated UTF-8 sequence becomes U+FFFD, since a
-// token can end inside a multi-byte character. The exact bytes travel beside it.
-std::string lossy_utf8(std::string_view bytes) {
-    std::string out;
-    out.reserve(bytes.size());
-    std::size_t index = 0;
-    while (index < bytes.size()) {
-        const auto lead       = static_cast<unsigned char>(bytes[index]);
-        std::size_t length    = 0;
-        std::uint32_t minimum = 0;
-        if (lead < 0x80) {
-            length = 1;
-        } else if (lead >= 0xC2 && lead <= 0xDF) {
-            length  = 2;
-            minimum = 0x80;
-        } else if (lead >= 0xE0 && lead <= 0xEF) {
-            length  = 3;
-            minimum = 0x800;
-        } else if (lead >= 0xF0 && lead <= 0xF4) {
-            length  = 4;
-            minimum = 0x10000;
-        }
-        bool valid              = length != 0 && index + length <= bytes.size();
-        std::uint32_t codepoint = length == 1 ? lead : lead & (0x7FU >> length);
-        for (std::size_t offset = 1; valid && offset < length; ++offset) {
-            const auto next = static_cast<unsigned char>(bytes[index + offset]);
-            valid           = (next & 0xC0U) == 0x80U;
-            codepoint       = (codepoint << 6U) | (next & 0x3FU);
-        }
-        valid = valid && codepoint >= minimum && codepoint <= 0x10FFFF &&
-                (codepoint < 0xD800 || codepoint > 0xDFFF);
-        if (valid) {
-            out.append(bytes.substr(index, length));
-            index += length;
-        } else {
-            out.append("\xEF\xBF\xBD");
-            ++index;
-        }
-    }
-    return out;
-}
-
-Json token_logprob_json(const TokenLogprobView& entry) {
-    Json bytes = Json::array();
-    for (const char byte : entry.bytes) { bytes.push_back(static_cast<unsigned char>(byte)); }
-    return Json{{"token", lossy_utf8(entry.bytes)},
-                {"logprob", entry.logprob},
-                {"bytes", std::move(bytes)}};
-}
-
-// Only the first generated token carries log probabilities (--first-token-logprobs).
-Json choice_logprobs(const GenerationOutcome& outcome) {
-    if (!outcome.first_token_logprobs) { return nullptr; }
-    Json first = token_logprob_json(outcome.first_token_logprobs->selected);
-    Json top   = Json::array();
-    for (const TokenLogprobView& entry : outcome.first_token_logprobs->top) {
-        top.push_back(token_logprob_json(entry));
-    }
-    first["top_logprobs"] = std::move(top);
-    return Json{{"content", Json::array({std::move(first)})}, {"refusal", nullptr}};
+// A choice's logprobs object: null unless the request asked for logprobs.
+Json choice_logprobs(std::span<const ninfer::TokenLogprob> records,
+                     std::optional<int> top_logprobs) {
+    if (!top_logprobs) { return nullptr; }
+    return Json{{"content", openai_token_logprobs_json(records, *top_logprobs, true)},
+                {"refusal", nullptr}};
 }
 
 Json base_payload(const OpenAIChatResponseIdentity& identity, const char* object) {
@@ -261,30 +209,42 @@ Json base_payload(const OpenAIChatResponseIdentity& identity, const char* object
                 {"model", identity.model}};
 }
 
-Json stream_choice(Json delta, Json finish_reason = nullptr) {
+Json stream_choice(Json delta, Json finish_reason = nullptr, Json logprobs = nullptr) {
     return Json{{"index", 0},
                 {"delta", std::move(delta)},
-                {"logprobs", nullptr},
+                {"logprobs", std::move(logprobs)},
                 {"finish_reason", std::move(finish_reason)}};
 }
 
 std::string event(Json payload) { return "data: " + payload.dump() + "\n\n"; }
 
+// The catalog cell and session digest a retained session can be saved from, beside the final
+// usage and timings; absent when the session was not retained.
+void add_slot_identity(Json& payload, const GenerationOutcome* outcome) {
+    if (outcome == nullptr) { return; }
+    if (outcome->id_slot >= 0) { payload["id_slot"] = outcome->id_slot; }
+    if (!outcome->session_digest.empty()) { payload["session_digest"] = outcome->session_digest; }
+}
+
 std::string chunk(const OpenAIChatResponseIdentity& identity, Json delta, Json finish_reason,
-                  bool include_usage, Json timings = nullptr) {
+                  bool include_usage, Json timings = nullptr,
+                  const GenerationOutcome* slot_identity = nullptr, Json logprobs = nullptr) {
     Json payload       = base_payload(identity, "chat.completion.chunk");
-    payload["choices"] = Json::array({stream_choice(std::move(delta), std::move(finish_reason))});
+    payload["choices"] = Json::array(
+        {stream_choice(std::move(delta), std::move(finish_reason), std::move(logprobs))});
     if (include_usage) { payload["usage"] = nullptr; }
     if (!timings.is_null()) { payload["timings"] = std::move(timings); }
+    add_slot_identity(payload, slot_identity);
     return event(std::move(payload));
 }
 
 std::string usage_chunk(const OpenAIChatResponseIdentity& identity, const CompletionUsage& usage,
-                        Json timings, bool with_choice) {
+                        Json timings, bool with_choice, const GenerationOutcome& outcome) {
     Json payload       = base_payload(identity, "chat.completion.chunk");
     payload["choices"] = with_choice ? Json::array({stream_choice(Json::object())}) : Json::array();
     payload["usage"]   = usage_json(usage);
     payload["timings"] = std::move(timings);
+    add_slot_identity(payload, &outcome);
     return event(std::move(payload));
 }
 
@@ -297,6 +257,26 @@ void require_prefix(std::string_view complete, std::string_view streamed, const 
 
 } // namespace
 
+Json completion_timings_json(const GenerationOutcome& outcome) {
+    return timings_json(outcome_timings(outcome));
+}
+
+Json completion_timings_json(std::uint32_t prompt_tokens, std::uint32_t cached_tokens,
+                             const ninfer::GenerationTimingObservation& observation) {
+    return timings_json(observation_timings(prompt_tokens, cached_tokens, observation));
+}
+
+Json completion_prompt_progress_json(const ninfer::PromptProgress& progress) {
+    return prompt_progress_json(progress.total_prompt_tokens, progress.reused_prompt_tokens,
+                                progress.processed_prompt_tokens, progress.elapsed_ns);
+}
+
+Json openai_usage_json(const GenerationOutcome& outcome) { return usage_json(usage_from(outcome)); }
+
+const char* openai_finish_reason(ninfer::FinishReason reason) noexcept {
+    return finish_reason(reason);
+}
+
 OpenAIChatResponseIdentity make_openai_chat_response_identity(std::string model) {
     return OpenAIChatResponseIdentity{
         .id      = new_openai_chat_completion_id(),
@@ -306,7 +286,8 @@ OpenAIChatResponseIdentity make_openai_chat_response_identity(std::string model)
 }
 
 std::string make_chat_completion_response(const OpenAIChatResponseIdentity& identity,
-                                          const GenerationOutcome& outcome) {
+                                          const GenerationOutcome& outcome,
+                                          std::optional<int> top_logprobs) {
     Json message = {{"role", "assistant"}, {"content", outcome.text}, {"refusal", nullptr}};
     const bool has_tool_calls = !outcome.tool_calls.empty();
     // vLLM/SGLang-compatible reasoning_content preserves the Engine's Reasoning/Content split.
@@ -321,18 +302,19 @@ std::string make_chat_completion_response(const OpenAIChatResponseIdentity& iden
     payload["choices"] = Json::array(
         {Json{{"index", 0},
               {"message", std::move(message)},
-              {"logprobs", choice_logprobs(outcome)},
+              {"logprobs", choice_logprobs(outcome.content_logprobs, top_logprobs)},
               {"finish_reason",
                has_tool_calls ? Json("tool_calls") : Json(finish_reason(outcome.finish_reason))}}});
     payload["usage"]   = usage_json(usage_from(outcome));
     payload["timings"] = timings_json(outcome_timings(outcome));
+    add_slot_identity(payload, &outcome);
     return payload.dump();
 }
 
 OpenAIChatStream::OpenAIChatStream(OpenAIChatResponseIdentity identity, bool include_usage,
                                    bool timings_per_token, bool return_progress,
-                                   bool usage_chunk_choice)
-    : identity_(std::move(identity)), include_usage_(include_usage),
+                                   bool usage_chunk_choice, std::optional<int> top_logprobs)
+    : identity_(std::move(identity)), top_logprobs_(top_logprobs), include_usage_(include_usage),
       timings_per_token_(timings_per_token), return_progress_(return_progress),
       usage_chunk_choice_(usage_chunk_choice) {}
 
@@ -426,13 +408,15 @@ std::string OpenAIChatStream::reasoning_delta(const std::string& text) {
                  live_timings_json());
 }
 
-std::string OpenAIChatStream::content_delta(const std::string& text) {
+std::string OpenAIChatStream::content_delta(const std::string& text,
+                                            std::span<const ninfer::TokenLogprob> logprobs) {
     if (!started_ || finished_) {
         throw std::logic_error("invalid OpenAI Chat content delta state");
     }
     content_started_ = true;
     content_ += text;
-    return chunk(identity_, Json{{"content", text}}, nullptr, include_usage_, live_timings_json());
+    return chunk(identity_, Json{{"content", text}}, nullptr, include_usage_, live_timings_json(),
+                 nullptr, logprobs.empty() ? Json(nullptr) : choice_logprobs(logprobs, top_logprobs_));
 }
 
 std::vector<std::string> OpenAIChatStream::finish(const GenerationOutcome& outcome) {
@@ -465,14 +449,16 @@ std::vector<std::string> OpenAIChatStream::finish(const GenerationOutcome& outco
         events.push_back(chunk(identity_, Json{{"tool_calls", tool_calls_json(calls, true)}},
                                nullptr, include_usage_, output_timings));
         events.push_back(chunk(identity_, Json::object(), "tool_calls", include_usage_,
-                               include_usage_ ? Json(nullptr) : final_timings));
+                               include_usage_ ? Json(nullptr) : final_timings,
+                               include_usage_ ? nullptr : &outcome));
     } else {
         events.push_back(chunk(identity_, Json::object(), finish_reason(outcome.finish_reason),
-                               include_usage_, include_usage_ ? Json(nullptr) : final_timings));
+                               include_usage_, include_usage_ ? Json(nullptr) : final_timings,
+                               include_usage_ ? nullptr : &outcome));
     }
     if (include_usage_) {
         events.push_back(usage_chunk(identity_, usage_from(outcome), final_timings,
-                                     usage_chunk_choice_));
+                                     usage_chunk_choice_, outcome));
     }
     events.emplace_back("data: [DONE]\n\n");
     return events;

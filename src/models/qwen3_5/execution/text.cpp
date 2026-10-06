@@ -21,6 +21,7 @@
 #include "ninfer/ops/gdn_gating.h"
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/logprob_topk.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/speculative_round.h"
@@ -1132,7 +1133,7 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
         project_add(normalized, p.output, x, work_, s, InputBasis::Rotated);
         return;
     }
-    ops::gated_rmsnorm(o, p.norm, z, config_.rms_norm_eps, on, s);
+    ops::gated_rmsnorm(o, p.norm, z, ops::GateActivation::Silu, config_.rms_norm_eps, on, s);
     project_add(normalized, p.output, x, work_, s, InputBasis::Primal,
                 wide_residual_verification(ph, active_sequence_batch_, T, T));
 }
@@ -1464,14 +1465,14 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             if (vision_chunk.control != nullptr) {
                 const auto scatter =
                     std::span<const std::int32_t>(vision_chunk.control->scatter_indices);
-                const auto begin = std::lower_bound(scatter.begin(), scatter.end(), prompt_t0);
-                const auto end   = std::lower_bound(begin, scatter.end(), prompt_t0 + len);
+                const auto prompt_t0_i32 = static_cast<std::int32_t>(prompt_t0);
+                const auto begin = std::lower_bound(scatter.begin(), scatter.end(), prompt_t0_i32);
+                const auto end = std::lower_bound(begin, scatter.end(), prompt_t0_i32 + len);
                 const auto count = static_cast<std::int32_t>(end - begin);
                 visual_begin     = static_cast<std::int32_t>(begin - scatter.begin());
                 local_scatter_indices.resize(static_cast<std::size_t>(count));
                 for (std::int32_t i = 0; i < count; ++i) {
-                    local_scatter_indices[static_cast<std::size_t>(i)] =
-                        begin[i] - static_cast<std::int32_t>(prompt_t0);
+                    local_scatter_indices[static_cast<std::size_t>(i)] = begin[i] - prompt_t0_i32;
                 }
             }
 
@@ -1559,13 +1560,16 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 Tensor last_xf = xf.slice(1, len - 1, 1);
                 Tensor logits  = matrix_window(io_.logits, 1);
                 project(last_xf, *lm_head_, logits, work_, s);
-                if (first_token_logits_ != nullptr) {
-                    CUDA_CHECK(
-                        cudaMemcpyAsync(first_token_logits_, logits.data,
-                                        static_cast<std::size_t>(dimension(
-                                            parameters_.model.resources().public_token_count)) *
-                                            sizeof(std::uint16_t),
-                                        cudaMemcpyDeviceToHost, s));
+                // The token's logprob records, gathered before sampling adds it to the penalty
+                // counts; a device no-op unless the request asked for them.
+                if (sampling_config_ != nullptr && io_.logprob_active.data != nullptr) {
+                    Tensor ids = io_.logprob_ids.slice(1, 0, 1).view({ops::kLogprobTopK, 1, 1});
+                    Tensor values =
+                        io_.logprob_values.slice(1, 0, 1).view({ops::kLogprobTopK, 1, 1});
+                    Tensor lse = io_.logprob_lse.slice(0, 0, 1).view({1, 1});
+                    ops::logprob_topk(logits.view({logits.ne[0], 1, 1}), sampling_config_, nullptr,
+                                      dimension(parameters_.model.resources().public_token_count),
+                                      ids, values, lse, io_.logprob_active, work_, s);
                 }
                 // Set io_.pos to the bonus token's absolute position (base + T) before picking so
                 // the sampler RNG is keyed by it (prefill purpose keeps it distinct from the first

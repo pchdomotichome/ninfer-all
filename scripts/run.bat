@@ -6,7 +6,7 @@ rem
 rem   run.bat [model] [profile]     (double-click it and it asks for the model)
 rem
 rem   model             profiles
-rem   qwen38-27b        tuned (default), int8, c8
+rem   qwen38-27b        tuned (default), int8, c8   <- recommended
 rem   qwen36-35b-a3b    tuned (default)
 rem
 rem `tuned` is the recommended profile: rk4v4 KV, speculation plus the draft head, the memory
@@ -36,6 +36,9 @@ rem     --vision --vision-residency overlay
 rem
 rem   set NINFER_SPEC=mtp && run.bat qwen38-27b
 rem
+rem   MTP accepts NINFER_DRAFT_TOKENS up to 15. Three suits chat and prose; for coding work that
+rem   returns edited files, 11-15 decodes up to 1.85x faster (docs\performance.md has the table).
+rem
 rem rk4v4 KV (Lloyd-Max 4-bit keys) is 31%% smaller than rk8v4 at the same decode speed, for +0.10%%
 rem perplexity over it. Measured on a desktop RTX 3090 (2026-09-24), the DFlash2 set starts at up to
 rem 180,224 tokens (rk8v4: 131,072) and the default keeps a rung of margin; its draft weights and its
@@ -45,11 +48,15 @@ rem The qwen3_8_27b.ninfer that download-model.bat fetches is the DFlash2 bundle
 rem MTP weights too, so one file serves both.
 rem
 rem OVERRIDES, from the environment. All profiles: NINFER_MODEL (artifact path), NINFER_MODEL_DIR,
-rem NINFER_SERVER, NINFER_HOST, NINFER_PORT. `tuned` also: NINFER_CONTEXT, NINFER_CONCURRENCY, NINFER_KV_DTYPE,
-rem NINFER_SPEC, NINFER_DRAFT_TOKENS, NINFER_PREFILL_CHUNK, NINFER_VISION (on^|off),
-rem NINFER_VISION_RESIDENCY, NINFER_HOST_STATE_SLOTS. Each spec's defaults (context, lanes, chunk)
-rem are the ones measured to fit beside a desktop, which holds roughly 1.5 GiB of the card; if startup
-rem refuses, drop a rung of NINFER_CONTEXT: 229376 / 196608 / 163840 / 131072 / 98304 / 65536.
+rem NINFER_SERVER, NINFER_HOST, NINFER_PORT, NINFER_GRAFT_DIR, NINFER_GRAFTS (off),
+rem NINFER_DEFAULT_GRAFT (see PROMPT GRAFTS below), NINFER_CHAT_TEMPLATE (path to a local
+rem Jinja file, passed straight to --chat-template; overrides the artifact's built-in template).
+rem `tuned` also: NINFER_CONTEXT,
+rem NINFER_CONCURRENCY, NINFER_KV_DTYPE, NINFER_SPEC, NINFER_DRAFT_TOKENS, NINFER_PREFILL_CHUNK,
+rem NINFER_VISION (on^|off), NINFER_VISION_RESIDENCY, NINFER_HOST_STATE_SLOTS. Each spec's defaults
+rem (context, lanes, chunk) are the ones measured to fit beside a desktop, which holds roughly 1.5 GiB
+rem of the card; if startup refuses, drop a rung of NINFER_CONTEXT: 229376 / 196608 / 163840 / 131072 /
+rem 98304 / 65536.
 rem
 rem IF THE CARD IS BUSY. A desktop (or another job) holding VRAM can leave too little for the default
 rem context. When the `tuned` profile is refused at startup for lack of GPU memory, this launcher
@@ -98,14 +105,14 @@ exit /b 2
 rem Double-clicked from Explorer there is no argument to give, so ask. choice exits 255 when it has
 rem no console to read from; that must not silently pick a model.
 echo Which model?
-echo   1  Qwen3.6-35B-A3B  (recommended)
-echo   2  Qwen3.8-27B
+echo   1  Qwen3.8-27B  (recommended)
+echo   2  Qwen3.6-35B-A3B
 choice /c 12 /n /m "Choose 1 or 2: "
 if errorlevel 255 exit /b 2
 if errorlevel 2 (
-  set "MODEL_KEY=qwen38-27b"
-) else (
   set "MODEL_KEY=qwen36-35b-a3b"
+) else (
+  set "MODEL_KEY=qwen38-27b"
 )
 goto :model_resolve
 
@@ -138,6 +145,16 @@ if not "%NINFER_PORT%"=="" set "PORT=%NINFER_PORT%"
 set "SERVER=%ROOT%\build-ninja\apps\ninfer-serve.exe"
 if not exist "%SERVER%" set "SERVER=%~dp0ninfer-serve.exe"
 if not "%NINFER_SERVER%"=="" set "SERVER=%NINFER_SERVER%"
+
+rem PROMPT GRAFTS are optional and never shipped: nothing here needs one to start. Every NAME.bin
+rem with its NAME.json sidecar in grafts\<model>\ (beside models\, by the same layout rule, or
+rem NINFER_GRAFT_DIR) is loaded as --graft NAME=<file>, and a request selects it with
+rem "graft": "NAME" (docs\serving.md). No directory or an empty one serves without grafts.
+rem NINFER_GRAFTS=off skips them; NINFER_DEFAULT_GRAFT=NAME applies one to every request that
+rem names none. Same contract as run.sh.
+set "GRAFT_DIR=%~dp0grafts\%MODEL_KEY%"
+if /i "%SCRIPT_DIRNAME%"=="scripts" if exist "%ROOT%\CMakeLists.txt" set "GRAFT_DIR=%ROOT%\grafts\%MODEL_KEY%"
+if not "%NINFER_GRAFT_DIR%"=="" set "GRAFT_DIR=%NINFER_GRAFT_DIR%"
 
 rem The profile fixes the whole serving shape. LABEL is the banner; PROFILE_ARGS is everything
 rem after --host/--port. Values below use ^| for the separator: a bare pipe inside an expanded
@@ -251,7 +268,22 @@ set "LABEL=one request  ^|  64K context  ^|  INT8 KV  ^|  MTP3, ReplaySSM"
 goto :launch
 
 :profile_27b_c8
-set "PROFILE_ARGS=--max-context 8192 --kv-capacity 16384 --max-concurrency 8 --max-pending-requests 32 --pending-timeout-ms 600000 --prefill-chunk 512 --kv-dtype int8 --spec mtp --draft-tokens 3 --lm-head-draft"
+rem Context cache sized per lane, so several agents rotating through the lanes find their own
+rem conversation still cached instead of re-prefilling it: two retained conversations per lane,
+rem one checkpoint StateImage per lane on the card beyond the active ones, and two per lane in
+rem pinned host memory. Measured at one lane on the default of two retained conversations, four
+rem rotating agents reused 12%% of their prompts (TTFT 14 s); with room for all of them, 76%% (2.9 s).
+rem MEMORY COST: this profile keeps the GDN state in BF16, so a StateImage is 147 MiB. The device
+rem slots take 8 x 147 MiB = 1.15 GiB of VRAM, the engine default at eight lanes, so that is
+rem unchanged; the host slots pin 16 x 147 MiB = 2.3 GiB of RAM, which WDDM also charges against the
+rem card. Lower C8_HOST_STATES_PER_LANE first if startup runs short. Retention is still bounded by
+rem the 16,384-token KV pool below.
+set "C8_LANES=8"
+set /a C8_PRIVATE=C8_LANES*2
+set /a C8_DEVICE_STATES=C8_LANES
+set "C8_HOST_STATES_PER_LANE=2"
+set /a C8_HOST_STATES=C8_LANES*C8_HOST_STATES_PER_LANE
+set "PROFILE_ARGS=--max-context 8192 --kv-capacity 16384 --max-concurrency %C8_LANES% --max-pending-requests 32 --pending-timeout-ms 600000 --prefill-chunk 512 --kv-dtype int8 --spec mtp --draft-tokens 3 --lm-head-draft --max-private-continuations %C8_PRIVATE% --device-state-slots %C8_DEVICE_STATES% --host-state-slots %C8_HOST_STATES%"
 set "LABEL=up to eight requests  ^|  8K context  ^|  INT8 KV  ^|  MTP3, ReplaySSM"
 goto :launch
 
@@ -266,6 +298,10 @@ if not "%NINFER_VISION_RESIDENCY%"=="" set "VISION_RESIDENCY=%NINFER_VISION_RESI
 set "VISION_ARGS="
 rem Pinned host memory for the context cache: 74.5 MiB per slot on the 27B. WDDM charges it against
 rem the card, so a busy desktop needs fewer (see the README on startup).
+rem --max-private-continuations 8 below is what keeps several rotating conversations cached: the
+rem engine default is two per lane, and four agents on one lane then evict each other on every turn
+rem (12%% prompt reuse against 76%% with room for all four, measured 2026-09-28). A retained
+rem conversation costs no memory by itself; its KV pages and StateImages come from the pools above.
 set "HOST_STATE_SLOTS=32"
 if not "%NINFER_HOST_STATE_SLOTS%"=="" set "HOST_STATE_SLOTS=%NINFER_HOST_STATE_SLOTS%"
 if /i "%VISION%"=="on" (
@@ -283,6 +319,31 @@ exit /b 2
 set "PROFILE_ARGS=%PROFILE_ARGS% --max-pending-requests 16 --pending-timeout-ms 600000 %VISION_ARGS% --max-private-continuations 8 --max-shared-prefixes 8 --host-state-slots %HOST_STATE_SLOTS% --host-kv-mib 8192 --auto-prefix-grid"
 
 :launch
+set "GRAFT_ARGS="
+set "GRAFT_NAMES="
+if /i "%NINFER_GRAFTS%"=="off" goto :graft_done
+rem One-line for and a subroutine, no parenthesised block: GRAFT_DIR may contain ")" (e.g.
+rem "Program Files (x86)").
+if exist "%GRAFT_DIR%\*.bin" for %%G in ("%GRAFT_DIR%\*.bin") do call :add_graft "%%~fG"
+if "%NINFER_DEFAULT_GRAFT%"=="" goto :graft_done
+if not exist "%GRAFT_DIR%\%NINFER_DEFAULT_GRAFT%.json" goto :graft_default_missing
+if not exist "%GRAFT_DIR%\%NINFER_DEFAULT_GRAFT%.bin" goto :graft_default_missing
+set GRAFT_ARGS=%GRAFT_ARGS% --default-graft "%NINFER_DEFAULT_GRAFT%"
+goto :graft_done
+:graft_default_missing
+echo NINFER_DEFAULT_GRAFT=%NINFER_DEFAULT_GRAFT% names no graft in "%GRAFT_DIR%"
+exit /b 2
+:graft_done
+set "CHAT_TEMPLATE_ARGS="
+rem The wrapping "set "VAR=..."" form closes its quoted span right before a spliced %VAR%, so cmd
+rem would parse the expanded text unquoted and a value containing "&", "|", "<" or ">" could break
+rem out of the statement and run as a separate command (delayed expansion would dodge that but
+rem corrupts any "!" in every other %VAR% read later in the script -- see the prior round). The
+rem unquoted `set NAME=value` form below avoids both: it opens its own quote immediately before
+rem %NINFER_CHAT_TEMPLATE% and closes it right after, so the expansion lands inside a quoted span
+rem (metacharacters inert) while still storing that literal pair of quotes around the path, same
+rem as GRAFT_ARGS above.
+if not "%NINFER_CHAT_TEMPLATE%"=="" set CHAT_TEMPLATE_ARGS=--chat-template "%NINFER_CHAT_TEMPLATE%"
 if not exist "%SERVER%" (
   echo Missing %SERVER%
   echo Build it first:  .\scripts\build.ps1
@@ -297,6 +358,8 @@ if not exist "%MODEL%" (
 echo %TITLE%  ^|  %LABEL%
 if not "%PREFILL_NOTE%"=="" echo %PREFILL_NOTE%
 if /i "%PROFILE%"=="tuned" echo Cache: 8 shared / 8 private / %HOST_STATE_SLOTS% host states  ^|  automatic prefix grid on
+if defined GRAFT_NAMES echo Grafts:%GRAFT_NAMES%
+if defined CHAT_TEMPLATE_ARGS echo Chat template: "%NINFER_CHAT_TEMPLATE%"
 if not "%HINT%"=="" echo %HINT%
 echo API: http://%HOST%:%PORT%/v1
 echo.
@@ -309,13 +372,18 @@ rem and because it is harmless here: the clamp takes what is actually free after
 rem allocated, so it costs no context, and prefix reuse falls back to device pages when the pin is
 rem zero. Do not read "8192" as a description of this machine. See
 rem docs\maintainer\launcher-profiles.md.
+rem Not a parenthesised block: NINFER_CHAT_TEMPLATE (like NINFER_GRAFT_DIR) is an arbitrary local
+rem path and may contain ")" (e.g. "C:\templates\customer (v2)\chat.jinja"). Expanded inside a
+rem "( ... )" command group, that character can be taken as the group's own closing paren and
+rem break the batch parse, quoting notwithstanding -- so this invocation runs unparenthesised, with
+rem goto standing in for the ladder/non-ladder branch instead.
 if /i not "%PROFILE%"=="tuned" set "LADDER=0"
-if "%LADDER%"=="0" (
-  "%SERVER%" "%MODEL%" --host %HOST% --port %PORT% %PROFILE_ARGS%
-  endlocal
-  exit /b %ERRORLEVEL%
-)
+if not "%LADDER%"=="0" goto :launch_ladder
+"%SERVER%" "%MODEL%" --host %HOST% --port %PORT% %PROFILE_ARGS% %GRAFT_ARGS% %CHAT_TEMPLATE_ARGS%
+endlocal
+exit /b %ERRORLEVEL%
 
+:launch_ladder
 rem Run the server with its output shown and kept, so a refusal for lack of memory can be told apart
 rem from any other failure. Only that failure steps down; a crash or a bad artifact does not. The log
 rem is written as ASCII on purpose: Tee-Object writes UTF-16, which findstr cannot search.
@@ -325,7 +393,7 @@ if "%RUNG%"=="0" (
   set "BASE_SLOTS=%HOST_STATE_SLOTS%"
 )
 set "SERVER_LOG=%TEMP%\ninfer-run-%RANDOM%%RANDOM%.log"
-"%SERVER%" "%MODEL%" --host %HOST% --port %PORT% %PROFILE_ARGS% 2>&1 | powershell -NoProfile -Command "$input | ForEach-Object { $_; Add-Content -LiteralPath '%SERVER_LOG%' -Value $_ -Encoding Ascii }"
+"%SERVER%" "%MODEL%" --host %HOST% --port %PORT% %PROFILE_ARGS% %GRAFT_ARGS% %CHAT_TEMPLATE_ARGS% 2>&1 | powershell -NoProfile -Command "$input | ForEach-Object { $_; Add-Content -LiteralPath '%SERVER_LOG%' -Value $_ -Encoding Ascii }"
 findstr /c:"runtime reservation requires" /c:"cudaMallocHost failed" "%SERVER_LOG%" >nul 2>&1
 if errorlevel 1 goto :server_done
 if %RUNG% GEQ 5 goto :server_done
@@ -358,6 +426,13 @@ endlocal & exit /b %SERVER_STATUS%
 
 :usage
 echo usage: run.bat ^<model^> [profile]
-echo   qwen38-27b       tuned (default), int8, c8
+echo   qwen38-27b       tuned (default), int8, c8   (recommended)
 echo   qwen36-35b-a3b   tuned (default)
+exit /b 0
+
+:add_graft
+rem A .bin without its .json sidecar is not a graft (the server would refuse it), so skip it.
+if not exist "%~dpn1.json" exit /b 0
+set GRAFT_ARGS=%GRAFT_ARGS% --graft "%~n1=%~1"
+set "GRAFT_NAMES=%GRAFT_NAMES% %~n1"
 exit /b 0

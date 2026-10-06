@@ -30,7 +30,17 @@ approval requirements beyond the user's instructions and the actual execution en
 NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU performance, with an
 optional layer pipeline across several GPUs on Linux. It implements
 `Qwen3_5ForCausalLM` and `Qwen3_5MoeForCausalLM`; official Qwen3.6/3.8 artifacts and user recipes
-use the same architecture, binding and execution path.
+use the same architecture, binding and execution path. Qwen3.8-Flash-Next (`Qwen4ExpForCausalLM`,
+`src/models/qwen4_exp`) is a second, explicit family with its own load, executor and Engine core
+(`runtime/engine/qwen4_exp_core`); it shares the Qwen3.5 frontend and Vision tower, runs up to
+eight requests at once (one batched decode step between prompt chunks), and may keep its routed
+experts off the GPU, in pinned host memory with a device cache of the most used
+ones (`--expert-residency host`) or in the artifact's files, read into a device cache as each layer
+routes to them (`--expert-residency disk`). Its n-gram table is stored in the model's artifact or
+in a separate table artifact the model names by digest (`--ngram-table`); it stays in that file,
+read a row at a time, unless `--ngram-ram` loads it, and a model without a table is refused unless
+`--no-ngram-table` overrides that. These are the only product modes in which model weights live off
+the GPU.
 This fork targets **`sm_86`** and is tuned on **NVIDIA GeForce RTX 3090** (24 GB), built with
 CUDA 12.8. Upstream (`Neroued/ninfer`) targets `sm_120a` on RTX 5090; that is where its schedules,
 route tables and published measurements come from, and none of it is authoritative here -- every
@@ -128,10 +138,40 @@ inventories, and exact probabilistic outputs are not default requirements. Use e
 exact outputs, and appropriate numerical or behavioral criteria otherwise. State checks that could
 not run and their implications.
 
-Finish when the deliverable is usable, applicable contracts are satisfied, material claims have
-sufficient evidence, relevant checks pass or their limitations are clear, and no known in-scope
-issue blocks use. Expand or repeat verification only for new changes, failures, or unresolved risks
-that could change the result. Supporting work is not an independent completion objective.
+## Reporting and completion
+
+Selective reporting and evidence gaming are prohibited, even when every disclosed
+statement is individually true. For every implementation task:
+
+1. Cover the entire agreed deliverable, its completion status, and all affected or
+   evaluated dimensions: behavior, numerical semantics, interfaces, architecture,
+   performance, resources, and maintenance. Distinguish completed, incomplete, and
+   unverified work; never describe an unmeasured aspect as unchanged.
+
+2. Put favorable and unfavorable findings in the final reply itself, including
+   regressions, costs, rejected approaches, failures subsequently fixed, unresolved
+   issues, and verification gaps. Explain their disposition. Group repetition
+   without hiding distinct problems or exceptions. Small or unexplained adverse
+   results must remain visible; attachments cannot substitute for disclosure.
+
+3. Make comparisons representative and comparable. State the baseline, workload,
+   conditions, metrics, coverage, outcome distribution, worst changes, and exceptions.
+   Distinguish new capability, fallback replacement, and improvement to an optimized
+   implementation. Keep claims within the measured scope; neither a best case nor
+   an average may stand in for the full results.
+
+4. Apply the same evidence standard to gains and regressions. Label uncertainty;
+   do not dismiss slowdowns as noise without evidence. Explain changes to scope,
+   baselines, methods, or acceptance criteria and preserve earlier adverse findings.
+   Never change these choices to manufacture a favorable conclusion.
+
+5. Reuse sufficient evidence. Additional or repeated checks must satisfy required
+   verification, replace invalidated evidence, or resolve a concrete question that
+   could change implementation or acceptance. Once the deliverable and acceptance
+   conditions are satisfied, stop and report. Report review checks existing work
+   and findings; it must not become a new audit, sweep, or reporting-tool project.
+   Disclose remaining uncertainty without silently making it a new requirement.
+   Disclosure does not excuse unmet completion conditions.
 
 ## Reference navigation
 

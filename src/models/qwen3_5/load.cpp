@@ -79,7 +79,7 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
         out->cpu_vision = loading::load_cpu_vision(binder, *out->config.vision, text);
     } else if (out->config.vision) {
         out->weights.vision = loading::bind_vision(
-            bindings, *out->config.vision, text,
+            bindings, *out->config.vision, text.hidden_size,
             options.overlay_vision() ? artifact::Residency::Pinned : artifact::Residency::Device);
     }
     std::pair<std::size_t, std::size_t> mtp_parameters{bindings.weights.size(),
@@ -240,7 +240,8 @@ std::vector<std::uint32_t> default_stage_layers(const artifact::Reader& reader,
 }
 
 std::unique_ptr<Model> materialize_model(LoadPlan&& plan, DeviceContext& device,
-                                         const StartupObserver* observer) {
+                                         const StartupObserver* observer,
+                                         const artifact::MaterializeOptions& materialize) {
     if (!plan.impl_) { throw artifact::ArtifactError("load plan was already consumed"); }
     auto data = std::move(plan.impl_);
     std::unique_ptr<EvictableWeightPool> pool;
@@ -265,17 +266,19 @@ std::unique_ptr<Model> materialize_model(LoadPlan&& plan, DeviceContext& device,
     }
     auto backing = artifact::materialize(*data->materialization.source,
                                          std::move(data->materialization), device, observer,
-                                         std::move(pool));
+                                         std::move(pool), materialize);
     auto bound   = loading::resolve_weights(std::move(data->pending), backing);
     std::optional<VisionOverlayLayout> vision_overlay;
     if (data->options.overlay_vision()) {
         vision_overlay =
             loading::vision_overlay_layout(*data->weights.vision, bound, backing.pinned_block());
     }
+    AuxiliaryReplicas replicas(bound, device);
     return std::unique_ptr<Model>(
         new Model(std::move(data->config), data->options, std::move(data->weights),
-                  std::move(bound), std::move(data->resources), std::move(data->info),
-                  std::move(backing), std::move(vision_overlay), std::move(data->cpu_vision)));
+                  std::move(bound), std::move(replicas), std::move(data->resources),
+                  std::move(data->info), std::move(backing), std::move(vision_overlay),
+                  std::move(data->cpu_vision)));
 }
 
 std::unique_ptr<Model> load_model(const std::filesystem::path& path, LoadOptions options,

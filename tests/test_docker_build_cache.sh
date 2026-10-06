@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Exercise the real Dockerfile with a tiny CMake project; never run NInfer.
+# NINFER_TOOLCHAIN_IMAGE=<image> stands in for the Dockerfile's toolchain stage (CI passes the one
+# it published), so the check does not rebuild it.
 set -euo pipefail
 
 builder=${1:-docker}
+toolchain_context=()
+if [[ -n "${NINFER_TOOLCHAIN_IMAGE:-}" ]]; then
+    toolchain_context=(--build-context "toolchain=docker-image://$NINFER_TOOLCHAIN_IMAGE")
+fi
 export BUILDKIT_PROGRESS=plain
 repo=$(cd "$(dirname "$0")/.." && pwd)
 test_dir=$(mktemp -d "$repo/build-cache-test.XXXXXX")
@@ -19,15 +25,20 @@ sed -e "s/id=ninfer-build,/id=$cache_id,/" \
     -e "s/type=cache,target=\/ccache/type=cache,id=$cache_id-ccache,target=\/ccache/" \
     "$repo/Dockerfile" > "$test_dir/Dockerfile"
 cp "$test_dir/Dockerfile" "$context/Dockerfile"
+# The build stage drives the real build and staging scripts; the fixture project stands in for
+# NInfer behind them, so the staged multi-call executable is a fixture executable.
+mkdir -p "$context/scripts" "$context/docker" "$test_dir/scripts"
+cp "$repo/scripts/build-native.sh" "$test_dir/scripts/build-native.sh"
+cp "$repo/scripts/build-native.sh" "$context/scripts/build-native.sh"
+cp "$repo/docker/stage-dist.sh" "$context/docker/stage-dist.sh"
 
 cat > "$context/CMakeLists.txt" <<'EOF'
 cmake_minimum_required(VERSION 3.28)
 project(build_cache_check LANGUAGES CXX)
 include(defaults.cmake)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/apps")
-add_executable(ninfer main.cpp)
-target_compile_definitions(ninfer PRIVATE CACHED_DEFAULT=${CACHED_DEFAULT})
-add_executable(ninfer-serve other.cpp)
+add_executable(ninfer-multicall main.cpp other.cpp)
+target_compile_definitions(ninfer-multicall PRIVATE CACHED_DEFAULT=${CACHED_DEFAULT})
 EOF
 printf 'set(CACHED_DEFAULT 0 CACHE STRING "Fixture default")\n' > "$context/defaults.cmake"
 cat > "$context/main.cpp" <<'EOF'
@@ -39,7 +50,7 @@ static_assert(RECIPE_FLAG == EXPECTED_FLAG, "stale compiler flags");
 static_assert(CACHED_DEFAULT == EXPECTED_DEFAULT, "stale CMake default");
 int main() { return 0; }
 EOF
-printf 'int main() { return 0; }\n' > "$context/other.cpp"
+printf 'int other() { return 0; }\n' > "$context/other.cpp"
 
 expect() {
     printf '#define EXPECTED_FLAG %s\n#define EXPECTED_DEFAULT %s\n' "$1" "$2" \
@@ -50,7 +61,8 @@ build() {
     local label=$1
     # A changed context forces RUN to execute rather than reuse an image layer.
     printf '%s\n' "$label" > "$context/build-check.txt"
-    if ! "$builder" build --target build --tag "$tag" "$context" \
+    if ! "$builder" build --target build --build-arg ARCHS=86 ${toolchain_context[@]+"${toolchain_context[@]}"} \
+        --tag "$tag" "$context" \
         > "$test_dir/$label.log" 2>&1; then
         cat "$test_dir/$label.log"
         return 1
@@ -62,11 +74,11 @@ expect 0 0
 build cold
 
 sed 's/-DCMAKE_BUILD_TYPE=Release/-DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-DRECIPE_FLAG=1/' \
-    "$test_dir/Dockerfile" > "$context/Dockerfile"
+    "$test_dir/scripts/build-native.sh" > "$context/scripts/build-native.sh"
 expect 1 0
 build flag-added
 
-cp "$test_dir/Dockerfile" "$context/Dockerfile"
+cp "$test_dir/scripts/build-native.sh" "$context/scripts/build-native.sh"
 expect 0 0
 # Exercise restored headers with old timestamps as well as flag removal.
 touch -t 200001010000 "$context/expected.h"
@@ -77,7 +89,7 @@ grep -q 'ninja: no work to do' "$test_dir/non-code-edit.log"
 
 printf '\nstatic_assert(true, "ordinary source edit");\n' >> "$context/main.cpp"
 build source-edit
-# Exactly one translation unit should rebuild; the other executable is unchanged.
+# Exactly one translation unit should rebuild; the other one is unchanged.
 test "$(grep -c 'Building CXX object' "$test_dir/source-edit.log")" -eq 1
 
 printf 'set(CACHED_DEFAULT 1 CACHE STRING "Fixture default")\n' > "$context/defaults.cmake"

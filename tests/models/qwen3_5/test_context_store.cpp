@@ -1,4 +1,5 @@
 #include "core/device.h"
+#include "cuda_availability.h"
 #include "models/qwen3_5/program/storage/host_kv_store.h"
 #include "models/qwen3_5/program/storage/kv_store.h"
 #include "models/qwen3_5/program/storage/state_store.h"
@@ -28,9 +29,7 @@ void expect(bool condition, std::string_view message) {
     std::cerr << "FAIL: " << message << '\n';
 }
 
-bool cuda_unavailable(cudaError_t error) {
-    return error == cudaErrorNoDevice || error == cudaErrorInsufficientDriver;
-}
+using ninfer::test::cuda_unavailable;
 
 std::vector<std::int32_t> read_block_table(const ninfer::KVExecutionTablePool& tables,
                                            std::int32_t row, std::size_t count) {
@@ -206,6 +205,27 @@ void test_kv_store(ninfer::DeviceContext& device) {
     expect(addresses.mapped_pages(*address) == 2 && addresses.entitlement(*address) == 3 &&
                addresses.committed_frontier(*address) == 65 && addresses.bound_row(*address) == 0,
            "KV address tracks mapped pages, entitlement, frontier, and execution row");
+    // The growth-lease ladder asks whether a rung fits before resizing: the answer must match
+    // what the resize itself would do, in and out of space, and leave the entitlement alone.
+    expect(addresses.can_resize_entitlement(*address, 4) &&
+               addresses.can_resize_entitlement(*address, 2) &&
+               !addresses.can_resize_entitlement(*address, 1) &&
+               !addresses.can_resize_entitlement(*address, 5),
+           "entitlement feasibility disagrees with mapped pages or page capacity");
+    {
+        std::optional<ninfer::DeviceKVPageReservation> held = physical_pages.reserve(5);
+        expect(held.has_value(), "pool pressure reservation");
+        const bool fits = addresses.can_resize_entitlement(*address, 4);
+        bool threw      = false;
+        try {
+            addresses.resize_entitlement(*address, 4);
+        } catch (const std::bad_alloc&) { threw = true; }
+        expect(!fits && threw && addresses.entitlement(*address) == 3,
+               "entitlement feasibility missed a full pool, or the failed resize changed it");
+        held->clear();
+    }
+    expect(addresses.can_resize_entitlement(*address, 4) && addresses.entitlement(*address) == 3,
+           "entitlement feasibility did not recover when the pool freed space");
     expect(pages.active_address_references(addresses.logical_page(*address, 0)) == 1 &&
                pages.active_address_references(addresses.logical_page(*address, 1)) == 1,
            "active KV membership is counted on each logical page");

@@ -7,10 +7,11 @@ pipeline stages, most of both written by Warlax (WarlaxZ); that line continues
 this fork's production behaviours and ternary work, the patches of
 [TertiumOrganum1/ninfer-3090](https://github.com/TertiumOrganum1/ninfer-3090), ideas from
 [UDPSendToFailed/ninfer-4090](https://github.com/UDPSendToFailed/ninfer-4090), pull requests to
-[Neroued/ninfer](https://github.com/Neroued/ninfer) and work from the forks listed below. When the
-base moves, these commits are applied again on its new head one by one, each adapted to what changed
-underneath rather than merged, so every commit stands on its own and carries its rationale and its
-authors; this note is the map.
+[Neroued/ninfer](https://github.com/Neroued/ninfer) and work from the forks listed below. Until
+September the line re-applied its commits on each new base head one by one; since the October 2
+update the base is merged (v0.12.0, merge commit `ed10eae5`, conflicts resolved semantically), and
+later fork and upstream changes are ported as individual commits that keep their authors and name
+their source commit. This note is the map.
 
 ## What the line carries over its base
 
@@ -108,7 +109,7 @@ From other forks and upstream `master`:
 |---|---|---|
 | [IMGillusion/ninfer-disk-kv](https://github.com/IMGillusion/ninfer-disk-kv) | a disk (L3) tier under the Host tier: an evicted private continuation writes its KV prefix chain and its endpoint, rewrite and early anchor StateImages to per-family files keyed by the prefix digest (CRC-checked, LRU, surviving restarts); with `--disk-kv-restore` a request with no resident prefix is seeded from the longest restorable frontier | `core/disk_kv_{store,bridge}.{h,cpp}`, `models/qwen3_5/program/storage/disk_tier.cpp`, the spill sites in `transactions/materialization.cpp` and `storage/context.cpp`, the probe in `planning/request_plan.cpp`, the seed in `prefill.cpp` |
 | IMGillusion | `--context-cache-policy rolling`: a capture that extends a resident the request matched exactly inherits that resident's demand within its cache session | `runtime/engine/context_cache/resource_manager.h` |
-| IMGillusion | `--first-token-logprobs`: Chat Completions `top_logprobs` report the first generated token's log probability and alternatives from the logits copied before sampling | `core/token_logprobs.{h,cpp}`, `models/qwen3_5/execution/text.cpp`, `program/prefill.cpp`, `serve/openai_chat_{request,response}.cpp` |
+| [kido5217/frinfer](https://github.com/kido5217/frinfer) (Fedor Suchkov, #205) | OpenAI `logprobs`/`top_logprobs` on Chat Completions and Responses, streamed or not: a device top-20 gather over the sampler's distribution before truncation for every generated token, speculative columns included, carried to the response with each token's bytes; here it reads the sampler's token masks and the drafts' penalty overlay, copies records to the host only for a round that asks, releases each with its text, covers Qwen3.8-Flash-Next, and replaces IMGillusion's `--first-token-logprobs` export, whose rerank and Vision checks now read it | `ops/{kernel,launcher,wrapper}/logprob_topk*`, `models/qwen3_5/frontend/output_session.cpp`, `program/{decode,prefill}.cpp`, `runtime/engine/{engine_core.h,qwen4_exp_core.cpp}`, `serve/openai_{chat,responses}_*.cpp`, `serve/rerank.cpp` |
 | [MirkoCovizzi/ninfer-rtx5090-mobile](https://github.com/MirkoCovizzi/ninfer-rtx5090-mobile) | `--adaptive-mtp`: each MTP round verifies the width its controller picks from measured draft survival and measured round cost, with CUDA Graphs per width | `models/qwen3_5/program/speculative/mtp_adaptive.h`, `decode.cpp`, `graphs.cpp`, `round_buffers.cpp` (`verification_view`), `planning/graph_profiles.cpp` |
 | [Wallawalla47/ninfer-custom](https://github.com/Wallawalla47/ninfer-custom) (Ian Ranson) | `--fast-prefill-kernel`: an INT8-G64 prompt attention kernel with FP16 PV per 64-key tile (this line extends it to `rk8v4` and the packed key codings and lets the device profile turn it on), and prefill chunks rounded to whole attention waves | `ops/softmax_attention/dense/causal_cache/prompt_i8_fast.cuh`, `prompt.cu`, `planning/startup.cpp` |
 | Wallawalla47 (Ian Ranson) | the engine worker recovers from an out-of-memory failure (David Oelfke's change in gzenz/ninfer, ported by Ian Ranson); `--kv-headroom-mib`, `--cuda-graph-allowance-mib`, `--thinking-budget-message` | `runtime/engine/engine_core.h`, `serve/serve_options.cpp` |
@@ -133,7 +134,7 @@ requests and `master`), each change re-applied on this tree and opt-in where it 
 | David Oelfke | CPU Vision (`--vision-residency cpu`): the tower in FP32 on host threads with packed token panels and key-blocked attention, no device Vision memory; `--rope-scaling-factor` and `--rope-scaling-original-context` interpolate positions past a threshold in the RoPE kernel | `models/qwen3_5/{load,execution}/vision_cpu.*`, `ops/kernel/rope.cuh`, `product/rope_yarn_options.h` |
 | Ian Ranson (Wallawalla47) | `--assistant-prefill`, `--unconstrained-response-format`, grouped `--help`, the build id, `--log-colours`, `--log-stats-panel`, levelled diagnostics records, a native Windows build | `serve/`, `apps/`, `product/logging/`, `CMakeLists.txt` |
 | Ian Ranson (Wallawalla47) | decode-graph kernels launched as programmatic dependents (`NINFER_PDL` on compatibility builds, always on native ones), split-KV attention for short prefill steps over long contexts, a runtime-shape BF16 GEMM fallback, MTP banks of mixed formats, measured CUDA Graph memory in `server_start` | `ops/`, `models/qwen3_5/program/graphs.cpp`, `core/device.cu` |
-| Ian Ranson (Wallawalla47) | ModelOpt NVFP4/FP8 and Quasar NVFP4 conversion, the `grouped_mse` scale search | `tools/convert/` |
+| Ian Ranson (Wallawalla47) | ModelOpt NVFP4/FP8 and Quasar NVFP4 conversion, the `grouped_mse` scale search (folded into the base's `grouped_search` by the October merge) | `tools/convert/` |
 | MGS Creativa, IMGillusion, Alexey Dubkov, Duncan Betts, giveen | a Vision loan takes only pages no reservation needs; LRU disk-tier eviction and positioned I/O; a quoted parameter closer stays inside its value; the fused RMSNorm and NVFP4 attention input at every width; the shared catalog default | `runtime/engine/context_cache/`, `core/disk_kv_*`, `models/qwen3_5/frontend/tool_call_parser.cpp`, `ops/attn_input_proj/nvfp4/` |
 | [Neroued/ninfer](https://github.com/Neroued/ninfer) `master` | the unified Q4, Q5, Q6 and Q8 A16 Linear templates with sliced-K schedules, beside this line's routes and kernels; each card class takes them only in the width bands where two sweeps on an RTX 3090, 4090 and 5090 measured them faster, and `NINFER_LINEAR_ROUTES=legacy\|unified` forces one table | `ops/linear/common/route_table.{h,cpp}`, `ops/linear/q{4,5,6,8}/` |
 | [Neroued/ninfer](https://github.com/Neroued/ninfer) `master` | the unified FP8, NVFP4 and BF16 Linear templates, and upstream's moves of the Q4, Q5, Q8, FP8, NVFP4 and BF16 fused projections onto them (attention and GDN inputs with their conv forms, LinearAdd, SwiGLU, the Q8 pair, the top-k heads, the Q8 grouped convolution and context-KV materialization), compiled beside this line's routes in `ops::detail::unified`; the FP8, NVFP4 and BF16 Linear shapes take them per width through `LinearRouteFamily` bands and each fused Op through its `unified/<op>` device-profile key, only where measured faster on the card | `ops/linear/common/route_table.{h,cpp}`, `ops/linear/{fp8,nvfp4,bf16}/`, `ops/{attn_input_proj,gdn_input_proj,linear_add,linear_swiglu,linear_pair,linear_topk,context_kv_materialize,dynamic_grouped_conv}/` |
@@ -174,7 +175,7 @@ Assessed and not taken:
 - Already in the base or in this line under another name: #61's per-image Vision budget
   (`--vision-max-merged`), #152's shared-prefix candidate at the system/developer frontier (the
   Engine's structural candidate, kept enabled for OpenAI requests), #221's MTP topology classes (Mykhailo Dementii),
-  #235's lower CUDA floor (12.8 here), the Windows builds of #59, #84 and #233, and #173's
+  #235's lower CUDA floor (12.8 here, 13.1 for a `120a` build), the Windows builds of #59, #84 and #233, and #173's
   `rk2v4-e8` (Daniel Parker's upstream PR of the E8-root codec that UDPSendToFailed's NInfer-4090 carried first).
 - #274 raises a context-cache default; `--max-shared-prefixes 7` gives the same capacity. #300 is
   an RFC bag whose items are in the base, taken above, or declined.
@@ -199,6 +200,8 @@ and have not been run.
 | attention | INT8-family small-T tiers routed by profile: warps, CTAs per SM, key block, split QK across producer warps (`q`), the next tile's codes and scales staged in registers a whole iteration ahead (`e`), both (`qe`) | `ops/softmax_attention/dense/causal_cache/small_t_i8{.cuh,_launch.cuh}`, `small_t.cu` |
 | attention | FP16 accumulation of P·V per key tile (small-T and INT8 prompt kernels), by profile (`attn_pv_f16`) or `NINFER_SMALLT_PV_F16` / `NINFER_PROMPT_PV_F16` | `small_t_i8.cuh`, `prompt_i8.cuh`, `ops/common/mma.cuh` |
 | attention | the fast prompt kernel also serves `rk8v4` (packed int4 values decoded from byte-pair `ldmatrix.trans`) and the packed key codings (`rk4v4`, `rk4v4-e8`, `rk2v4-e8`, expanded into the stage's INT8 tile); on by profile (`attn_prompt_fast`), `NINFER_PROMPT_FAST`, or `--fast-prefill-kernel` | `prompt_i8_fast.cuh`, `prompt.cu` |
+| attention | parallel query tiles (Neroued's ParallelGrouped, adapted to this line's INT8-family small-T kernel): a single-row chunked width that an instantiated tile divides runs one batched append, then every tile as a batch row of the multi-batch partial kernel over the cached keys, then one reduce that also takes the output gate; opt-in by profile (`attn_parallel_tiles`) or `NINFER_ATTN_PARALLEL_TILES` | `causal_softmax_attention.cpp`, `small_t.cu` |
+| attention | the fast NVFP4 prompt kernel (Ian Ranson, W47 8dcd89a10): QK on block-scaled FP4 Tensor Cores (`kind::mxf4nvf4`) from the stored K codes and scales with a two-term NVFP4 Q, V decoded in registers, FP16 PV per 64-key page, keys split across CTAs when row blocks alone leave SMs idle; prompt-route launches over more than 2048 visible keys under the same switch as the INT8 fast kernel; Blackwell builds only | `prompt_nvfp4_fast{.cuh,.cu,_plan.h}`, `prompt_nvfp4_q_terms.cuh`, `causal_softmax_attention.cpp` |
 | planning | the prefill chunk is the multiple of 128 near the request whose prompt-attention grid leaves the least of a last wave idle on the device, for either prompt kernel (Ian Ranson's fast kernel rounded its own chunks down to whole waves); `NINFER_PREFILL_ALIGN=0` keeps the request | `causal_softmax_attention.cpp`, `models/qwen3_5/program/planning/startup.cpp` |
 | ops | grids sized from the device: the chunked GDN output wave from occupancy, the sparse-MoE prefill cap from the SM count | `linear_attention/gated_delta_net/chunked/output.cu`, `sparse_moe/prefill/sparse_moe_prefill_kernels.cu` |
 | ops | ternary small-T band up to 64 columns, with 16-row 32-column and 32-row 16-column K8 schedules | `ops/linear/t2/t2_a8.{h,cu}` |
@@ -225,7 +228,7 @@ and have not been run.
   `ninfer_kv_cache_append_test` and `ninfer_tool_call_parser_test` cover the taken patches.
 - `ninfer_disk_kv_store_test` and `ninfer_disk_kv_bridge_test` (sanitizer-clean on a Mac without
   CUDA), `ninfer_softmax_attention_test --int8-prompt-only` (both INT8 prompt kernels),
-  `ninfer_qwen3_5_mtp_adaptive_test`, `ninfer_token_logprobs_test`, `ninfer_e8_root_decode_test`
+  `ninfer_qwen3_5_mtp_adaptive_test`, `ninfer_logprob_topk_test`, `ninfer_e8_root_decode_test`
   and the serve option and schema tests cover the fork ports.
 - `ninfer_sparse_moe_test` walks the NVFP4 profile at T = 1, 2 and 12 on sm_8x and from T = 1 to
   4097 on an sm_120a build; `ninfer_gdn_replay_fold_test` folds records packed at a narrower
@@ -293,3 +296,21 @@ and have not been run.
 
 Deployment files are not part of this public line. The production checkout adds them on a
 private branch on top of `master`.
+
+The October 2 sweep (base v0.12.0 merged; upstream `master`, Wallawalla47, gzenz and the smaller
+forks ported commit by commit, each naming its source):
+
+| source | behaviour | where it lives in the tree |
+|---|---|---|
+| fixes from every source | about forty fixes: engine admission, demotion pricing, shared-slot reservation, capture skipping, statistics publication, slot digests, Ctrl+C shutdown (`Engine::stop`), sparse-MoE grid capping, DFlash prefill controls, Anthropic `tool_choice` any, empty model names, `top_k` clamping, tool-call parameter ends, FFmpeg logging, reasoning-effort rendering, state-image byte counts | the commits after `ed10eae5` |
+| Ian Ranson (Wallawalla47) | the hybrid prefix cache keeps each conversation's resume point (#335 delta), a persistent save with `PrefixCacheSaveControl`, the prompt's n-gram index built off the worker | `runtime/engine/context_cache/hybrid_resource_manager.h`, `models/qwen3_5/program/prefix/`, `ngram.cpp` |
+| Gideon Zenz | branch anchors: a request whose prompt stops matching a retained conversation captures where it diverges (`ContextCacheOptions::branch_anchors`, from 1024 tokens of gain) | `resource_manager.h`, `planning/request_plan.cpp`, `engine_core.h` |
+| Warlax | the Q6 vocabulary-head GEMV and small-T MMA, small-T Q4 linear_add for 9-32 columns, Q4 MLP-down A8, MTP graph executables shared by launch shape past eight verify columns, an imatrix-searched 27B recipe, held-out perplexity and a llama.cpp KLD harness | `ops/linear/q6/`, `ops/linear_add/q4/`, `planning/graph_profiles.cpp`, `tools/` |
+| Neroued (adapted) | parallel query tiles for single-row chunked small-T attention over INT8-family caches (`attn_parallel_tiles`, opt-in) | `causal_softmax_attention.cpp`, `small_t.cu` |
+| Neroued | MX FP8 MMA (`kind::mxf8f6f4` with unit scales) and TMA split-K schedules for the FP8 A8 projections; native FP8/NVFP4 widening on CUDA 13.2+ | `ops/linear/fp8/`, `ops/common/mma.cuh`, `fp8_a16_codec.cuh` |
+| Ian Ranson, Duncan Betts (Wallawalla47) | Blackwell: the FP4 Tensor Core NVFP4-KV prompt kernel, a third stage for the NVFP4 linear_add tile, reciprocal NVFP4 activation quantize on the linear MMA route, two-row sliced-K tiles (FP8 head, unified Q8), PDL on the unified kernels with the fold submitted without a host wait, captured TMA descriptor copies on staged-descriptor builds | `prompt_nvfp4_fast.*`, `ops/linear/{nvfp4,fp8,q8}/`, `core/pdl.cuh`, `core/tma_descriptor_staging.cuh`, `program/prefill.cpp` |
+| build | every CUDA fatbin compressed: the merged ops archive passed 2 GiB on sm_86 and no app linked | `cmake/NinferTargets.cmake` |
+
+Not taken: control vectors (to be evaluated separately); Neroued #353 (closed; on Blackwell the FP4
+prompt kernel above is faster), #355/#351 (the FP4 prompt kernel splits keys itself), #324
+(superseded by the TMA split-K schedules).

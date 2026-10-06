@@ -3,6 +3,7 @@
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/sigmoid_mul.h"
 #include "ninfer/ops/softmax_attention.h"
+#include "ops/common/device_route.h"
 #include "ops/kv_cache/d256_profile.h"
 #include "ops/kv_cache_e8_root_host.h"
 #include "ops/kv_cache_lloyd4_oracle.h"
@@ -15,11 +16,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace ninfer;
@@ -3009,8 +3012,9 @@ void validate_batch_case(const BatchAttentionCase& test_case) {
 }
 
 // Handing the Op a gate must produce exactly what applying sigmoid_mul afterwards produces -- on
-// the route that folds the multiply into the reduce epilogue and on the routes that fall back to
-// the standalone kernel alike. Re-running the Op is safe: appending the same k/v to the same rows
+// the route that folds the multiply into the reduce epilogue (BF16 and every INT8-family coding:
+// int8, rk8v4, rk4v4, rk4v4-e8, rk2v4-e8) and on the routes that fall back to the standalone
+// kernel alike. Re-running the Op is safe: appending the same k/v to the same rows
 // again leaves the cache byte-identical, which the first run's cache check has just established.
 int verify_gated_attention(const std::string& label, const Geometry& geometry,
                            const BatchAttentionCase& test_case, const Tensor& tq, const Tensor& tk,
@@ -3435,11 +3439,24 @@ int run_quantized_batch_cases(KvCacheStorage storage, std::uint32_t seed) {
     return failures;
 }
 
+// NINFER_WIDE_PROGRESS names each wide case on stdout before it runs, so a launch that faults the
+// device (the rest of the run then fails) is tied to its case.
+void wide_progress(const Geometry& geometry, KvCacheStorage storage, const char* kind,
+                   std::int32_t width, std::int64_t base, std::int64_t detail = -1) {
+    static const bool enabled = std::getenv("NINFER_WIDE_PROGRESS") != nullptr;
+    if (!enabled) { return; }
+    std::cout << "wide " << geometry.name << ' ' << cache_name(storage) << ' ' << kind
+              << " width=" << width << " base=" << base;
+    if (detail >= 0) { std::cout << " detail=" << detail; }
+    std::cout << std::endl;
+}
+
 // Copy verification: one request verifies 17..64 columns through the chunked single-row route.
 int run_wide_copy_cases(KvCacheStorage storage) {
     int failures = 0;
     for (const Geometry& geometry : kGeometries) {
         for (std::int32_t width = 17; width <= 64; ++width) {
+            wide_progress(geometry, storage, "batch", width, 127);
             failures += run_batch_case(geometry, storage,
                                        {width,
                                         {127},
@@ -3451,6 +3468,7 @@ int run_wide_copy_cases(KvCacheStorage storage) {
         }
         for (std::int32_t width : {17, 24, 32, 33, 48, 64}) {
             for (std::int32_t valid : {0, 1, width - 1, width}) {
+                wide_progress(geometry, storage, "batch", width, 2048, valid);
                 failures += run_batch_case(geometry, storage,
                                            {width,
                                             {2048},
@@ -3460,6 +3478,7 @@ int run_wide_copy_cases(KvCacheStorage storage) {
                                             static_cast<std::uint32_t>(2000 + width + valid),
                                             true});
             }
+            wide_progress(geometry, storage, "a1+a3 wide", width, 8192);
             failures += run_a1_case(geometry, storage,
                                     {.tokens            = width,
                                      .base              = 8192,
@@ -3481,6 +3500,7 @@ int run_wide_copy_cases(KvCacheStorage storage) {
         // still inside the prompt-route region. Width 65 remains a prompt operation.
         for (std::int32_t width : {17, 32, 33, 64, 65}) {
             for (std::uint32_t maximum : {256u, 257u, 320u, 321u, 640u, 641u, 1024u, 1025u}) {
+                wide_progress(geometry, storage, "a3 loose envelope", width, 31, maximum);
                 failures += run_a3_case(geometry, storage,
                                         {.tokens            = width,
                                          .base              = 31,
@@ -3491,6 +3511,7 @@ int run_wide_copy_cases(KvCacheStorage storage) {
             }
         }
         for (std::int32_t width : {17, 32, 33, 64}) {
+            wide_progress(geometry, storage, "a1 graph", width, 8192);
             failures += run_a1_case(geometry, storage,
                                     {.tokens       = width,
                                      .base         = 8192,
@@ -3511,6 +3532,7 @@ int run_wide_copy_cases(KvCacheStorage storage) {
                                  .small_prefill = true};
         };
         for (std::int32_t width : {16, 17, 24, 33, 48, 64, 65}) {
+            wide_progress(geometry, storage, "a1 small prefill", width, 8192);
             failures += run_a1_case(geometry, storage, prefill(width, 8192, 2201u),
                                     MappingPattern::Fragmented);
             failures +=
@@ -3519,6 +3541,8 @@ int run_wide_copy_cases(KvCacheStorage storage) {
         for (std::int32_t width : {17, 40, 64}) {
             const std::int32_t threshold = width * keys_per_row;
             for (std::int32_t visible : {threshold - 1, threshold}) {
+                wide_progress(geometry, storage, "a1 small prefill threshold", width,
+                              visible - width);
                 failures += run_a1_case(geometry, storage, prefill(width, visible - width, 2203u),
                                         MappingPattern::Fragmented);
             }
@@ -3564,6 +3588,12 @@ int run_batch_cases() {
         kGeometries[1], kPlanRk4v4, {1, {0, 31, 63, 127, 511, 1023, 2047, 4095},
                                      {1, 1, 1, 1, 1, 1, 1, 1}, {7, 0, 5, 2, 6, 1, 4, 3},
                                      MappingPattern::Identity, 509u});
+    // Single-row rk-family decode and verification through the whole-wave split policy, whose
+    // reducer now carries the gate: T=1 at 8K keys, and T=6 inside the 5K-8.2K split cap.
+    failures += run_batch_case(kGeometries[0], kPlanRk4v4,
+                               {1, {8191}, {1}, {0}, MappingPattern::Fragmented, 510u});
+    failures += run_batch_case(kGeometries[0], kPlanRk8v4,
+                               {6, {5600}, {6}, {0}, MappingPattern::Identity, 511u});
     failures += run_case_allowing_arch_skip(
         "causal_softmax_attention FP8 KV cache batched", [&] {
             return run_batch_case(kGeometries[0], kPlanFp8,
@@ -3864,6 +3894,42 @@ int run_nvfp4_prompt_cases() {
     return failures;
 }
 
+// The fast NVFP4 prompt kernel (Blackwell builds) over prompt-route widths above 2048 visible
+// keys: partial and full row blocks, launches over enough key pages to split them across CTAs
+// (including an envelope far past the populated keys, so late splits own no visible key), V
+// magnitudes whose group scales need its FP16-partial rescale, and a production prefill chunk
+// after a long history. Elsewhere the same cases exercise the tiled kernel.
+int run_nvfp4_fast_prompt_cases() {
+    constexpr KvCacheStorage storage = KvCacheStorage::Nvfp4Group16;
+    int failures                     = 0;
+    const auto fast                  = [](AttentionCase test_case) {
+        test_case.fast_prompt_kernel = true;
+        return test_case;
+    };
+    const auto values = [&](AttentionCase test_case, float amplitude) {
+        test_case.value_scale = amplitude;
+        return fast(test_case);
+    };
+    for (const Geometry& geometry : kGeometries) {
+        failures += run_a1_case(geometry, storage, fast({256, 4000, 4256, 920u}),
+                                MappingPattern::Fragmented);
+        failures += run_a3_case(geometry, storage, fast({300, 1900, 8192, 921u}),
+                                MappingPattern::Offset);
+        failures += run_a1_case(geometry, storage, fast({1100, 3000, 4100, 922u, false, true}),
+                                MappingPattern::Identity);
+    }
+    const Geometry& h24 = kGeometries[0];
+    // |V| up to 900 gives rotated V group scales around 150-250, above the kernel's unscaled limit
+    // of 128; |V| up to 2048 reaches the largest UE4M3 scales.
+    failures += run_a1_case(h24, storage, values({300, 2000, 2300, 923u}, 900.0f),
+                            MappingPattern::Identity);
+    failures += run_a3_case(h24, storage, values({400, 1800, 2200, 924u}, 2048.0f),
+                            MappingPattern::Fragmented);
+    failures += run_a1_case(h24, storage, fast({4096, 8192, 8192 + 4096, 925u}),
+                            MappingPattern::Fragmented);
+    return failures;
+}
+
 // K8V4 decode attention (small_t, T<=6) dequantizes its FP8 key plane to BF16 before ordinary MMA
 // (same fallback pattern as plain FP8 above) and is ported to sm_86/sm_89; its value plane
 // (NVFP4) was already portable. The prompt (T>6) kernel still needs the same QK matmul rewrite as
@@ -3989,9 +4055,51 @@ int run_softmax_attention_nvfp4_tests() {
     failures += run_case_allowing_arch_skip(
         "causal_softmax_attention nvfp4 independent correctness (prompt)",
         [] { return run_nvfp4_prompt_cases(); });
+    failures += run_case_allowing_arch_skip(
+        "causal_softmax_attention nvfp4 independent correctness (fast prompt)",
+        [] { return run_nvfp4_fast_prompt_cases(); });
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention nvfp4 independent correctness\n";
     return failures == 0 ? 0 : 1;
+}
+
+// Parallel query tiles (attn_parallel_tiles): widths with an exact tile divisor run one batched
+// append, one multi-tile split-KV launch and one reduce; the rest keep the serial chunks. Both
+// must meet the same oracle, masks, gate and graph replay as the serial route.
+int run_parallel_tile_cases(const CachePlan& plan) {
+    const ops::DeviceRouteForce force("attn_parallel_tiles", "on");
+    int failures = 0;
+    for (const Geometry& geometry : kGeometries) {
+        for (std::int32_t width : {9, 12, 16, 17, 24, 32, 48, 64}) {
+            for (std::int32_t valid : {0, 1, width - 1, width}) {
+                failures += run_batch_case(geometry, plan,
+                                           {width,
+                                            {2048},
+                                            {valid},
+                                            {0},
+                                            MappingPattern::Fragmented,
+                                            static_cast<std::uint32_t>(2400 + width + valid),
+                                            true});
+            }
+            failures += run_a1_case(geometry, plan,
+                                    {.tokens            = width,
+                                     .base              = 8192,
+                                     .envelope_max      = static_cast<std::uint32_t>(8192 + width),
+                                     .seed              = 2501u,
+                                     .graph_replay      = true,
+                                     .wide_verification = true},
+                                    MappingPattern::Fragmented);
+            failures += run_a3_case(geometry, plan,
+                                    {.tokens            = width,
+                                     .base              = 8192,
+                                     .envelope_max      = static_cast<std::uint32_t>(8192 + width),
+                                     .seed              = 2502u,
+                                     .graph_replay      = true,
+                                     .wide_verification = true},
+                                    MappingPattern::Fragmented);
+        }
+    }
+    return failures;
 }
 
 int run_softmax_attention_wide_tests() {
@@ -3999,12 +4107,18 @@ int run_softmax_attention_wide_tests() {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
-    int failures = verify_workspace_capacity_contract();
+    // NINFER_WIDE_STORAGE=<cache name> runs one storage's wide cases alone.
+    const char* only     = std::getenv("NINFER_WIDE_STORAGE");
+    const auto selected  = [only](KvCacheStorage storage) {
+        return only == nullptr || std::string_view(only) == cache_name(storage);
+    };
+    int failures = only == nullptr ? verify_workspace_capacity_contract() : 0;
     for (const auto storage :
          {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256}) {
-        failures += run_wide_copy_cases(storage);
+        if (selected(storage)) { failures += run_wide_copy_cases(storage); }
     }
     for (const auto storage : {KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
+        if (!selected(storage)) { continue; }
         failures += run_case_allowing_arch_skip("causal_softmax_attention wide copy (NVFP4 values)",
                                                 [storage] { return run_wide_copy_cases(storage); });
     }
@@ -4254,5 +4368,16 @@ int run_softmax_attention_causal_cache_tests() {
     failures += run_batch_cases();
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention public-contract correctness\n";
+    return failures == 0 ? 0 : 1;
+}
+
+int run_softmax_attention_parallel_tile_tests() {
+    if (cuda_unavailable()) {
+        std::cout << "SKIP: no usable CUDA device\n";
+        return 77;
+    }
+    int failures = 0;
+    for (const CachePlan& plan : {kPlanInt8, kPlanRk8v4}) failures += run_parallel_tile_cases(plan);
+    std::cout << (failures == 0 ? "PASS" : "FAIL") << " parallel query tiles\n";
     return failures == 0 ? 0 : 1;
 }

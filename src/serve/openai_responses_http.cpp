@@ -46,6 +46,7 @@ struct StreamingResponse {
 ApiError responses_error(ApiError error) {
     if (error.param == "messages") { error.param = "input"; }
     if (error.param == "reasoning_effort") { error.param = "reasoning.effort"; }
+    if (error.param == "response_format") { error.param = "text.format"; }
     return error;
 }
 
@@ -241,14 +242,14 @@ Json paginated_input_items(const httplib::Request& request, const std::vector<Js
 void HttpServer::handle_responses(const httplib::Request& req, httplib::Response& res) {
     OpenAIResponsesCreateRequest request;
     OpenAIResponsesResolvedPrompt resolved;
+    ModelRegistry::Lease lease;
     const std::string id = new_openai_response_id();
     try {
-        RequestLimits limits;
-        limits.default_max_tokens        = options_.default_max_tokens;
-        limits.lenient_assistant_history = options_.lenient_assistant_history;
-        const auto body           = parse_json_body(req);
-        request                   = parse_openai_responses_create_request(body, limits);
-        validate_openai_model(request.prompt.model, public_model_id_);
+        const RequestLimits limits = request_limits(options_);
+        const auto body            = parse_json_body(req);
+        request                    = parse_openai_responses_create_request(body, limits);
+        lease                      = lease_model(request.prompt.model, req);
+        request.prompt.model       = lease.model();
         resolved = resolve_openai_responses_prompt(request.prompt, openai_responses_store_, id,
                                                    request.store);
         resolved.generation.ngram_session = resolve_ngram_session(req, body, options_);
@@ -270,12 +271,14 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         .output_tokens_explicit            = request.requested_max_output_tokens.has_value(),
         .preserve_thinking_semantic_change = resolved.preserve_thinking_semantic_change,
     };
+    GenerationService* const service = &lease.service();
     PreparedRequest prepared;
     try {
-        prepared = service_->prepare(
+        prepared = service->prepare(
             resolved.generation,
             request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
             {}, [&req] { return client_disconnected(req); }, std::move(resolved.cache_hints));
+        prepared.model_hold = std::make_shared<ModelRegistry::Lease>(std::move(lease));
     } catch (const ApiException& exception) {
         const ApiError error = responses_error(exception.error());
         record_request_rejected(make_request_rejection_log_context(
@@ -298,7 +301,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
     if (!request.stream) {
         GenerationOutcome outcome;
         try {
-            outcome = service_->run(prepared, nullptr, [&req] { return client_disconnected(req); });
+            outcome = service->run(prepared, nullptr, [&req] { return client_disconnected(req); });
         } catch (const ApiException& exception) {
             const ApiError error = responses_error(exception.error());
             lifecycle->failure(make_generation_request_failure(error));
@@ -378,7 +381,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         prepare_sse_response(res);
         res.set_chunked_content_provider(
             "text/event-stream",
-            [this, stream, id, lifecycle](std::size_t, httplib::DataSink& sink) -> bool {
+            [this, service, stream, id, lifecycle](std::size_t, httplib::DataSink& sink) -> bool {
                 if (stream->started.exchange(true, std::memory_order_acq_rel)) {
                     sink.done();
                     return true;
@@ -419,13 +422,15 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                         render_and_write(transport,
                                          [&] { return stream->encoder->reasoning_delta(text); });
                     };
-                    output.on_content = [&](const std::string& text) {
-                        render_and_write(transport,
-                                         [&] { return stream->encoder->content_delta(text); });
+                    output.on_content = [&](const std::string& text,
+                                            std::span<const ninfer::TokenLogprob> logprobs) {
+                        render_and_write(transport, [&] {
+                            return stream->encoder->content_delta(text, logprobs);
+                        });
                     };
                     output.is_cancelled = [&] { return transport.poll(); };
 
-                    outcome = service_->run(stream->prepared, &output);
+                    outcome = service->run(stream->prepared, &output);
                 } catch (const ClientDisconnected&) {
                     lifecycle->failure(
                         make_client_disconnected_failure(RequestFailurePhase::Transport));
@@ -519,15 +524,13 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
 
 void HttpServer::handle_response_input_tokens(const httplib::Request& req, httplib::Response& res) {
     try {
-        RequestLimits limits;
-        limits.default_max_tokens        = options_.default_max_tokens;
-        limits.lenient_assistant_history = options_.lenient_assistant_history;
+        const RequestLimits limits = request_limits(options_);
         OpenAIResponsesPromptRequest request =
             parse_openai_responses_input_tokens_request(parse_json_body(req), limits);
-        validate_openai_model(request.model, public_model_id_);
+        const ModelRegistry::Lease lease = lease_model(request.model, req);
         OpenAIResponsesResolvedPrompt resolved =
             resolve_openai_responses_prompt(request, openai_responses_store_, std::nullopt, false);
-        const int tokens = service_->count_prompt_tokens(
+        const int tokens = lease.service().count_prompt_tokens(
             resolved.generation, [&req] { return client_disconnected(req); });
         res.set_content(make_openai_response_input_tokens_body(tokens), "application/json");
     } catch (const ApiException& exception) {

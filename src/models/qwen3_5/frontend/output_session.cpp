@@ -170,6 +170,14 @@ struct PrefixExecutionTracker {
     bool tracking       = false;
 };
 
+// A content token's logprob record, held until the content channel publishes the token's first
+// byte, so that a record never precedes its text and a stop string's cut drops the records of the
+// bytes it removes.
+struct HeldLogprob {
+    TokenLogprob record;
+    std::uint64_t start = 0; // the token's first byte in content-channel bytes
+};
+
 struct DecoderState {
     std::string utf8_pending;
     std::string think_marker_pending;
@@ -180,6 +188,13 @@ struct DecoderState {
     std::uint64_t decoded_bytes    = 0;
     std::uint32_t reasoning_tokens = 0;
     std::optional<std::uint32_t> matched_stop_order;
+    // Bytes fed to the content channel after the leading-whitespace strip, and the part of them
+    // published; the difference is held for a possible stop string.
+    std::uint64_t content_fed       = 0;
+    std::uint64_t content_published = 0;
+    std::vector<HeldLogprob> held_logprobs;
+    // Records of content tokens whose bytes still wait in utf8_pending for the rest of a code point.
+    std::vector<TokenLogprob> utf8_logprobs;
 };
 
 struct SemanticThinkingState {
@@ -210,6 +225,8 @@ struct StopMatch {
     std::uint32_t committed_tokens  = 0;
     std::uint64_t byte_cut          = 0;
     std::uint32_t declaration_order = 0;
+    // The content-channel bytes that remain published after the cut.
+    std::uint64_t content_cut = 0;
     PublishedOutput output;
 };
 
@@ -254,10 +271,17 @@ void feed_channel(DecoderState& state, OutputChannel channel, std::string_view t
             PublishedOutput candidate = emitted;
             append_delta(candidate, channel, combined.substr(0, found));
             if (stop.include_in_output) { append_delta(candidate, channel, stop.text); }
+            // The combined text starts at the content channel's first unpublished byte.
+            const std::uint64_t content_cut =
+                state.content_published +
+                (channel == OutputChannel::Content
+                     ? found + (stop.include_in_output ? stop.text.size() : 0U)
+                     : 0U);
             *best_match = StopMatch{.found             = true,
                                     .committed_tokens  = committed_tokens,
                                     .byte_cut          = byte_cut,
                                     .declaration_order = order,
+                                    .content_cut       = content_cut,
                                     .output            = std::move(candidate)};
         }
     }
@@ -266,12 +290,45 @@ void feed_channel(DecoderState& state, OutputChannel channel, std::string_view t
     append_delta(emitted, channel, combined.substr(0, combined.size() - hold));
     state.stop_pending[channel_index(channel)] = combined.substr(combined.size() - hold);
     state.decoded_bytes += text.size();
+    if (channel == OutputChannel::Content) {
+        state.content_fed += text.size();
+        state.content_published = state.content_fed - hold;
+    }
 }
 
 void close_channel(DecoderState& state, OutputChannel channel, PublishedOutput& emitted) {
     std::string& pending = state.stop_pending[channel_index(channel)];
     append_delta(emitted, channel, std::move(pending));
     pending.clear();
+    if (channel == OutputChannel::Content) { state.content_published = state.content_fed; }
+}
+
+// Moves the held records whose first byte the content channel has published to `released`, in
+// generation order; a terminal state has published everything it will.
+void release_logprobs(DecoderState& state, std::vector<TokenLogprob>& released) {
+    std::size_t count = 0;
+    while (count < state.held_logprobs.size() &&
+           (state.terminal || state.held_logprobs[count].start < state.content_published)) {
+        released.push_back(std::move(state.held_logprobs[count].record));
+        ++count;
+    }
+    state.held_logprobs.erase(state.held_logprobs.begin(),
+                              state.held_logprobs.begin() + static_cast<std::ptrdiff_t>(count));
+    if (state.terminal) {
+        for (TokenLogprob& record : state.utf8_logprobs) { released.push_back(std::move(record)); }
+        state.utf8_logprobs.clear();
+    }
+}
+
+// Ends the records at a stop string's cut: the records of tokens with a byte before the cut are
+// released, the others belong to the cut bytes and are dropped.
+void cut_logprobs(DecoderState& state, std::uint64_t content_cut,
+                  std::vector<TokenLogprob>& released) {
+    for (HeldLogprob& held : state.held_logprobs) {
+        if (held.start < content_cut) { released.push_back(std::move(held.record)); }
+    }
+    state.held_logprobs.clear();
+    state.utf8_logprobs.clear();
 }
 
 void feed_content(DecoderState& state, std::string text, const StopPolicy& policy,
@@ -365,6 +422,8 @@ DecoderState terminal_state(DecoderState state) {
     state.think_marker_pending.clear();
     state.stop_pending = {};
     state.terminal     = true;
+    state.held_logprobs.clear();
+    state.utf8_logprobs.clear();
     return state;
 }
 
@@ -385,22 +444,28 @@ public:
         if (thinking.budget && *thinking.budget == 0) {
             throw std::invalid_argument("thinking budget must be positive");
         }
+        requested_budget          = thinking.budget;
+        early_close_available     = thinking.early_close_available;
         state.in_reasoning        = split_reasoning;
         prefix_execution.tracking = starts_in_reasoning;
         started_in_reasoning      = starts_in_reasoning;
-        semantic.budget           = thinking.budget;
+        semantic.budget           = thinking.effective_budget.has_value()
+                                        ? thinking.effective_budget
+                                        : thinking.budget;
         // The presentation decoder already tracks normal reasoning output. Keep the independent
         // semantic tracker dormant unless a cap needs it, so the default unlimited path does not
         // decode every model token twice.
-        semantic.in_reasoning = starts_in_reasoning && thinking.budget.has_value();
+        semantic.in_reasoning = starts_in_reasoning && semantic.budget.has_value();
     }
 
     std::shared_ptr<const fi::Tokenizer> tokenizer;
     StopPolicy policy;
     std::shared_ptr<const std::vector<TokenId>> thinking_control_tokens;
-    bool preserve_special     = false;
-    bool split_reasoning      = false;
-    bool started_in_reasoning = false;
+    bool preserve_special      = false;
+    bool split_reasoning       = false;
+    bool started_in_reasoning  = false;
+    bool early_close_available = true;
+    std::optional<std::uint32_t> requested_budget;
     DecoderState state;
     DecoderState preview_state;
     SemanticThinkingState semantic;
@@ -409,9 +474,45 @@ public:
     PrefixExecutionTracker preview_prefix_execution;
     std::optional<std::uint32_t> preview_execution_split_after;
     PublishedOutput preview_output;
+    // Records the preview released with their bytes, and those the last commit published.
+    std::vector<TokenLogprob> preview_logprobs;
+    std::vector<TokenLogprob> committed_logprobs;
     fi::ToolCallOutputDecoder tool_call_output;
     std::vector<GeneratedToolCall> tool_calls;
     ToolCallParseDiagnostics tool_call_parse;
+
+    // Holds the record of a token the decoder just fed when its bytes went to the content channel:
+    // they raised content_fed, or they wait outside the reasoning block for the rest of a code
+    // point. `fed_before` is content_fed before the token.
+    void hold_logprob(const runtime::RawTokenLogprob& raw, std::string_view bytes,
+                      std::uint64_t fed_before) {
+        DecoderState& decoder = preview_state;
+        const bool fed        = decoder.content_fed > fed_before;
+        if (!fed && (decoder.in_reasoning || decoder.utf8_pending.empty())) { return; }
+        TokenLogprob record;
+        record.id         = raw.id;
+        record.logprob    = raw.logprob;
+        record.bytes      = std::string(bytes);
+        record.top_ids    = raw.top_ids;
+        record.top_values = raw.top_values;
+        for (std::size_t k = 0; k < kMaximumTokenLogprobs; ++k) {
+            if (raw.top_ids[k] >= 0) {
+                record.top_bytes[k] = std::string(tokenizer->decoded_token(raw.top_ids[k]).bytes);
+            }
+        }
+        if (!fed) {
+            decoder.utf8_logprobs.push_back(std::move(record));
+            return;
+        }
+        // Tokens that began this token's code point come first.
+        for (TokenLogprob& earlier : decoder.utf8_logprobs) {
+            decoder.held_logprobs.push_back(
+                HeldLogprob{.record = std::move(earlier), .start = fed_before});
+        }
+        decoder.utf8_logprobs.clear();
+        decoder.held_logprobs.push_back(
+            HeldLogprob{.record = std::move(record), .start = fed_before});
+    }
     bool preview_ready = false;
     std::shared_ptr<text::GrammarState> grammar;
     std::unique_ptr<text::GrammarState> preview_grammar;
@@ -461,10 +562,14 @@ std::shared_ptr<text::GrammarState> OutputSession::grammar_state() const {
     return impl_ ? impl_->grammar : nullptr;
 }
 
-runtime::OutputDecision OutputSession::preview_model(std::span<const TokenId> tokens,
-                                                     std::uint32_t total_budget_remaining,
-                                                     FinishReason limit_reason) {
+runtime::OutputDecision
+OutputSession::preview_model(std::span<const TokenId> tokens, std::uint32_t total_budget_remaining,
+                             FinishReason limit_reason,
+                             std::span<const runtime::RawTokenLogprob> logprobs) {
     if (impl_ == nullptr) { throw std::logic_error("output session is empty"); }
+    if (!logprobs.empty() && logprobs.size() != tokens.size()) {
+        throw std::invalid_argument("logprob records do not align with the generated-token round");
+    }
     if (impl_->state.terminal) { throw std::logic_error("output session is already terminal"); }
     if (impl_->preview_ready) { throw std::logic_error("output session already has a preview"); }
     if (impl_->semantic.control_pending) {
@@ -486,6 +591,7 @@ runtime::OutputDecision OutputSession::preview_model(std::span<const TokenId> to
     impl_->preview_prefix_execution = impl_->prefix_execution;
     impl_->preview_execution_split_after.reset();
     impl_->preview_output.clear();
+    impl_->preview_logprobs.clear();
 
     const auto complete = [&](std::uint32_t count, FinishReason reason,
                               runtime::ContinuationAction continuation =
@@ -520,7 +626,7 @@ runtime::OutputDecision OutputSession::preview_model(std::span<const TokenId> to
         if (impl_->preview_state.in_reasoning) { ++impl_->preview_state.reasoning_tokens; }
         if (impl_->preview_semantic.in_reasoning) {
             ++impl_->preview_semantic.model_thinking_tokens;
-            if (impl_->preview_semantic.budget &&
+            if (impl_->early_close_available && impl_->preview_semantic.budget &&
                 impl_->preview_semantic.model_thinking_tokens > *impl_->preview_semantic.budget) {
                 throw std::logic_error("model output exceeded the licensed thinking budget");
             }
@@ -540,10 +646,15 @@ runtime::OutputDecision OutputSession::preview_model(std::span<const TokenId> to
         StopMatch match;
         const std::string_view bytes =
             !impl_->preserve_special && decoded.special ? std::string_view{} : decoded.bytes;
+        const std::uint64_t fed_before = impl_->preview_state.content_fed;
         feed_token_bytes(impl_->preview_state, bytes, impl_->policy, impl_->preview_output, count,
                          &match);
+        if (!logprobs.empty() && !bytes.empty()) {
+            impl_->hold_logprob(logprobs[index], bytes, fed_before);
+        }
 
         if (match.found) {
+            cut_logprobs(impl_->preview_state, match.content_cut, impl_->preview_logprobs);
             impl_->preview_state = terminal_state(std::move(impl_->preview_state));
             impl_->preview_state.matched_stop_order = match.declaration_order;
             impl_->preview_output                   = std::move(match.output);
@@ -556,16 +667,20 @@ runtime::OutputDecision OutputSession::preview_model(std::span<const TokenId> to
                 impl_->preview_output = std::move(before_output);
             }
             terminalize(impl_->preview_state, impl_->policy, impl_->preview_output, count);
+            release_logprobs(impl_->preview_state, impl_->preview_logprobs);
             return complete(count, FinishReason::StopToken);
         }
+        release_logprobs(impl_->preview_state, impl_->preview_logprobs);
     }
 
     const auto count = static_cast<std::uint32_t>(tokens.size());
     if (tokens.size() == total_budget_remaining) {
         terminalize(impl_->preview_state, impl_->policy, impl_->preview_output, count);
+        release_logprobs(impl_->preview_state, impl_->preview_logprobs);
         return complete(count, limit_reason);
     }
-    if (impl_->preview_semantic.in_reasoning && impl_->preview_semantic.budget &&
+    if (impl_->early_close_available && impl_->preview_semantic.in_reasoning &&
+        impl_->preview_semantic.budget &&
         impl_->preview_semantic.model_thinking_tokens == *impl_->preview_semantic.budget) {
         impl_->preview_semantic.control_pending = true;
         return complete(count, FinishReason::None, runtime::ContinuationAction::ApplyTargetControl);
@@ -576,7 +691,7 @@ runtime::OutputDecision OutputSession::preview_model(std::span<const TokenId> to
 std::uint32_t
 OutputSession::model_token_budget_remaining(std::uint32_t total_budget_remaining) const noexcept {
     if (impl_ == nullptr || !impl_->semantic.budget || !impl_->semantic.in_reasoning ||
-        impl_->semantic.applied) {
+        impl_->semantic.applied || !impl_->early_close_available) {
         return total_budget_remaining;
     }
     if (impl_->semantic.control_pending ||
@@ -623,6 +738,7 @@ runtime::OutputDecision OutputSession::preview_control(std::span<const TokenId> 
     impl_->preview_prefix_execution = impl_->prefix_execution;
     impl_->preview_execution_split_after.reset();
     impl_->preview_output.clear();
+    impl_->preview_logprobs.clear();
     for (std::size_t index = 0; index < tokens.size(); ++index) {
         const TokenId token                = tokens[index];
         const fi::DecodedTokenView decoded = impl_->tokenizer->decoded_token(token);
@@ -657,23 +773,6 @@ runtime::OutputDecision OutputSession::preview_control(std::span<const TokenId> 
     };
 }
 
-void OutputSession::validate_generation_capacity(std::uint32_t effective_output_tokens) const {
-    if (impl_ == nullptr) { throw std::logic_error("output session is empty"); }
-    if (!impl_->semantic.budget || !impl_->semantic.in_reasoning ||
-        effective_output_tokens <= *impl_->semantic.budget) {
-        return;
-    }
-    const std::uint64_t remaining =
-        static_cast<std::uint64_t>(effective_output_tokens) - *impl_->semantic.budget;
-    const std::uint64_t required =
-        static_cast<std::uint64_t>(impl_->thinking_control_tokens->size()) + 1U;
-    if (remaining < required) {
-        throw std::invalid_argument(
-            "effective output capacity after the thinking budget must fit the complete control "
-            "suffix and one post-close model token");
-    }
-}
-
 runtime::OutputDecision OutputSession::preview_terminal(FinishReason reason) {
     if (impl_ == nullptr) { throw std::logic_error("output session is empty"); }
     if (impl_->state.terminal) { throw std::logic_error("output session is already terminal"); }
@@ -688,7 +787,9 @@ runtime::OutputDecision OutputSession::preview_terminal(FinishReason reason) {
     impl_->preview_execution_split_after.reset();
     impl_->preview_semantic.control_pending = false;
     impl_->preview_output.clear();
+    impl_->preview_logprobs.clear();
     terminalize(impl_->preview_state, impl_->policy, impl_->preview_output, 0);
+    release_logprobs(impl_->preview_state, impl_->preview_logprobs);
     impl_->preview_ready = true;
     return runtime::OutputDecision{.accepted_tokens = 0, .finish_reason = reason};
 }
@@ -705,6 +806,8 @@ PublishedOutput OutputSession::commit_preview() {
     swap(impl_->prefix_execution, impl_->preview_prefix_execution);
     PublishedOutput output = std::move(impl_->preview_output);
     impl_->preview_output.clear();
+    impl_->committed_logprobs = std::move(impl_->preview_logprobs);
+    impl_->preview_logprobs.clear();
     impl_->preview_ready = false;
 
     for (OutputDelta& delta : output) {
@@ -732,6 +835,11 @@ PublishedOutput OutputSession::commit_preview() {
     return output;
 }
 
+std::vector<TokenLogprob> OutputSession::take_content_logprobs() noexcept {
+    return impl_ != nullptr ? std::exchange(impl_->committed_logprobs, {})
+                            : std::vector<TokenLogprob>{};
+}
+
 std::vector<GeneratedToolCall> OutputSession::take_tool_calls() noexcept {
     return impl_ != nullptr ? std::move(impl_->tool_calls) : std::vector<GeneratedToolCall>{};
 }
@@ -751,7 +859,10 @@ bool OutputSession::reasoning_closed() const noexcept {
 ThinkingBudgetStats OutputSession::thinking_stats() const noexcept {
     if (impl_ == nullptr) { return {}; }
     return ThinkingBudgetStats{
-        .configured_budget     = impl_->semantic.budget,
+        .requested_budget      = impl_->requested_budget,
+        // Without early close the cap is never enforced, so there is no effective budget.
+        .effective_budget      = impl_->early_close_available ? impl_->semantic.budget
+                                                              : std::nullopt,
         .model_thinking_tokens = impl_->semantic.model_thinking_tokens,
         .injected_tokens       = impl_->semantic.injected_tokens,
         .applied               = impl_->semantic.applied,

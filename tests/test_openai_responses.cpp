@@ -190,6 +190,23 @@ int test_budgets_and_nonsemantic_hints() {
                           "non-negative output budget accepted");
     }
 
+    // Without --default-max-tokens an omitted budget is derived from the Engine's lane budget; an
+    // explicit one never is.
+    const RequestLimits derived{.max_context = 4096};
+    const OpenAIResponsesCreateRequest derived_omitted =
+        parse_openai_responses_create_request(base, derived);
+    failures += check(derived_omitted.prompt.generation.derive_output_budget &&
+                          derived_omitted.prompt.generation.max_tokens == 4096 &&
+                          !derived_omitted.requested_max_output_tokens,
+                      "omitted output budget was not marked for the concurrent lane budget");
+    Json explicit_budget                 = base;
+    explicit_budget["max_output_tokens"] = 64;
+    const OpenAIResponsesCreateRequest derived_explicit =
+        parse_openai_responses_create_request(explicit_budget, derived);
+    failures += check(!derived_explicit.prompt.generation.derive_output_budget &&
+                          derived_explicit.prompt.generation.max_tokens == 64,
+                      "an explicit output budget was replaced by the derived default");
+
     Json hints = base;
     hints.update({{"background", false},
                   {"client_metadata", Json{{"session_id", "session-1"}, {"trace", Json::array()}}},
@@ -241,7 +258,7 @@ int test_reasoning_encrypted_content_request() {
                           .include_reasoning_encrypted_content,
                       "duplicate supported include entries are idempotent");
 
-    body["include"] = Json::array({"message.output_text.logprobs"});
+    body["include"] = Json::array({"file_search_call.results"});
     const ApiError unsupported =
         api_error([&] { (void)parse_openai_responses_create_request(body, limits()); });
     failures += check(unsupported.status == 400 && unsupported.param == "include" &&
@@ -879,8 +896,9 @@ int test_explicit_rejections() {
     const auto structured = parse_openai_responses_create_request(value, limits());
     failures += check(structured.prompt.generation.structured_output.kind ==
                               ninfer::StructuredOutputKind::JsonSchema &&
+                          structured.prompt.generation.structured_output.strict &&
                           structured.prompt.text_format.at("type") == "json_schema",
-                      "Responses schema retained");
+                      "Responses schema retained with strict mode");
     value["text"] = Json{{"format", Json{{"type", "json_schema"}}}};
     failures += check(api_code([&] {
                           (void)parse_openai_responses_create_request(value, limits());
@@ -1058,6 +1076,61 @@ int test_prompt_cache_key_retention() {
     return failures;
 }
 
+int test_reasoning_summary_options() {
+    const auto parse = [](Json reasoning) {
+        return parse_openai_responses_create_request(
+            Json{{"model", "m"}, {"input", "hello"}, {"reasoning", std::move(reasoning)}}, limits());
+    };
+    const auto rejected = [&](Json reasoning) {
+        return api_error([&] { (void)parse(std::move(reasoning)); });
+    };
+    int failures = 0;
+
+    for (const char* style : {"auto", "concise", "detailed"}) {
+        const auto request = parse(Json{{"effort", "low"}, {"summary", style}});
+        failures += check(request.prompt.generation.reasoning_effort ==
+                              RequestedReasoningEffort::Low,
+                          "a summary hint must not disturb reasoning.effort");
+        failures += check(parse(Json{{"generate_summary", style}}).prompt.generation
+                                  .reasoning_effort == std::nullopt,
+                          "the generate_summary alias is accepted");
+    }
+    failures += check(parse(Json{{"summary", "auto"}, {"generate_summary", "auto"}})
+                              .prompt.generation.reasoning_effort == std::nullopt,
+                      "matching summary and generate_summary are accepted");
+    failures += check(parse(Json{{"summary", nullptr}}).prompt.generation.reasoning_effort ==
+                          std::nullopt,
+                      "a null summary is treated as absent");
+
+    const ApiError bad_value = rejected(Json{{"summary", "verbose"}});
+    failures += check(bad_value.status == 400 && bad_value.param == "reasoning.summary" &&
+                          bad_value.code == "invalid_value",
+                      "an unknown summary style is rejected on its own parameter");
+    failures += check(rejected(Json{{"summary", 1}}).param == "reasoning.summary",
+                      "a non-string summary is rejected");
+    failures += check(rejected(Json{{"generate_summary", "x"}}).param ==
+                          "reasoning.generate_summary",
+                      "an invalid generate_summary names its own parameter");
+    failures += check(rejected(Json{{"summary", "auto"}, {"generate_summary", "concise"}}).code ==
+                          "invalid_value",
+                      "conflicting summary and generate_summary are rejected");
+    for (const char* key : {"context", "mode"}) {
+        failures += check(rejected(Json{{key, "x"}}).code == "reasoning_option_not_supported",
+                          "reasoning options that change model input stay rejected");
+    }
+
+    const OpenAIResponsesCreateRequest request = parse(Json{{"summary", "auto"}});
+    OpenAIResponsesRuntimeValues runtime;
+    const BuiltOpenAIResponse built =
+        make_openai_response_object("resp_test", 1, request, runtime, sample_outcome());
+    // This line answers a requested summary with its placeholder item and echoes the style
+    // (test_response_object holds the item's content); the base reported none.
+    failures += check(built.body.at("reasoning").at("summary") == "auto" &&
+                          built.body.at("output")[0].at("summary").size() == 1,
+                      "a requested summary is echoed and answered with the placeholder");
+    return failures;
+}
+
 int test_response_object() {
     const OpenAIResponsesCreateRequest request = parse_openai_responses_create_request(
         Json{{"model", "m"},
@@ -1144,6 +1217,77 @@ int test_response_object() {
                           tool_response.output_history[0].tool_calls[0].id ==
                               item.at("call_id").get<std::string>(),
                       "wire and continuation history share one stable function call_id");
+    return failures;
+}
+
+ninfer::TokenLogprob sample_logprob_record() {
+    ninfer::TokenLogprob record;
+    record.id      = 42;
+    record.logprob = -0.25F;
+    record.bytes   = "hi";
+    record.top_ids.fill(-1);
+    record.top_ids[0]    = 42;
+    record.top_values[0] = -0.25F;
+    record.top_bytes[0]  = "hi";
+    record.top_ids[1]    = 7;
+    record.top_values[1] = -1.0F;
+    record.top_bytes[1]  = "yo";
+    return record;
+}
+
+int test_logprobs_response() {
+    int failures    = 0;
+    const Json body = {{"model", "m"},
+                       {"input", "hello"},
+                       {"include", Json::array({"message.output_text.logprobs"})},
+                       {"top_logprobs", 2}};
+    const OpenAIResponsesCreateRequest request =
+        parse_openai_responses_create_request(body, limits());
+    failures += check(request.prompt.generation.logprobs &&
+                          request.prompt.generation.top_logprobs == 2,
+                      "Responses include and top_logprobs reach the Engine");
+    failures += check(
+        api_code([&] {
+            Json invalid = {{"model", "m"},
+                            {"input", "hello"},
+                            {"include", Json::array({"message.output_text.annotations"})}};
+            (void)parse_openai_responses_create_request(invalid, limits());
+        }) == "include_not_supported",
+        "unknown include entry is rejected");
+
+    GenerationOutcome outcome = sample_outcome();
+    outcome.content_logprobs.push_back(sample_logprob_record());
+    const BuiltOpenAIResponse built =
+        make_openai_response_object("resp_lp", 1, request, {}, outcome);
+    const Json& part = built.body.at("output").at(1).at("content").at(0);
+    failures += check(part.at("type") == "output_text" && part.at("logprobs").is_array(),
+                      "Responses output_text carries aggregate LogProb[]");
+    const Json& entry = part.at("logprobs").at(0);
+    failures += check(entry.at("token") == "hi" && entry.at("logprob") == -0.25 &&
+                          entry.at("bytes") == Json::array({104, 105}) &&
+                          entry.at("top_logprobs").size() == 2,
+                      "Responses aggregate LogProb has token, logprob, bytes and top_logprobs");
+    failures += check(built.body.at("top_logprobs") == 2,
+                      "Responses body reports the requested top_logprobs");
+
+    OpenAIResponsesEventStream encoder("resp_lp_stream", 1, request, {});
+    (void)encoder.start();
+    const std::vector<ninfer::TokenLogprob> records = {sample_logprob_record()};
+    bool found = false;
+    for (const std::string& wire : encoder.content_delta("hi", records)) {
+        const Json payload = parse_event(wire);
+        if (payload.at("type") == "response.output_text.delta") {
+            const Json& streamed = payload.at("logprobs");
+            found = payload.at("delta") == "hi" && streamed.size() == 1 &&
+                    streamed[0].at("token") == "hi" && !streamed[0].contains("bytes") &&
+                    streamed[0].at("top_logprobs").size() == 2;
+        }
+    }
+    failures += check(found, "a streamed text delta carries its tokens' log probabilities");
+    const OpenAIResponsesCreateRequest plain = parse_openai_responses_create_request(
+        Json{{"model", "m"}, {"input", "hello"}}, limits());
+    failures += check(!plain.prompt.generation.logprobs,
+                      "Responses gather no log probabilities unless asked");
     return failures;
 }
 
@@ -1336,10 +1480,62 @@ int test_input_tokens_uses_shared_state_path() {
     return failures;
 }
 
+int test_thinking_budget_extension() {
+    Json body    = {{"model", "m"}, {"input", "hello"}};
+    int failures = check(!parse_openai_responses_create_request(body, limits())
+                              .prompt.generation.thinking_budget,
+                         "absent Responses thinking_budget was not left unset");
+    body["thinking_budget"] = 512;
+    failures += check(parse_openai_responses_create_request(body, limits())
+                              .prompt.generation.thinking_budget == 512U,
+                      "Responses thinking_budget was not parsed");
+    body["thinking_budget"] = nullptr;
+    failures += check(!parse_openai_responses_create_request(body, limits())
+                           .prompt.generation.thinking_budget,
+                      "null Responses thinking_budget was not left unset");
+    for (const Json& invalid : {Json(0), Json(-5), Json("512"), Json(1.5)}) {
+        body["thinking_budget"] = invalid;
+        failures += check(api_error([&] {
+                              (void)parse_openai_responses_create_request(body, limits());
+                          }).param == "thinking_budget",
+                          "invalid Responses thinking_budget was accepted: " + invalid.dump());
+    }
+    // Input token counting never generates, so it does not accept a generation cap.
+    Json counting = {{"model", "m"}, {"input", "hello"}, {"thinking_budget", 512}};
+    failures += check(api_error([&] {
+                          (void)parse_openai_responses_input_tokens_request(counting, limits());
+                      }).param == "thinking_budget",
+                      "input token count accepted a thinking_budget");
+    return failures;
+}
+
+int test_graft_extension() {
+    Json body = {{"model", "m"}, {"input", "hello"}, {"graft", "product"}};
+    int failures =
+        check(parse_openai_responses_create_request(body, limits()).prompt.generation.graft ==
+                  "product",
+              "Responses graft name was not parsed");
+    body["graft"] = "";
+    failures += check(parse_openai_responses_create_request(body, limits()).prompt.generation.graft ==
+                          "",
+                      "empty Responses graft did not explicitly select none");
+    body["graft"] = nullptr;
+    failures += check(!parse_openai_responses_create_request(body, limits()).prompt.generation.graft,
+                      "null Responses graft was not left unset");
+    body["graft"] = true;
+    failures += check(api_error([&] {
+                          (void)parse_openai_responses_create_request(body, limits());
+                      }).param == "graft",
+                      "non-string Responses graft was accepted");
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
+    failures += test_graft_extension();
+    failures += test_thinking_budget_extension();
     failures += test_basic_request_and_resolution();
     failures += test_budgets_and_nonsemantic_hints();
     failures += test_reasoning_encrypted_content_request();
@@ -1352,7 +1548,9 @@ int main() {
     failures += test_explicit_rejections();
     failures += test_previous_response_call_graph();
     failures += test_prompt_cache_key_retention();
+    failures += test_reasoning_summary_options();
     failures += test_response_object();
+    failures += test_logprobs_response();
     failures += test_sse_sequence_and_failures();
     failures += test_input_tokens_uses_shared_state_path();
     if (failures == 0) { std::cout << "ok\n"; }

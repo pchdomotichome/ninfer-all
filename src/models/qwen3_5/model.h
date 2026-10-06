@@ -2,6 +2,7 @@
 
 #include "artifact/framing.h"
 #include "artifact/materializer.h"
+#include "models/qwen3_5/auxiliary_replicas.h"
 #include "models/qwen3_5/config.h"
 #include "models/qwen3_5/frontend/resources.h"
 #include "models/qwen3_5/weights.h"
@@ -42,7 +43,8 @@ public:
     [[nodiscard]] const BoundWeight& weight(WeightId id) const { return bound_.at(id.index); }
 
     // A Use whose matrix is Hadamard-rotated is only admitted where the execution layer rotates
-    // the activation: input() refuses it, rotated_input() carries its sign vector.
+    // the activation: input() refuses it, rotated_input() carries its sign vector. Auxiliaries
+    // (sign vectors, input gathers) are read on the weight's own device.
     [[nodiscard]] ops::WeightInput input(WeightUseId id) const;
     [[nodiscard]] ops::WeightInput input(WeightId id) const;
     [[nodiscard]] ops::WeightInput rotated_input(WeightUseId id) const;
@@ -73,6 +75,26 @@ public:
         return backing_.weight_pool();
     }
 
+    // Model suspend: the weight arenas give their device memory back and later receive the same
+    // bytes again from the artifact, at the same addresses, so every bound weight and captured
+    // graph stays valid. The caller has drained every stream that reads them.
+    [[nodiscard]] bool weights_suspendable() const noexcept { return backing_.suspendable(); }
+    [[nodiscard]] bool weights_resident() const noexcept { return backing_.device_backed(); }
+    [[nodiscard]] std::uint64_t weight_backing_bytes() const noexcept {
+        return backing_.device_backing_bytes();
+    }
+    [[nodiscard]] std::vector<artifact::MaterializedArtifact::RankArena>
+    device_weight_arenas() const {
+        return backing_.device_arenas();
+    }
+    void release_device_weights() { backing_.release_device_backing(); }
+    void restore_device_weight_backing(DeviceContext& device) {
+        backing_.restore_device_backing(device);
+    }
+    artifact::MaterializationStats reload_device_weights(DeviceContext& device) {
+        return backing_.upload_device_objects_again(device);
+    }
+
     // CPU Vision residency only: the tower decoded to host FP32, shared with every encode session.
     [[nodiscard]] const std::shared_ptr<const CpuVisionWeights>& cpu_vision() const noexcept {
         return cpu_vision_;
@@ -80,9 +102,11 @@ public:
 
 private:
     friend std::unique_ptr<Model> materialize_model(LoadPlan&&, DeviceContext&,
-                                                    const StartupObserver*);
+                                                    const StartupObserver*,
+                                                    const artifact::MaterializeOptions&);
     Model(Config config, LoadOptions options, ModelWeights weights, std::vector<BoundWeight> bound,
-          FrontendResources resources, InstanceInfo info, artifact::MaterializedArtifact backing,
+          AuxiliaryReplicas replicas, FrontendResources resources, InstanceInfo info,
+          artifact::MaterializedArtifact backing,
           std::optional<VisionOverlayLayout> vision_overlay,
           std::shared_ptr<const CpuVisionWeights> cpu_vision);
 
@@ -92,6 +116,7 @@ private:
     LoadOptions options_;
     ModelWeights weights_;
     std::vector<BoundWeight> bound_;
+    AuxiliaryReplicas replicas_;
     FrontendResources resources_;
     InstanceInfo info_;
     std::optional<VisionOverlayLayout> vision_overlay_;

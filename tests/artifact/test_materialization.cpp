@@ -3,6 +3,7 @@
 #include "artifact/views.h"
 #include "core/device.h"
 #include "core/evictable_weight_pool.h"
+#include "cuda_availability.h"
 
 #include <cuda_runtime.h>
 
@@ -329,7 +330,7 @@ void pipeline_rank_placement() {
 
     auto backing = materialize(reader, MaterializationPlan(plan), split);
     require(backing.stats().device_capacity_bytes == 528 &&
-                backing.stats().offloaded_device_capacity_bytes == 8 &&
+                backing.stats().device_capacity_by_rank == std::vector<std::uint64_t>{528, 8} &&
                 backing.stats().h2d_bytes == 536,
             "split materialization did not report one arena per rank");
     require(backing.device_parent(matrix).data != backing.device_parent(divisors).data,
@@ -369,7 +370,7 @@ int main(int argc, char** argv) {
     try {
         int count         = 0;
         const auto result = cudaGetDeviceCount(&count);
-        if (result == cudaErrorNoDevice || result == cudaErrorInsufficientDriver ||
+        if (ninfer::test::cuda_unavailable(result) ||
             (result == cudaSuccess && count == 0)) {
             return 77;
         }

@@ -1,8 +1,10 @@
 #pragma once
 
+#include "core/device_snapshot.h"
 #include "ninfer/types.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
+#include "models/qwen3_5/frontend/graft.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 #include "runtime/prefix_cache/cost.h"
 
@@ -15,6 +17,8 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -119,6 +123,14 @@ struct ContinuationSummary {
                                          const ContinuationSummary&) noexcept = default;
 };
 
+// A retained continuation serialized for disk: the session snapshot bytes, the resident depth
+// and the session digest (FNV-1a 64 of the token ledger, 16 hex characters).
+struct SessionSnapshot {
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t tokens = 0;
+    std::string session_digest;
+};
+
 struct SharedPrefixSummary {
     CheckpointSummary checkpoint;
     std::uint32_t active_references = 0;
@@ -211,7 +223,7 @@ public:
     std::unique_ptr<detail::SequencePlannerImpl> impl_;
 
     friend SequencePlanner make_sequence_planner(const execution::Parameters&, DeviceContext&,
-                                                 const EngineOptions&);
+                                                 const EngineOptions&, std::uint32_t);
 };
 
 // Hybrid prefix cache admission quote (docs/maintainer/hybrid-prefix-cache-spec.md §6). The
@@ -231,6 +243,11 @@ struct HybridCachePersistence {
     std::uint64_t snapshots = 0;
     std::uint64_t bytes     = 0;
     double seconds          = 0.0;
+    // Load only: what the file holds and needs, against this Host tier.
+    std::uint64_t saved_blocks        = 0;
+    std::uint64_t saved_snapshots     = 0;
+    std::uint64_t required_host_bytes = 0;
+    std::uint64_t host_bytes          = 0;
 };
 
 struct HybridPrefixCacheStats {
@@ -299,6 +316,7 @@ public:
     [[nodiscard]] const runtime::RequestPlanSummary& summary() const noexcept;
     [[nodiscard]] const runtime::IdentityMaterializationAssessment&
     identity_assessment() const noexcept;
+    [[nodiscard]] std::optional<std::uint32_t> graft_shared_slot() const noexcept;
 
 public:
     // Family-private construction/storage seam. Exact packages expose only the completed alias;
@@ -787,9 +805,11 @@ public:
         : owner_(std::exchange(other.owner_, nullptr)),
           transaction_(std::exchange(other.transaction_, 0)), rows_(other.rows_),
           row_count_(std::exchange(other.row_count_, 0)), tokens_(other.tokens_),
-          row_counts_(other.row_counts_), row_stride_(other.row_stride_), timing_(other.timing_) {
+          row_counts_(other.row_counts_), logprobs_(other.logprobs_),
+          row_stride_(other.row_stride_), timing_(other.timing_) {
         other.tokens_     = {};
         other.row_counts_ = {};
+        other.logprobs_   = {};
         other.row_stride_ = 0;
         other.timing_     = {};
     }
@@ -804,6 +824,11 @@ public:
 
     [[nodiscard]] std::span<const std::int32_t> row_counts() const noexcept { return row_counts_; }
 
+    // Row-major [rows,row_stride] logprob records, or empty when logprobs were not requested.
+    [[nodiscard]] std::span<const runtime::RawTokenLogprob> logprobs() const noexcept {
+        return logprobs_;
+    }
+
     [[nodiscard]] std::uint32_t row_stride() const noexcept { return row_stride_; }
 
     [[nodiscard]] runtime::ExecutionTiming execution_timing() const noexcept { return timing_; }
@@ -815,6 +840,7 @@ private:
     std::size_t row_count_ = 0;
     std::span<const TokenId> tokens_;
     std::span<const std::int32_t> row_counts_;
+    std::span<const runtime::RawTokenLogprob> logprobs_;
     std::uint32_t row_stride_ = 0;
     runtime::ExecutionTiming timing_;
 
@@ -828,7 +854,6 @@ struct PrefillProgress {
     runtime::ExecutionTiming timing;
     std::optional<PendingBatch> pending;
     std::optional<CaptureOffer> capture;
-    std::optional<FirstTokenLogprobs> first_token_logprobs;
 };
 
 enum class CaptureStatePlacement : std::uint8_t {
@@ -979,8 +1004,18 @@ public:
 
     // Engine owns scheduling and logical residency policy. Program owns physical lanes, opaque
     // capabilities, model state and one immutable pending transaction at a time.
+    // `branch_anchor`: a prompt depth at which the plan also captures a private long anchor
+    // (EngineOptions::context_cache.branch_anchors), the depth this prompt matched retained content
+    // to below any checkpoint that could resume it.
     [[nodiscard]] RequestBasePlan plan_request(const PreparedPrompt& prompt,
-                                               const runtime::ResolvedExecutionOptions& options);
+                                               const runtime::ResolvedExecutionOptions& options,
+                                               std::optional<std::uint32_t> branch_anchor = {});
+    // Tokens the prompt shares with a retained owner's ledger from position zero, with the prefix
+    // identity agreeing over them (zero when it does not); a stale or identity-less owner is zero.
+    [[nodiscard]] std::uint32_t matched_prefix_tokens(const ContinuationHandle& owner,
+                                                      const PreparedPrompt& prompt) const;
+    [[nodiscard]] std::uint32_t matched_prefix_tokens(const SharedPrefixHandle& owner,
+                                                      const PreparedPrompt& prompt) const;
     [[nodiscard]] std::vector<float> causal_score(PreparedPrompt&& prompt,
                                                   std::uint32_t first_target);
     [[nodiscard]] std::optional<AdmissionCandidate> inspect_admission(
@@ -1012,6 +1047,21 @@ public:
     progress_context_transaction(runtime::CancellationFlagView cancellation);
     void finalize_context_transaction() noexcept;
     [[nodiscard]] bool has_context_transaction() const noexcept;
+    // Model suspend, for a Program over a Model materialized suspendable. The Program must be idle:
+    // no admitted sequence, no context transaction or transfer, no Vision window. Suspend copies
+    // the live part of every rank's persistent state into `snapshot` and releases the device memory
+    // behind persistent state and workspace; resume maps fresh memory at the same addresses and
+    // copies the state back, emptying the snapshot. Captured CUDA Graphs stay valid throughout. A
+    // failed resume leaves the memory released and the snapshot intact, so it may be retried.
+    [[nodiscard]] bool device_state_suspendable() const noexcept;
+    [[nodiscard]] std::uint64_t device_state_backing_bytes() const noexcept;
+    // Every rank's persistent state: the largest snapshot a suspend can take.
+    [[nodiscard]] std::uint64_t persistent_capacity_bytes() const noexcept;
+    // Whether the orderly stop writes anything out (a hybrid prefix cache file, the disk tier):
+    // only then is a suspended model worth resuming at shutdown.
+    [[nodiscard]] bool shutdown_persists() const noexcept;
+    DeviceSnapshot::Stats suspend_device_state(DeviceSnapshot& snapshot);
+    DeviceSnapshot::Stats resume_device_state(DeviceSnapshot& snapshot);
     // True while the sequence's next media item is still encoding in a concurrent overlay Vision
     // window; the Engine gives that lane no prefill unit until it completes.
     [[nodiscard]] bool vision_pending(SequenceHandle sequence) const noexcept;
@@ -1108,6 +1158,22 @@ public:
     // it; hybrid_shutdown_save() reports the result.
     [[nodiscard]] std::optional<PhysicalUsageSnapshot> shutdown_cleanup() noexcept;
 
+    // Session persistence. Both run only when no context transaction is open. Save copies a
+    // catalogued continuation to host bytes without changing it. Restore builds a new catalogued
+    // continuation from bytes a server with the same model binding and execution configuration
+    // saved; the caller adopts the returned handle into its catalog or releases it.
+    [[nodiscard]] SessionSnapshot save_continuation(const ContinuationHandle& continuation,
+                                                    std::string_view model_binding);
+    [[nodiscard]] ContinuationHandle restore_continuation(std::span<const std::uint8_t> snapshot,
+                                                          std::string_view model_binding);
+    [[nodiscard]] std::uint32_t
+    continuation_depth(const ContinuationHandle& continuation) const noexcept;
+    [[nodiscard]] std::string continuation_digest(const ContinuationHandle& continuation) const;
+    [[nodiscard]] std::vector<SlotCheckpoint>
+    continuation_checkpoints(const ContinuationHandle& continuation) const;
+    [[nodiscard]] ContinuationSummary
+    continuation_summary(const ContinuationHandle& continuation) const;
+
     [[nodiscard]] bool isolated_request_feasible(const RequestBasePlan& base) const noexcept;
 
     // Hybrid prefix cache mode (ContextCacheMode::Hybrid). Admission runs as the same context
@@ -1124,6 +1190,13 @@ public:
     // number of cached blocks released.
     [[nodiscard]] std::uint32_t hybrid_reclaim_device_kv(std::uint32_t main_pages,
                                                          std::uint32_t backend_pages);
+    // Copies Host-only blocks a waiting request resumes from into Device pages the pools can
+    // spare as cache (hybrid-prefix-cache-spec §6.6), so its admission restores less. Returns the
+    // blocks whose copy started; absent while a prefetch or an admission is still in flight.
+    [[nodiscard]] std::optional<std::uint32_t> hybrid_prefetch(const PreparedPrompt& prompt,
+                                                               const RequestBasePlan& base);
+    // Device pages a prefetch could fill now: free ones and host-backed cached ones.
+    [[nodiscard]] std::uint32_t hybrid_prefetch_room() const noexcept;
     [[nodiscard]] HybridPrefixCacheStats hybrid_stats() const noexcept;
     // Installs the Engine's calibrated machine model for hybrid admission choice and eviction.
     void set_hybrid_cost(const runtime::prefix_cache::CacheCostModel& cost);
@@ -1134,13 +1207,31 @@ public:
     // shutdown_cleanup saves the tier back to it. `fingerprint` names everything the saved bytes
     // depend on.
     [[nodiscard]] HybridCachePersistence attach_hybrid_cache_file(const std::filesystem::path& path,
-                                                                  std::string fingerprint);
+                                                                  std::string fingerprint,
+                                                                  const StartupObserver& observer);
     [[nodiscard]] std::optional<HybridCachePersistence> hybrid_shutdown_save() const;
 
     [[nodiscard]] runtime::ProgramResourceRevision resource_revision() const noexcept;
     [[nodiscard]] PhysicalUsageSnapshot physical_usage() const noexcept;
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
+    // Largest output budget for a prompt of `prompt_tokens` whose admission entitlement (main KV and
+    // any MTP/DFlash backend KV, draft window included) fits one lane's share of each pool, so that
+    // every configured lane can hold such a request at once; clamped to the remaining context. Reads
+    // only fixed startup capacities, so any thread may call it.
+    [[nodiscard]] std::uint32_t concurrent_output_budget(std::uint32_t prompt_tokens) const noexcept;
     void reset_memory_peaks() noexcept;
+
+    // Inject a direct_kv or softprompt_kv graft into a synthesized shared-prefix entry.
+    // Called once at startup before any request is admitted.
+    void inject_graft(const PromptGraft& graft);
+
+    struct GraftCatalogEntry {
+        std::string name;
+        SharedPrefixHandle handle;
+        SharedPrefixSummary summary;
+    };
+    [[nodiscard]] std::vector<GraftCatalogEntry> graft_catalog_entries();
+    void set_graft_rm_slot(const std::string& name, std::uint32_t rm_slot);
 
 private:
     explicit Program(std::unique_ptr<detail::ProgramImpl> impl) noexcept;
@@ -1259,7 +1350,8 @@ struct RuntimeContractAccess {
     [[nodiscard]] static PendingBatch
     make_pending(const void* owner, std::uint64_t transaction, std::span<const SequenceHandle> rows,
                  std::span<const TokenId> tokens, std::span<const std::int32_t> row_counts,
-                 std::uint32_t row_stride, runtime::ExecutionTiming timing) {
+                 std::span<const runtime::RawTokenLogprob> logprobs, std::uint32_t row_stride,
+                 runtime::ExecutionTiming timing) {
         PendingBatch out;
         out.owner_       = owner;
         out.transaction_ = transaction;
@@ -1267,6 +1359,7 @@ struct RuntimeContractAccess {
         for (std::size_t i = 0; i < rows.size(); ++i) { out.rows_[i] = rows[i]; }
         out.tokens_     = tokens;
         out.row_counts_ = row_counts;
+        out.logprobs_   = logprobs;
         out.row_stride_ = row_stride;
         out.timing_     = timing;
         return out;
@@ -1291,6 +1384,7 @@ struct RuntimeContractAccess {
         pending.row_count_   = 0;
         pending.tokens_      = {};
         pending.row_counts_  = {};
+        pending.logprobs_    = {};
         pending.row_stride_  = 0;
         pending.timing_      = {};
     }
@@ -1300,7 +1394,8 @@ struct RuntimeContractAccess {
 
 [[nodiscard]] SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
                                                     DeviceContext& device,
-                                                    const EngineOptions& options);
+                                                    const EngineOptions& options,
+                                                    std::uint32_t resident_main_pages = 0);
 
 // Overlay Vision residency: sizes one encode window for these options, checks that the evictable
 // weight tail covers it and captures the weight pool's window mirror. Call once after load and

@@ -4,6 +4,7 @@
 #include "serve/request_validation.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -75,7 +76,7 @@ std::string require_function_name(const Json& object, std::string param) {
     return name;
 }
 
-void validate_standard_output_controls(const Json& body, const RequestLimits& limits) {
+void validate_standard_output_controls(const Json& body) {
     if (body.contains("functions") && !body.at("functions").is_null()) {
         const Json& functions = body.at("functions");
         if (!functions.is_array()) { bad_request("functions must be an array", "functions"); }
@@ -120,33 +121,21 @@ void validate_standard_output_controls(const Json& body, const RequestLimits& li
             }
         }
     }
+    bool logprobs = false;
     if (body.contains("logprobs") && !body.at("logprobs").is_null()) {
         if (!body.at("logprobs").is_boolean()) {
             bad_request("logprobs must be a boolean", "logprobs");
         }
-        if (body.at("logprobs").get<bool>()) {
-            bad_request("logprobs=true requires per-token log probabilities in the response, which "
-                        "NInfer does not provide",
-                        "logprobs", "logprobs_not_supported");
-        }
+        logprobs = body.at("logprobs").get<bool>();
     }
     if (const std::optional<int> top_logprobs = optional_int(body, "top_logprobs")) {
-        if (*top_logprobs != 0 && !limits.first_token_logprobs) {
-            bad_request(
-                "nonzero top_logprobs requires alternative-token probabilities in the response, "
-                "which this server does not provide without --first-token-logprobs",
-                "top_logprobs", "logprobs_not_supported");
-        }
-        if (*top_logprobs < 0 ||
-            *top_logprobs > static_cast<int>(ninfer::kMaximumFirstTokenTopLogprobs)) {
+        if (*top_logprobs < 0 || *top_logprobs > static_cast<int>(ninfer::kMaximumTokenLogprobs)) {
             bad_request("top_logprobs must be in [0," +
-                            std::to_string(ninfer::kMaximumFirstTokenTopLogprobs) + "]",
+                            std::to_string(ninfer::kMaximumTokenLogprobs) + "]",
                         "top_logprobs");
         }
-        if (*top_logprobs != 0 && body.contains("stream") && body.at("stream").is_boolean() &&
-            body.at("stream").get<bool>()) {
-            bad_request("top_logprobs is reported only for non-streaming requests", "top_logprobs",
-                        "logprobs_not_supported");
+        if (*top_logprobs != 0 && !logprobs) {
+            bad_request("top_logprobs requires logprobs to be true", "top_logprobs");
         }
     }
 
@@ -967,15 +956,21 @@ void parse_output_limit(const Json& body, const RequestLimits& limits, OpenAICha
         limit = optional_int(body, "max_tokens");
         param = "max_tokens";
     }
-    if (limit) {
-        // -1 is llama.cpp's "no limit", which its WebUI sends by default.
+    if (limit && *limit == -1) {
+        // llama.cpp's "no limit", which its WebUI sends by default: the largest budget that still
+        // lets every lane hold such a request at once (the remaining context with one lane),
+        // whatever --default-max-tokens says. A whole-context reservation would serialize them.
+        output.generation.max_tokens           = limits.max_context;
+        output.generation.derive_output_budget = true;
+        output.output_tokens_explicit          = true;
+    } else if (limit) {
         if (*limit < -1) {
             bad_request(std::string(param) + " must be nonnegative, or -1 for no limit", param);
         }
-        output.generation.max_tokens  = *limit == -1 ? kUnboundedOutputTokens : *limit;
+        output.generation.max_tokens  = *limit;
         output.output_tokens_explicit = true;
     } else {
-        output.generation.max_tokens = limits.default_max_tokens;
+        apply_default_output_limit(output.generation, limits);
     }
 }
 
@@ -983,7 +978,7 @@ void parse_output_limit(const Json& body, const RequestLimits& limits, OpenAICha
 
 OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestLimits& limits) {
     require_object(body, "request body must be a JSON object");
-    validate_standard_output_controls(body, limits);
+    validate_standard_output_controls(body);
     validate_constrained_decoding_extensions(body);
     validate_compatibility_hints(body);
 
@@ -992,11 +987,11 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
         output.generation.structured_output =
             parse_structured_output(body.at("response_format"), true, "response_format");
     }
-    // One model is resident, so an omitted model means that one; llama.cpp's WebUI omits it.
-    if (body.contains("model")) {
-        if (!body.at("model").is_string() || body.at("model").get<std::string>().empty()) {
-            bad_request("model must be a non-empty string", "model");
-        }
+    // One model is resident, so an omitted, null or empty model means that one: llama.cpp's
+    // WebUI omits it or sends "". The HTTP layer substitutes the served model. A model that is
+    // present but not a string is still a malformed request.
+    if (body.contains("model") && !body.at("model").is_null()) {
+        if (!body.at("model").is_string()) { bad_request("model must be a string", "model"); }
         output.model = body.at("model").get<std::string>();
     }
 
@@ -1008,9 +1003,10 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     parse_messages(body, limits.assistant_prefill, output.generation);
     parse_stop(body, output.generation);
     parse_sampling(body, output.generation);
-    if (const std::optional<int> top_logprobs = optional_int(body, "top_logprobs")) {
-        output.generation.first_token_top_logprobs = static_cast<std::uint32_t>(*top_logprobs);
+    if (body.contains("logprobs") && body.at("logprobs").is_boolean()) {
+        output.generation.logprobs = body.at("logprobs").get<bool>();
     }
+    output.generation.top_logprobs = optional_int(body, "top_logprobs").value_or(0);
     parse_stream_options(body, output);
     parse_response_observations(body, output);
     parse_output_limit(body, limits, output);
@@ -1019,6 +1015,8 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     output.generation.enable_thinking           = template_options.enable_thinking;
     output.generation.preserve_thinking         = template_options.preserve_thinking;
     output.generation.chat_template_kwargs_json = template_options.kwargs_json;
+    output.generation.graft                     = parse_graft_field(body);
+    output.generation.thinking_budget           = parse_thinking_budget_field(body);
     apply_openai_prompt_cache_policy(output.generation, cache_policy);
     return output;
 }

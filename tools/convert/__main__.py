@@ -12,7 +12,11 @@ from collections.abc import Mapping
 from .official_recipes import RECIPES
 from .pipeline import convert
 from .proposal import DEFAULT_RANKING, add_official_proposal
-from .qwen3_5 import build_model
+from .qwen3_5 import build_model as build_qwen3_5
+from .qwen4_exp import _ARCHITECTURES as QWEN4_EXP_ARCHITECTURES
+from .qwen4_exp import build_model as build_qwen4_exp
+from .qwen4_exp_gguf import RECIPES as QWEN4_EXP_GGUF_RECIPES
+from .qwen4_exp_gguf import with_gguf_expert_count
 from .recipe import Recipe
 from .sources.gguf import GGUFFile
 from .sources.safetensors import SafetensorsSource
@@ -23,7 +27,7 @@ from .ternary import RECIPES as TERNARY_RECIPES
 def _open_named_source(name: str, path: Path):
     if path.suffix == ".gguf":
         # The ternary and GGUF block recipes read their block formats themselves, without gguf-py.
-        if name in ("ternary", "gguf"):
+        if name in ("ternary", "gguf", "ngram"):
             return GGUFFile(path)
         from .sources.gguf_source import GGUFSource
 
@@ -85,7 +89,7 @@ def _recipe_parts(value: str):
 
 
 def _function(value: str):
-    recipes = {**RECIPES, **TERNARY_RECIPES, **GGUF_RECIPES}
+    recipes = {**RECIPES, **TERNARY_RECIPES, **GGUF_RECIPES, **QWEN4_EXP_GGUF_RECIPES}
     if value in recipes:
         return recipes[value]
     filename, function = _recipe_parts(value)
@@ -132,8 +136,10 @@ def main(argv=None):
     )
     parser.add_argument(
         "--components",
-        default="text",
-        help="comma-separated text,vision,mtp,dflash,dflash2",
+        help="comma-separated text,vision,mtp,dflash,dflash2 (default text); for "
+        "Qwen3.8-Flash-Next text,ngram (the default: the model with its n-gram table), text (the "
+        "model alone, its table read from a table artifact at run time) or ngram (that table "
+        "artifact), and vision beside text",
     )
     parser.add_argument(
         "--resource",
@@ -153,11 +159,13 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--rows-per-chunk", type=int, default=512)
-    parser.add_argument("--max-file-bytes", type=int, default=32_000_000_000)
+    parser.add_argument(
+        "--max-file-bytes",
+        type=int,
+        help="split the artifact into an entry and .part-NNNN files of at most this many bytes "
+        "(default: one file)",
+    )
     args = parser.parse_args(argv)
-    components = tuple(args.components.split(","))
-    if len(components) != len(set(components)):
-        raise ValueError("components must not repeat")
     paths = _pairs(args.source, "source")
     if "base" in paths:
         raise ValueError("select the base source with --model")
@@ -165,11 +173,23 @@ def main(argv=None):
     with ExitStack() as stack:
         base = stack.enter_context(SafetensorsSource(args.model))
         sources = SourceInputs(base, paths, stack)
+        architectures = base.config.get("architectures") or [None]
+        flash_next = architectures[0] in QWEN4_EXP_ARCHITECTURES
+        if args.components is None:
+            components = ("text", "ngram") if flash_next else ("text",)
+        else:
+            components = tuple(args.components.split(","))
+        if len(components) != len(set(components)):
+            raise ValueError("components must not repeat")
         companions = {
             key: sources[key] for key in ("dflash", "dflash2") if key in components
         }
         if "mtp" in components and "mtp" in paths:
             companions["mtp"] = sources["mtp"]
+        build_model = build_qwen4_exp if flash_next else build_qwen3_5
+        if build_model is build_qwen4_exp and "gguf" in paths:
+            # An expert-pruned release takes the model's config with its own expert count.
+            base.config = with_gguf_expert_count(base.config, paths["gguf"])
         model = build_model(
             base,
             components=components,

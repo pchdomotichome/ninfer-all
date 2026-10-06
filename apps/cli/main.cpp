@@ -199,8 +199,13 @@ void print_generation_summary(const ninfer::GenerationResult& result,
     print_metric("prompt tokens", std::to_string(result.prompt.prompt_tokens));
     print_metric("reused prompt tokens", std::to_string(result.reused_prompt_tokens));
     print_metric("generated tokens", std::to_string(generated));
-    if (result.thinking.configured_budget) {
-        print_metric("thinking budget", std::to_string(*result.thinking.configured_budget));
+    if (result.thinking.requested_budget) {
+        print_metric("thinking budget", std::to_string(*result.thinking.requested_budget));
+        if (result.thinking.effective_budget &&
+            *result.thinking.effective_budget != *result.thinking.requested_budget) {
+            print_metric("effective thinking budget",
+                         std::to_string(*result.thinking.effective_budget));
+        }
         print_metric("model thinking tokens",
                      std::to_string(result.thinking.model_thinking_tokens));
         print_metric("thinking control tokens", std::to_string(result.thinking.injected_tokens));
@@ -235,6 +240,19 @@ void print_generation_summary(const ninfer::GenerationResult& result,
     print_metric("CUDA Graph allowance", format_bytes(memory.cuda_graph_allowance_bytes));
     print_metric("CUDA Graph used", format_bytes(memory.cuda_graph_measured_bytes));
     print_metric("planned device total", format_bytes(reserved));
+    if (memory.expert_cache_bytes != 0) {
+        print_metric("gpu expert cache", format_bytes(memory.expert_cache_bytes));
+    }
+    // A pipeline: each device's own share, the primary device's repeated from above.
+    for (const auto& stage : memory.devices) {
+        const std::string gpu = "gpu " + std::to_string(stage.device) + " ";
+        print_metric(gpu + "weights", format_arena_used(stage.weights));
+        print_metric(gpu + "sequence", format_arena_used(stage.sequence));
+        print_metric(gpu + "workspace peak", format_arena_peak(stage.workspace));
+        if (stage.expert_cache_bytes != 0) {
+            print_metric(gpu + "expert cache", format_bytes(stage.expert_cache_bytes));
+        }
+    }
 
     const ninfer::SpeculativeStats& speculative = result.speculative;
     if (speculative.enabled) {
@@ -315,6 +333,9 @@ int main(int argc, char** argv) {
         engine_options.device                   = cli.device;
         engine_options.devices                  = cli.devices;
         engine_options.stage_layers             = cli.stage_layers;
+        engine_options.expert_residency              = cli.expert_residency;
+        engine_options.ngram_table                   = cli.ngram_table;
+        engine_options.expert_cache_bytes            = cli.expert_cache_bytes;
         engine_options.max_context              = cli.max_context;
         engine_options.kv_capacity              = cli.kv_capacity;
         engine_options.prefill_chunk            = cli.prefill_chunk;

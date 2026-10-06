@@ -5,7 +5,7 @@
 #   run.sh <model> [profile]
 #
 #   model             profiles
-#   qwen38-27b        tuned (default), int8, c8
+#   qwen38-27b        tuned (default), int8, c8   <- recommended
 #   qwen36-35b-a3b    tuned (default)
 #
 # `tuned` is the recommended profile: rk4v4 KV, speculation plus the draft head, the memory flags,
@@ -33,6 +33,9 @@
 #     --kv-dtype rk4v4 --embedding-q4 --lm-head-q6 --gdn-state-fp16 \
 #     --vision --vision-residency overlay
 #
+#   MTP accepts NINFER_DRAFT_TOKENS up to 15. Three suits chat and prose; for coding work that
+#   returns edited files, 11-15 decodes up to 1.85x faster (docs/performance.md has the table).
+#
 # rk4v4 KV (Lloyd-Max 4-bit keys) is 31% smaller than rk8v4 at the same decode speed, for +0.10%
 # perplexity over it. Measured beside a desktop on an RTX 3090 (2026-09-24), the DFlash2 set starts
 # at up to 180,224 tokens and needs about 1.45 GB more for 262,144 -- roughly what a headless card
@@ -52,18 +55,27 @@
 # NINFER_FALLBACK=off turns the step-down off.
 #
 # OVERRIDES, from the environment. All profiles: NINFER_MODEL (artifact path), NINFER_MODEL_DIR,
-# NINFER_SERVER, NINFER_HOST, NINFER_PORT. `tuned` also: NINFER_CONTEXT, NINFER_CONCURRENCY,
+# NINFER_SERVER, NINFER_HOST, NINFER_PORT, NINFER_CHAT_TEMPLATE (path to a local Jinja file, passed
+# straight to --chat-template; overrides the artifact's built-in template), NINFER_GRAFT_DIR,
+# NINFER_GRAFTS (off), NINFER_DEFAULT_GRAFT (see PROMPT GRAFTS below). `tuned` also:
+# NINFER_CONTEXT, NINFER_CONCURRENCY,
 # NINFER_KV_CAPACITY, NINFER_KV_DTYPE, NINFER_SPEC, NINFER_DRAFT_TOKENS, NINFER_PREFILL_CHUNK,
 # NINFER_VISION (on|off), NINFER_VISION_RESIDENCY, NINFER_HOST_STATE_SLOTS. Each spec's defaults (context, lanes, chunk)
 # are the ones that fit; the context figures below are extrapolated for a headless card, so treat
 # the first start as the confirmation and drop a rung if it refuses:
 # 229376 / 212992 / 196608 / 163840 / 131072 / 114688 / 98304 / 65536.
+#
+# PROMPT GRAFTS are optional and never shipped: nothing here needs one to start. Every NAME.bin with
+# its NAME.json sidecar in grafts/<model>/ (beside models/, or NINFER_GRAFT_DIR) is loaded as
+# --graft NAME=<file>, and a request selects it with "graft": "NAME" (docs/serving.md). No
+# directory or an empty one serves without grafts. NINFER_GRAFTS=off skips them;
+# NINFER_DEFAULT_GRAFT=NAME applies one to every request that names none.
 # ------------------------------------------------------------------------------------------------
 set -euo pipefail
 
 usage() {
   printf 'usage: %s <model> [profile]\n' "${0##*/}"
-  printf '  qwen38-27b       tuned (default), int8, c8\n'
+  printf '  qwen38-27b       tuned (default), int8, c8   (recommended)\n'
   printf '  qwen36-35b-a3b   tuned (default)\n'
 }
 
@@ -185,11 +197,24 @@ case "$model_key/$profile" in
     label='one request  |  64K context  |  INT8 KV  |  MTP3, ReplaySSM' ;;
 
   qwen38-27b/c8)
+    # Context cache sized per lane, so several agents rotating through the lanes find their own
+    # conversation still cached instead of re-prefilling it: two retained conversations per lane,
+    # one checkpoint StateImage per lane on the card beyond the active ones, and two per lane in
+    # pinned host memory. Measured at one lane on the default of two retained conversations, four
+    # rotating agents reused 12% of their prompts (TTFT 14 s); with room for all of them, 76% (2.9 s).
+    # MEMORY COST: this profile keeps the GDN state in BF16, so a StateImage is 147 MiB. The device
+    # slots take 8 x 147 MiB = 1.15 GiB of VRAM, the engine default at eight lanes, so that is
+    # unchanged; the host slots pin 16 x 147 MiB = 2.3 GiB of RAM. Retention is still bounded by the
+    # 16,384-token KV pool.
+    c8_lanes=8
+    c8_host_states_per_lane=2
     profile_args=(
       --max-context 8192 --kv-capacity 16384
-      --max-concurrency 8 --max-pending-requests 32 --pending-timeout-ms 600000
+      --max-concurrency "$c8_lanes" --max-pending-requests 32 --pending-timeout-ms 600000
       --prefill-chunk 512 --kv-dtype int8
       --spec mtp --draft-tokens 3 --lm-head-draft
+      --max-private-continuations "$((c8_lanes * 2))" --device-state-slots "$c8_lanes"
+      --host-state-slots "$((c8_lanes * c8_host_states_per_lane))"
     )
     label='up to eight requests  |  8K context  |  INT8 KV  |  MTP3, ReplaySSM' ;;
 
@@ -213,6 +238,10 @@ if [[ "$profile" == 'tuned' ]]; then
   label="$label  |  $vision_label"
   # Pinned host memory for the context cache: 74.5 MiB per slot on the 27B. Free on Linux; on Windows
   # WDDM charges it against the card, so a busy desktop needs fewer (see the README on startup).
+  # --max-private-continuations 8 below is what keeps several rotating conversations cached: the
+  # engine default is two per lane, and four agents on one lane then evict each other on every turn
+  # (12% prompt reuse against 76% with room for all four, measured 2026-09-28). A retained
+  # conversation costs no memory by itself; its KV pages and StateImages come from the pools above.
   HOST_STATE_SLOTS="${NINFER_HOST_STATE_SLOTS:-32}"
   profile_args+=(
     --max-pending-requests 16 --pending-timeout-ms 600000
@@ -221,6 +250,30 @@ if [[ "$profile" == 'tuned' ]]; then
     --host-kv-mib 8192
     --auto-prefix-grid
   )
+fi
+
+if [[ -n "${NINFER_CHAT_TEMPLATE:-}" ]]; then
+  profile_args+=(--chat-template "$NINFER_CHAT_TEMPLATE")
+fi
+
+# Same two layouts as models/: the checkout's grafts/ first, then the one beside the launcher.
+graft_dir="${NINFER_GRAFT_DIR:-$root/grafts/$model_key}"
+[[ -n "${NINFER_GRAFT_DIR:-}" || -d "$graft_dir" ]] || graft_dir="$script_dir/grafts/$model_key"
+graft_names=()
+if [[ "${NINFER_GRAFTS:-on}" != 'off' && -d "$graft_dir" ]]; then
+  for graft in "$graft_dir"/*.bin; do
+    [[ -f "$graft" && -f "${graft%.bin}.json" ]] || continue
+    name="$(basename -- "$graft" .bin)"
+    graft_names+=("$name")
+    profile_args+=(--graft "$name=$graft")
+  done
+fi
+if [[ -n "${NINFER_DEFAULT_GRAFT:-}" && "${NINFER_GRAFTS:-on}" != 'off' ]]; then
+  if [[ " ${graft_names[*]-} " != *" $NINFER_DEFAULT_GRAFT "* ]]; then
+    printf 'NINFER_DEFAULT_GRAFT=%s names no graft in %s\n' "$NINFER_DEFAULT_GRAFT" "$graft_dir" >&2
+    exit 2
+  fi
+  profile_args+=(--default-graft "$NINFER_DEFAULT_GRAFT")
 fi
 
 if [[ ! -x "$server" ]]; then
@@ -239,6 +292,9 @@ printf '%s  |  %s\n' "$title" "$label"
 if [[ "$profile" == 'tuned' ]]; then
   printf 'Cache: 8 shared / 8 private / %s host states  |  automatic prefix grid on\n' "$HOST_STATE_SLOTS"
 fi
+[[ -z "${NINFER_CHAT_TEMPLATE:-}" ]] || printf 'Chat template: %s\n' "$NINFER_CHAT_TEMPLATE"
+(( ${#graft_names[@]} == 0 )) || printf 'Grafts: %s%s\n' "${graft_names[*]}" \
+  "${NINFER_DEFAULT_GRAFT:+ (default $NINFER_DEFAULT_GRAFT)}"
 [[ -z "${hint:-}" ]] || printf '%s\n' "$hint"
 printf 'API: http://%s:%s/v1\n\n' "$HOST" "$PORT"
 
@@ -269,11 +325,32 @@ base_context="${NINFER_FALLBACK_BASE_CONTEXT:-$CONTEXT}"
 base_chunk="${NINFER_FALLBACK_BASE_CHUNK:-$PREFILL_CHUNK}"
 base_slots="${NINFER_FALLBACK_BASE_SLOTS:-$HOST_STATE_SLOTS}"
 server_log="$(mktemp)"
-trap 'rm -f -- "$server_log"' EXIT
+server_pipe="$server_log.pipe"
+mkfifo -- "$server_pipe"
+trap 'rm -f -- "$server_log" "$server_pipe"' EXIT
+# The server runs as a child rather than in place of this script, so its output can be read back
+# after it exits -- and a child does not get the signals sent to this script. Pass the stop
+# requests on: SIGTERM, which `docker stop` sends to this script (a container runs it as PID 1, and
+# PID 1 ignores a signal it does not handle), and a SIGINT that did not come from a terminal. A
+# terminal's Ctrl+C already reaches the whole process group, the server included; passing it on
+# again would count as the confirming second press.
+tee -- "$server_log" < "$server_pipe" &
+tee_pid=$!
+"$server" "$MODEL" --host "$HOST" --port "$PORT" "${profile_args[@]}" > "$server_pipe" 2>&1 &
+server_pid=$!
+trap 'kill -TERM "$server_pid" 2>/dev/null || true' TERM
+if [[ -t 0 ]]; then
+  trap ':' INT
+else
+  trap 'kill -INT "$server_pid" 2>/dev/null || true' INT
+fi
 set +e
-"$server" "$MODEL" --host "$HOST" --port "$PORT" "${profile_args[@]}" 2>&1 | tee "$server_log"
-status="${PIPESTATUS[0]}"
+wait "$server_pid"; status=$?
+# A handled signal ends the wait early, with the server still stopping; wait until it has.
+while kill -0 "$server_pid" 2>/dev/null; do wait "$server_pid"; status=$?; done
+wait "$tee_pid"
 set -e
+trap - TERM INT
 if (( status != 0 && rung < 5 )) &&
    grep -q -E 'runtime reservation requires|cudaMallocHost failed' "$server_log"; then
   next=$((rung + 1))
@@ -287,6 +364,7 @@ if (( status != 0 && rung < 5 )) &&
   printf '\nNot enough free GPU memory to start at context %s. Retrying at %s (prefill chunk %s, %s host state slots).\n' \
     "$CONTEXT" "$next_context" "$next_chunk" "$next_slots"
   printf 'Set NINFER_CONTEXT to choose your own, or NINFER_FALLBACK=off to fail instead.\n\n'
+  rm -f -- "$server_log" "$server_pipe"
   exec env NINFER_CONTEXT="$next_context" NINFER_PREFILL_CHUNK="$next_chunk" \
     NINFER_HOST_STATE_SLOTS="$next_slots" NINFER_FALLBACK_RUNG="$next" \
     NINFER_FALLBACK_BASE_CONTEXT="$base_context" NINFER_FALLBACK_BASE_CHUNK="$base_chunk" \

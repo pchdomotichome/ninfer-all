@@ -48,12 +48,17 @@ public:
     }
 
     ~CausalScoreCore() noexcept {
+        stop();
+        if (worker_.joinable()) { worker_.join(); }
+    }
+
+    // Refuses new calls; a call already accepted still completes.
+    void stop() noexcept {
         {
             std::lock_guard lock(queue_mutex_);
             stopping_ = true;
         }
         queue_cv_.notify_all();
-        if (worker_.joinable()) { worker_.join(); }
     }
 
     CausalScoreCore(const CausalScoreCore&)            = delete;
@@ -101,6 +106,8 @@ public:
         std::lock_guard lock(queue_mutex_);
         return !stopping_;
     }
+
+    [[nodiscard]] bool has_failed() const noexcept { return false; }
 
     void reset_memory_peaks() noexcept {
         try {

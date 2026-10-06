@@ -5,6 +5,14 @@ set(ninfer_op_tests
   silu_mul
   residual_add
   sigmoid_mul
+  hyper_connection
+  ple_inject
+  ngram_rows
+  qsa_indexer
+  sparse_attention
+  moe_route
+  moe_experts
+  moe_experts_gguf
   rmsnorm
   rmsnorm_pack_tail
   gated_rmsnorm
@@ -27,6 +35,7 @@ set(ninfer_op_tests
   scatter_bf16_batch
   target_logprobs
   paged_kv_window
+  logprob_topk
   position)
 foreach(op IN LISTS ninfer_op_tests)
   ninfer_add_op_test(ninfer_${op}_test
@@ -209,8 +218,14 @@ include("${CMAKE_CURRENT_LIST_DIR}/linear_swiglu/tests.cmake")
 
 add_test(NAME ninfer_softmax_attention_wide_test
   COMMAND ninfer_tests ninfer_softmax_attention_test --wide-only)
+add_test(NAME ninfer_softmax_attention_parallel_tiles_test
+  COMMAND ninfer_tests ninfer_softmax_attention_test --parallel-tiles-only)
+# Its FP64 oracle runs on the host and dominates: 24 minutes on an L40S host, past an hour on
+# smaller ones.
 set_tests_properties(ninfer_softmax_attention_wide_test
-  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 3600 RUN_SERIAL TRUE)
+  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 7200 RUN_SERIAL TRUE)
+set_tests_properties(ninfer_softmax_attention_parallel_tiles_test
+  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
 
 add_test(NAME ninfer_sparse_moe_wide_test
   COMMAND ninfer_tests ninfer_sparse_moe_test --wide-only)

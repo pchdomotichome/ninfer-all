@@ -2,6 +2,7 @@
 #include "ops/sparse_moe/prefill/sparse_moe_prefill.h"
 
 #include "core/device.h"
+#include "ops/common/device_multiprocessors.h"
 #include "ops/common/math.cuh"
 #include "ops/common/memory.cuh"
 #include "ops/common/mma.cuh"
@@ -22,6 +23,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <stdexcept>
 
@@ -467,19 +469,11 @@ __global__ __launch_bounds__(kExpertThreads, 1) void sparse_moe_prefill_small_ro
 // so any grid is correct; this caps the launch when the work list is long.
 constexpr int kPrefillMaxBlocksPerSm = 32;
 
+// Taken per device: a model split over several GPUs launches each stage on its own device.
 int prefill_max_blocks() {
-    static const int blocks = [] {
-        int device = 0;
-        int sms    = 0;
-        if (cudaGetDevice(&device) != cudaSuccess ||
-            cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device) != cudaSuccess ||
-            sms <= 0) {
-            cudaGetLastError();
-            sms = 170;
-        }
-        return kPrefillMaxBlocksPerSm * sms;
-    }();
-    return blocks;
+    const int sms = current_device_multiprocessors(0);
+    if (sms <= 0) { (void)cudaGetLastError(); }
+    return kPrefillMaxBlocksPerSm * (sms > 0 ? sms : 170);
 }
 
 // The narrow routed gate/up ships in both depths and the route picks one. A job is one nonempty
@@ -1396,6 +1390,12 @@ struct Nvfp4SourceDivisorEpilogue {
         const int index = shift >= 0 ? (row >> shift) : (row / divisor_rows);
         return value * __frcp_rn(divisors[index]);
     }
+
+    // Only multiplications, so nothing to contract: the same result as apply(value * scale).
+    __device__ __forceinline__ float apply_scaled(std::int32_t row, std::int32_t token, float value,
+                                                  float scale) const {
+        return apply(row, token, value * scale);
+    }
 };
 
 // A stacked plane reads its divisors per row; a plane with one carries its reciprocal and never
@@ -1403,7 +1403,8 @@ struct Nvfp4SourceDivisorEpilogue {
 Nvfp4SourceDivisorEpilogue nvfp4_divisor_epilogue(const Weight& weight) {
     const int rows = weight.weight_divisor_rows;
     if (rows == weight.n) { return {nullptr, 1.0F / weight.weight_scale_divisor, rows, -1}; }
-    const int shift = (rows > 0 && (rows & (rows - 1)) == 0) ? __builtin_ctz(rows) : -1;
+    const int shift =
+        (rows > 0 && (rows & (rows - 1)) == 0) ? std::countr_zero(static_cast<unsigned>(rows)) : -1;
     return {static_cast<const float*>(weight.weight_divisors), 0.0F, rows, shift};
 }
 
@@ -1761,9 +1762,12 @@ void launch_sparse_moe_prefill_nvfp4(const __nv_bfloat16* input, const SparseMoe
             using Rows              = Nvfp4ExpertGateUpRows<kPairRows>;
             using Raster            = Nvfp4RoutedRaster<Schedule::kBlockM>;
             const dim3 grid(kIntermediate / kPairRows, max_route_jobs);
-            nvfp4_w4a4_mma_kernel<Nvfp4RoutedGateUpGeometry, Schedule, Nvfp4SourceDivisorEpilogue,
-                                  Nvfp4RoutedGateUpOutput, Rows, true, Nvfp4RoutedGatherTokens,
-                                  Raster><<<grid, Schedule::kThreads, 0, stream>>>(
+            constexpr auto kernel =
+                nvfp4_w4a4_mma_kernel<Nvfp4RoutedGateUpGeometry, Schedule,
+                                      Nvfp4SourceDivisorEpilogue, Nvfp4RoutedGateUpOutput, Rows,
+                                      true, Nvfp4RoutedGatherTokens, Raster>;
+            const std::size_t shared_bytes = nvfp4_w4a4_shared_bytes<Schedule, kernel>();
+            kernel<<<grid, Schedule::kThreads, shared_bytes, stream>>>(
                 chunk, static_cast<const std::uint8_t*>(weights.routed_gate_up.qdata),
                 static_cast<const std::uint8_t*>(weights.routed_gate_up.scales), assignments, scale,
                 epilogue, output, Rows{jobs}, token_policy, Raster{jobs});
@@ -1785,10 +1789,12 @@ void launch_sparse_moe_prefill_nvfp4(const __nv_bfloat16* input, const SparseMoe
             using Schedule = typename decltype(tag)::type;
             using Raster   = Nvfp4RoutedDownRaster<Schedule::kBlockM, Schedule::kBlockN>;
             const dim3 grid(kHidden / Schedule::kBlockN, max_route_jobs);
-            nvfp4_w4a4_mma_kernel<Nvfp4RoutedDownGeometry, Schedule, Nvfp4SourceDivisorEpilogue,
-                                  Nvfp4RoutedDownOutput, Nvfp4W4a4IdentityRows, false,
-                                  Nvfp4RoutedPackedTokens, Raster>
-                <<<grid, Schedule::kThreads, 0, stream>>>(
+            constexpr auto kernel =
+                nvfp4_w4a4_mma_kernel<Nvfp4RoutedDownGeometry, Schedule,
+                                      Nvfp4SourceDivisorEpilogue, Nvfp4RoutedDownOutput,
+                                      Nvfp4W4a4IdentityRows, false, Nvfp4RoutedPackedTokens, Raster>;
+            const std::size_t shared_bytes = nvfp4_w4a4_shared_bytes<Schedule, kernel>();
+            kernel<<<grid, Schedule::kThreads, shared_bytes, stream>>>(
                     routed_middle, static_cast<const std::uint8_t*>(weights.routed_down.qdata),
                     static_cast<const std::uint8_t*>(weights.routed_down.scales), assignments,
                     scale, epilogue, output, Nvfp4W4a4IdentityRows{}, token_policy, Raster{jobs});
@@ -1813,12 +1819,16 @@ void launch_sparse_moe_prefill_nvfp4(const __nv_bfloat16* input, const SparseMoe
             using Rows              = Nvfp4SharedGateUpRows<kPairRows>;
             const dim3 grid(kIntermediate / kPairRows,
                             (tokens + Schedule::kBlockM - 1) / Schedule::kBlockM);
-            nvfp4_w4a4_mma_kernel<Nvfp4SharedGateUpGeometry, Schedule, Nvfp4SourceDivisorEpilogue,
-                                  Nvfp4SharedGateUpOutput, Rows, true>
-                <<<grid, Schedule::kThreads, 0, stream>>>(
+            constexpr auto kernel =
+                nvfp4_w4a4_mma_kernel<Nvfp4SharedGateUpGeometry, Schedule,
+                                      Nvfp4SourceDivisorEpilogue, Nvfp4SharedGateUpOutput, Rows,
+                                      true>;
+            const std::size_t shared_bytes = nvfp4_w4a4_shared_bytes<Schedule, kernel>();
+            kernel<<<grid, Schedule::kThreads, shared_bytes, stream>>>(
                     chunk, static_cast<const std::uint8_t*>(weights.shared_gate_up.qdata),
                     static_cast<const std::uint8_t*>(weights.shared_gate_up.scales), tokens, scale,
-                    epilogue, output, Rows{});
+                    epilogue, output, Rows{}, Nvfp4W4a4IdentityTokens{},
+                    Nvfp4W4a4MmaRasterRowFast{});
         };
         if (tokens < kNvfp4SharedSmallTokens) {
             launch(Nvfp4ScheduleTag<Nvfp4SharedGateUpSmallTSchedule>{});
@@ -1837,11 +1847,15 @@ void launch_sparse_moe_prefill_nvfp4(const __nv_bfloat16* input, const SparseMoe
             using Schedule = typename decltype(tag)::type;
             const dim3 grid(kHidden / Schedule::kBlockN,
                             (tokens + Schedule::kBlockM - 1) / Schedule::kBlockM);
-            nvfp4_w4a4_mma_kernel<Nvfp4SharedDownGeometry, Schedule, Nvfp4SourceDivisorEpilogue,
-                                  Nvfp4SharedDownOutput><<<grid, Schedule::kThreads, 0, stream>>>(
+            constexpr auto kernel = nvfp4_w4a4_mma_kernel<Nvfp4SharedDownGeometry, Schedule,
+                                                          Nvfp4SourceDivisorEpilogue,
+                                                          Nvfp4SharedDownOutput>;
+            const std::size_t shared_bytes = nvfp4_w4a4_shared_bytes<Schedule, kernel>();
+            kernel<<<grid, Schedule::kThreads, shared_bytes, stream>>>(
                 shared_middle, static_cast<const std::uint8_t*>(weights.shared_down.qdata),
                 static_cast<const std::uint8_t*>(weights.shared_down.scales), tokens, scale,
-                epilogue, output);
+                epilogue, output, Nvfp4W4a4IdentityRows{}, Nvfp4W4a4IdentityTokens{},
+                Nvfp4W4a4MmaRasterRowFast{});
         };
         if (tokens < kNvfp4SharedSmallTokens) {
             launch(Nvfp4ScheduleTag<Nvfp4SharedDownSmallTSchedule>{});

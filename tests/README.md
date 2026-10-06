@@ -54,6 +54,12 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
+On a machine without a usable CUDA device -- no GPU, an old driver, or only the CUDA toolkit's stub
+`libcuda` (`LD_LIBRARY_PATH` pointing at a directory with `libcuda.so.1` linked to
+`$CUDA_HOME/lib64/stubs/libcuda.so`, as CI does) -- every test that needs a device reports as
+skipped and the host tests still run. A test asks `tests/cuda_availability.h`; one that fails on its
+first CUDA call with the runtime's no-device message is skipped by CTest the same way.
+
 Alternatively, `cmake --preset dev` enables products, tests and benchmarks together.
 After building, `ctest --preset dev` runs the same CTest suite. See
 [Build system](../docs/maintainer/build-system.md) for local interpreter presets.
@@ -179,6 +185,44 @@ NINFER_TEST_ARTIFACT=$PWD/out/qwen3_6_35b_a3b.ninfer \
   ctest --test-dir build -R ninfer_qwen3_5_moe_real_test --output-on-failure
 ```
 
+Qwen3.8-Flash-Next runs end to end from a converted GSQ-RCO release. The generate test answers
+fact prompts and a 4,463-token needle, decodes three sequences as one batch and from a restored
+snapshot, and, where decode replays CUDA graphs, checks every token against eager decode.
+`NINFER_QWEN4_EXP_EXPERTS` picks `device`, `host` or `disk`, `NINFER_QWEN4_EXP_DEVICES` the pipeline
+devices, and `NINFER_QWEN4_EXP_EXPERT_CACHE_MIB` the device expert cache of host or disk experts
+(a 24 GB card's on a larger one); a model stored without its n-gram table takes the table artifact
+from `NINFER_QWEN4_EXP_NGRAM_TABLE`:
+
+```bash
+NINFER_QWEN4_EXP_ARTIFACT=$PWD/models/flash-next-q2_0.ninfer \
+NINFER_QWEN4_EXP_NGRAM_TABLE=$PWD/models/flash-next-ngram-table.ninfer \
+NINFER_QWEN4_EXP_EXPERTS=host \
+  ctest --test-dir build -R ninfer_qwen4_exp_generate_real --output-on-failure
+```
+
+Its Ops are also composed over a slice of the BF16 checkpoint against an FP64 golden.
+`tools/reference/fetch_slice.py` range-fetches the first blocks, embedding, final mixer, head and
+the needed n-gram rows (`--exclude ngram_embedding` keeps the 102 GB table out), and
+`tools/reference/qwen4_exp.py --layers 4 --head --out DIR/golden` writes the golden:
+
+```bash
+NINFER_QWEN4_EXP_SLICE=$PWD/fn_slice \
+  ctest --test-dir build -R ninfer_qwen4_exp_slice_real --output-on-failure
+```
+
+Token log probabilities run through the public Engine on either family. The test checks that each
+record spells its token's text and that the drawn token tops its distribution under greedy
+decoding, that gathering them changes no generated token, that streaming, a stop string, three
+requests decoded as one batch and a JSON grammar's mask all reach the records, and that a request
+without them gathers none. `NINFER_LOGPROBS_ARTIFACT` names the artifact, and the test is skipped
+without it; `NINFER_LOGPROBS_NGRAM_TABLE` names a Qwen3.8-Flash-Next table artifact, and
+`NINFER_LOGPROBS_SPECULATIVE=mtp` or `dflash2` verifies the tokens in speculative rounds:
+
+```bash
+NINFER_LOGPROBS_ARTIFACT=$PWD/out/qwen3_8_27b.ninfer NINFER_LOGPROBS_SPECULATIVE=dflash2 \
+  ctest --test-dir build -R ninfer_engine_logprobs_real_test --output-on-failure
+```
+
 Without `NINFER_TEST_ARTIFACT`, CTest marks these real Engine tests as skipped. Run GPU integration
 tests serially. `NINFER_PREFIX_REAL_SCENARIO` selects a focused prefix scenario such as `vision`,
 `pressure-resume` or `concurrent`; the default is `all`. These integration checks
@@ -239,8 +283,22 @@ broad additions without a concrete regression risk do not belong in the permanen
 
 ## DFlash2 Engine integration
 
-The real test uses an artifact containing DFlash2 and checks output budgets, speculative activity,
-penalty-enabled sampling, compact batches with unequal budgets, same-route same-seed replay,
+The DFlash prefill regression checks actual draft KV contents after a StateImage fork and a
+conflicting decode binding, including shortened chunks and oversized local/full KV appends. It
+uses native Program storage and the production prefill route; select the draft component stored in
+the artifact:
+
+```bash
+cmake --build build -j --target ninfer_qwen3_5_dflash_prefill_real_test
+NINFER_TEST_ARTIFACT=$PWD/out/qwen3_8_27b_nvfp4.ninfer \
+  build/tests/ninfer_qwen3_5_dflash_prefill_real_test dflash2
+NINFER_TEST_ARTIFACT=$PWD/out/qwen3_6_35b_a3b.ninfer \
+  build/tests/ninfer_qwen3_5_dflash_prefill_real_test dflash
+```
+
+The Engine test uses an artifact containing DFlash2 and checks output budgets, speculative activity,
+a forced thinking-control append, penalty-enabled sampling, compact batches with unequal budgets,
+same-route same-seed replay,
 retained/fresh prefix behavior and absence of a full backend KV pool. A shared DFlash/DFlash2 fixture starts decode at token 63, verifies across the page
 boundary, stops after one target column at token 64, and checks the exact retained frontier and
 subsequent generation with and without reuse.
@@ -309,7 +367,56 @@ bash tests/test_docker_build_cache.sh docker
 
 This uses the real build stage with a tiny CMake fixture and isolated cache mounts. It checks added
 and removed compiler flags, changed and restored cached defaults, environment flags, old header
-timestamps, non-code edits, and one-file incremental compilation. Docker BuildKit is required;
+timestamps, non-code edits, and one-file incremental compilation. `NINFER_TOOLCHAIN_IMAGE=<image>`
+stands in for the Dockerfile's toolchain stage, as CI does with the one it publishes. Docker BuildKit is required;
 `podman` can be passed instead to check that builder. Logs and the fixture remain in an ignored
 `build-cache-test.*` directory; the test image and its small build caches remain in the builder.
 The check needs the Dockerfile's build dependencies but no GPU or model weights.
+
+## CPU structured-output qualification
+
+`ninfer_structured_output_test` and `ninfer_unicode_scalar_output_test` use a byte
+vocabulary and EOS without loading an artifact or executing CUDA. The stdin JSONL
+`ninfer_native_schema_probe` preserves schema declaration order and tests native
+compilation, token masks, accepted transitions and EOS. It is an executable fixture,
+not an unattended CTest target.
+
+`text/native_schema_oracle.py` generates and independently checks the corpus using
+Python `jsonschema`, calendar/time arithmetic, strict UTF-8 and Node.js ECMA262 regexes.
+Node is found on PATH, or selected through `NINFER_ORACLE_NODE`. Pass `--schemas` for
+an optional JSON list of `{name, schema}` application schemas; these are compile-only.
+No model or inference HTTP server is used by these tools.
+
+```bash
+cmake --build build --target ninfer_structured_output_test ninfer_unicode_scalar_output_test ninfer_native_schema_probe --parallel 2
+ctest --test-dir build -R '^ninfer_(structured_output|unicode_scalar_output)_test$' --output-on-failure
+python3 tests/text/native_schema_oracle.py --emit-corpus corpus.jsonl --report oracle.json
+build/tests/ninfer_native_schema_probe < corpus.jsonl > native.jsonl
+python3 tests/text/native_schema_oracle.py --native-results native.jsonl --report comparison.json
+```
+
+These host tests establish supported grammar semantics. Actual tokenizer,
+speculative decoding and concurrent serving behavior are exercised separately
+by the real-model structured-output tests described above.
+
+The `ninfer_unique_strings_test`, `ninfer_structured_unique_test` and
+`ninfer_unique_strings_masks_test` are CPU-only. They exercise decoded-string
+equality, remaining enum prefixes, nested scopes, rollback/forks, actual mask versus
+commit consistency, multi-item vocabulary tokens, EOS and reasoning/MTP boundaries.
+The JSONL `ninfer_schema_normalization_probe` reports normalized schemas for an
+independent JSON Schema validator to compare accepted instances. Neither probe
+loads model artifacts.
+
+`schema_semantics_oracle.py` generates independent Draft 2020-12 cases for
+string uniqueness, escaped equality, finite-domain exhaustion, nested scopes,
+union intersections, local references and explicit unsupported contracts.
+`compare_schema_semantics.py` compares the native byte-vocabulary probe with
+the unchanged input schema. Accepting an invalid value always fails; expected
+compile errors and declared serialization restrictions are reported separately.
+
+```bash
+python3 tests/text/schema_semantics_oracle.py --output semantic-corpus.jsonl
+build/tests/ninfer_native_schema_probe < semantic-corpus.jsonl > semantic-native.jsonl
+python3 tests/text/compare_schema_semantics.py --cases semantic-corpus.jsonl --results semantic-native.jsonl --report semantic-comparison.json
+ctest --test-dir build -R '^ninfer_(structured_output|unicode_scalar_output|unique_strings|structured_unique|unique_strings_masks)_test$' --output-on-failure
+```

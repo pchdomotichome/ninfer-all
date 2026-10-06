@@ -1,4 +1,5 @@
 #include "core/device.h"
+#include "cuda_availability.h"
 
 #include <cuda_runtime.h>
 
@@ -15,9 +16,7 @@ int fail(const char* message) {
     return 1;
 }
 
-bool cuda_unavailable(cudaError_t err) {
-    return err == cudaErrorNoDevice || err == cudaErrorInsufficientDriver;
-}
+using ninfer::test::cuda_unavailable;
 
 int expect_throws_device(int device_id) {
     try {
@@ -85,6 +84,9 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaGetDeviceFlags(&actual_flags));
     if ((actual_flags & cudaDeviceScheduleMask) != expected_flags) {
         return fail("CUDA did not apply the requested synchronization schedule");
+    }
+    if (std::string_view(ctx.sync_mode()).empty()) {
+        return fail("sync_mode() returned an empty name");
     }
     if (ctx.device != 0) {
         ++failures;

@@ -39,22 +39,57 @@ struct TypeCase {
 
 std::vector<TypeCase> cases() {
     return {
-        {QType::GGUF_Q8_0, "q8_0", {0}},
-        {QType::GGUF_Q2_K, "q2_k", {80, 82}},
-        {QType::GGUF_Q3_K, "q3_k", {108}},
-        {QType::GGUF_Q4_K, "q4_k", {0, 2}},
-        {QType::GGUF_Q5_K, "q5_k", {0, 2}},
-        {QType::GGUF_Q6_K, "q6_k", {208}},
-        {QType::GGUF_IQ2_XXS, "iq2_xxs", {0}},
-        {QType::GGUF_IQ2_XS, "iq2_xs", {0}},
-        {QType::GGUF_IQ2_S, "iq2_s", {0}},
-        {QType::GGUF_IQ3_XXS, "iq3_xxs", {0}},
-        {QType::GGUF_IQ3_S, "iq3_s", {0}},
-        {QType::GGUF_IQ1_S, "iq1_s", {0}},
-        {QType::GGUF_IQ1_M, "iq1_m", {}},
-        {QType::GGUF_IQ4_NL, "iq4_nl", {0}},
-        {QType::GGUF_IQ4_XS, "iq4_xs", {0}},
+        {QType::GGUF_Q8_0, "q8_0", {0}},       {QType::GGUF_Q2_K, "q2_k", {80, 82}},
+        {QType::GGUF_Q3_K, "q3_k", {108}},     {QType::GGUF_Q4_K, "q4_k", {0, 2}},
+        {QType::GGUF_Q5_K, "q5_k", {0, 2}},    {QType::GGUF_Q6_K, "q6_k", {208}},
+        {QType::GGUF_IQ2_XXS, "iq2_xxs", {0}}, {QType::GGUF_IQ2_XS, "iq2_xs", {0}},
+        {QType::GGUF_IQ2_S, "iq2_s", {0}},     {QType::GGUF_IQ3_XXS, "iq3_xxs", {0}},
+        {QType::GGUF_IQ3_S, "iq3_s", {0}},     {QType::GGUF_IQ1_S, "iq1_s", {0}},
+        {QType::GGUF_IQ1_M, "iq1_m", {}},      {QType::GGUF_IQ4_NL, "iq4_nl", {0}},
+        {QType::GGUF_IQ4_XS, "iq4_xs", {0}},   {QType::GGUF_Q4_0, "q4_0", {0}},
+        {QType::GGUF_Q5_0, "q5_0", {0}},       {QType::GGUF_Q2_0, "q2_0", {0}},
     };
+}
+
+float half_value(const std::uint8_t* p) {
+    __half h;
+    std::memcpy(&h, p, sizeof(h));
+    return __half2float(h);
+}
+
+// An independent host decode of the formats simple enough to state here, each value d * (code -
+// offset): Q4_0 (low nibbles first, then high), Q5_0 (Q4_0 plus bit j of qh as bit 4 of value j)
+// and Q2_0 (two bits per value, low bits first). Empty for every other type.
+std::vector<float> host_decode(QType qtype, const std::vector<std::uint8_t>& bytes) {
+    std::vector<float> out;
+    const auto block = gguf_block_shape(qtype);
+    if (qtype != QType::GGUF_Q4_0 && qtype != QType::GGUF_Q5_0 && qtype != QType::GGUF_Q2_0) {
+        return out;
+    }
+    const std::size_t blocks = bytes.size() / block.bytes;
+    out.reserve(blocks * block.elements);
+    for (std::size_t i = 0; i < blocks; ++i) {
+        const std::uint8_t* b = bytes.data() + i * block.bytes;
+        const float d         = half_value(b);
+        for (int j = 0; j < block.elements; ++j) {
+            int code = 0;
+            if (qtype == QType::GGUF_Q2_0) {
+                code = ((b[2 + j / 4] >> (2 * (j % 4))) & 3) - 1;
+            } else {
+                const std::uint8_t* qs = b + (qtype == QType::GGUF_Q5_0 ? 6 : 2);
+                code                   = j < 16 ? (qs[j] & 0xF) : (qs[j - 16] >> 4);
+                if (qtype == QType::GGUF_Q5_0) {
+                    std::uint32_t qh;
+                    std::memcpy(&qh, b + 2, sizeof(qh));
+                    code = (code | int(((qh >> j) & 1U) << 4)) - 16;
+                } else {
+                    code -= 8;
+                }
+            }
+            out.push_back(d * float(code));
+        }
+    }
+    return out;
 }
 
 void check(cudaError_t status, const char* what) {
@@ -134,10 +169,12 @@ Error compare(const std::vector<float>& got, const std::vector<double>& want) {
     return {std::sqrt(num / std::max(den, 1e-30)), worst / std::max(scale, 1e-30)};
 }
 
-int run_type(const TypeCase& c, std::uint32_t seed) {
+// K = 1536 and K = 2560, Qwen3.8-Flash-Next's hidden width, whose 80 slices leave the vector
+// products' last pass over a row with half of a warp's lanes idle.
+int run_type(const TypeCase& c, std::uint32_t seed, std::int32_t k) {
     constexpr std::int32_t kRows = 256;
-    constexpr std::int32_t kK    = 1536;
-    const std::int32_t widths[]  = {1, 2, 3, 5, 8, 9, 17, 40, 70, 130};
+    const std::int32_t kK        = k;
+    const std::int32_t widths[]  = {1, 2, 3, 4, 5, 8, 9, 17, 40, 70, 130};
     const std::int32_t max_t     = 130;
     std::mt19937 rng(seed);
     int failures = 0;
@@ -165,6 +202,10 @@ int run_type(const TypeCase& c, std::uint32_t seed) {
             std::cerr << c.name << ": non-finite dequantized weight\n";
             return 1;
         }
+    }
+    if (const auto host = host_decode(c.qtype, host_blocks); !host.empty() && host != exact) {
+        std::cerr << "FAIL " << c.name << ": dequantization differs from the host decode\n";
+        return 1;
     }
 
     std::normal_distribution<float> normal(0.0f, 1.0f);
@@ -303,9 +344,12 @@ int main() {
         int failures      = 0;
         std::uint32_t seed = 9001;
         for (const auto& c : cases()) {
-            const int f = run_type(c, seed++);
-            std::cout << (f == 0 ? "OK   " : "FAIL ") << "gguf " << c.name << '\n';
-            failures += f;
+            for (const std::int32_t k : {1536, 2560}) {
+                const int f = run_type(c, seed++, k);
+                std::cout << (f == 0 ? "OK   " : "FAIL ") << "gguf " << c.name << " K=" << k
+                          << '\n';
+                failures += f;
+            }
         }
         std::cout << (failures == 0 ? "OK" : "FAIL") << " GGUF Linear\n";
         return failures == 0 ? 0 : 1;

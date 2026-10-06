@@ -3,7 +3,8 @@
 One line of [NInfer](https://github.com/Neroued/ninfer) for the RTX 3090, RTX 4090, RTX 5090 and RTX
 PRO 6000 Blackwell, consolidated from the forks that carry it and extended with this repository's
 own work. The base is the `master` of
-[ashalliants/ninfer-3090](https://github.com/ashalliants/ninfer-3090): v0.11.0 and
+[ashalliants/ninfer-3090](https://github.com/ashalliants/ninfer-3090): v0.12.0 (with its prompt
+grafts, `/slots` session persistence, the effective thinking budget and worker recovery) and
 the multi-GPU pipeline stages, most of both written by [Warlax](https://github.com/WarlaxZ), on the
 line [Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090) started from Neroued's NInfer.
 On top of it come patches from [TertiumOrganum1/ninfer-3090](https://github.com/TertiumOrganum1/ninfer-3090),
@@ -65,6 +66,34 @@ filled to it, both models find two of the three needles.
 
 ## What this line adds
 
+- **Model suspend.** With `--model-suspend` an idle server gives its device memory back without
+  exiting -- `POST /v1/models/{id}/suspend` -- and takes it again on the next request or on
+  `/resume`, with its retained conversations intact: every device allocation sits at a fixed
+  address, so the CUDA Graphs and caches survive, and only the live persistent bytes travel to host
+  memory (free KV pages stay behind). On an RTX 3090 serving Ternary Bonsai 2 27B, a suspend takes
+  the card from 7.9 GiB in use to 0.3 GiB (the CUDA context) in 0.33 s, and a resume takes 1.1 s,
+  almost all of it the weights read again from a warm page cache (0.8 s with `--suspend-weights
+  host`). Greedy output and prefix reuse are identical before and after, on one device, across
+  pipeline stages, with MTP, with the hybrid prefix cache and with overlay Vision. See
+  [Model suspend](docs/serving.md#model-suspend).
+- **Several models behind one server.** Started with `--models-dir` or a llama.cpp-style
+  `--models-preset` INI instead of an artifact, `ninfer-serve` is a router with llama.cpp's API:
+  `GET /models`, `POST /models/load` and `/models/unload`, `GET /models/sse`, the `model` field
+  choosing the model of each request, and `--models-max` loaded at once. A model started with
+  `--model-suspend` makes room by going to sleep rather than unloading, and wakes with its retained
+  conversations: on an RTX 3090 with two 27B models swapping in one 24 GB card, a wake took 1.8 s
+  where a cold load took 11.6 s, with identical output. See
+  [Several models](docs/serving.md#several-models-router).
+- **llama.cpp's native endpoints.** `POST /completion` and OpenAI's legacy `POST /v1/completions`
+  continue a raw prompt (text, token ids, or both mixed) with llama.cpp's response objects and
+  streams, and `POST /tokenize`, `/detokenize` and `/apply-template` expose the tokenizer and the
+  chat template. Greedy completion of the prompt `/apply-template` renders gives the very text
+  `/v1/chat/completions` gives for the same messages. See
+  [Raw-prompt completion](docs/serving.md#raw-prompt-completion-and-the-tokenizer).
+- **Rerank.** `POST /v1/rerank` (Jina's and llama.cpp's shape, TEI's too) ranks documents with the
+  served model as the judge, in Qwen3-Reranker's yes/no formulation, scoring each by
+  P(yes) / (P(yes) + P(no)) from the answer token's exact log probabilities. See
+  [Rerank](docs/serving.md#rerank).
 - **GGUF block formats.** Qwen3.8-27B GGUF releases that choose a ggml quantization type per tensor,
   such as ISTA-DASLab's GSQ-RCO models, import without requantization: the converter recipe
   `qwen3_8_27b_gguf` copies every quantized tensor's blocks unchanged, and the runtime multiplies
@@ -107,6 +136,27 @@ filled to it, both models find two of the three needles.
   planner shared one executable between windows where BF16 takes the prompt kernel (up to 128 keys)
   and windows where it takes small-T. The planner now asks the attention op which route each
   captured call takes.
+- **Parallel query tiles (opt-in).** A single-row verification or short prefill over an INT8-family
+  cache can run its 9 to 64 columns as parallel tiles of one split-KV launch after one batched KV
+  append, instead of serial chunks: the device profile key `attn_parallel_tiles` (calibrated) or
+  `NINFER_ATTN_PARALLEL_TILES=1`.
+- **Branch anchors (opt-in).** `--branch-anchors` captures a request where its prompt stops
+  matching a retained conversation, so an edited or forked conversation resumes from there.
+- **Blackwell kernels.** FP8 A8 projections use the block-scaled MX FP8 MMA with TMA split-K
+  schedules; an NVFP4 KV cache prefills past 2048 visible keys with QK on FP4 tensor cores under
+  `--fast-prefill-kernel` or the profile's `attn_prompt_fast`; the unified kernels launch as
+  programmatic dependents in captured graphs; with CUDA 13.2 the FP8 and NVFP4 A16 operands widen
+  natively. All of it compiles only into `120a` builds.
+- **Qwen3.8-Flash-Next.** ISTA-DASLab's GSQ-RCO GGUF releases of the 125B-parameter MoE (512
+  experts, about 6B active) convert without requantization (`qwen3_8_flash_next_gguf`), with their
+  n-gram table in the same file or in a table artifact every release shares, and run as their own
+  model family: experts on the GPUs of a `--devices` pipeline (the 37.6 GB Q2_0 release decodes at 90 tok/s
+  on two RTX 3090 Ti), in pinned host memory with the most used of them cached on one GPU
+  (`--expert-residency host`, 48 tok/s on one RTX 3090), or left in the artifact's files and
+  streamed into a GPU cache (`--expert-residency disk`, under 1 GB of RAM). It serves up to eight
+  requests at once with prompt-prefix reuse and structured output, and reads images and video with
+  `--vision`; MTP is not available (no release carries its layer). See
+  [Qwen3.8-Flash-Next](docs/qwen3-8-flash-next.md).
 - **Reference measurements** of Ternary Bonsai 2 27B and Qwen3.8-27B on the RTX 3090, 4090 and
   5090 up to the full window, the largest context each card serves and fills, every draft length
   from one to fifteen, several requests at once, and the previous master on the same hosts:
@@ -134,7 +184,8 @@ filled to it, both models find two of the three needles.
   - A Paged KV exhaustion names its page numbers, and three in a row mark the engine unhealthy.
   - Several context-cache fixes keep long agent sessions from re-prefilling: private reclamation,
     the demand window, and the capture search for a zero-value candidate.
-- **Build.** Tests build against CUDA 13's `cudaGraphGetEdges`.
+- **Build.** Tests build against CUDA 13's `cudaGraphGetEdges`. Device code is compressed for size
+  (CUDA 12.8 and newer), which keeps the linked binaries under 2 GiB.
 
 Taken from [TertiumOrganum1's fork](https://github.com/TertiumOrganum1/ninfer-3090):
 
@@ -201,8 +252,7 @@ named), re-implemented here:
   MinGW syntax check.
 
 Further 4090 ideas: a server default reasoning effort, MTP draft windows up to 15, `/metrics` and
-`/slots` (Sergiusz Michalik) and `/props`, a WebUI compiled in from `NINFER_WEBUI_DIR`, output limits bounded only by
-the context, the block sampler's candidates in shared memory, an opt-in bf16 residual add
+`/slots` (Sergiusz Michalik) and `/props`, a WebUI compiled in from `NINFER_WEBUI_DIR`, the block sampler's candidates in shared memory, an opt-in bf16 residual add
 (`-DNINFER_BF16_RESIDUAL_ADD=ON`), vector stores in the chunked GDN prefill, and bounded split
 compilation with ptxas reports as build options.
 
@@ -230,15 +280,19 @@ From other forks:
   64-key tile. This line extends it to `rk8v4` and the packed key codings and lets the device
   profile turn it on where it is faster (all three measured cards: 19 to 30% less prompt-attention
   time); `--fast-prefill-kernel` forces it. Quick-corpus perplexity at 64K on Ternary Bonsai 2 moves
-  from 5.2074 to 5.2079 (`rk8v4`), and the three needles at 131K are all found.
+  from 5.2074 to 5.2079 (`rk8v4`), and the three needles at 131K are all found. An `nvfp4` KV
+  cache on Blackwell has its own fast prompt kernel under the same switch, with QK on block-scaled
+  FP4 Tensor Cores straight from the stored codes (a two-term NVFP4 Q) past 2048 visible keys:
+  0.35-0.67x the tiled kernel's time per layer on RTX 5090, 3.5-14.4% faster prefill at 16K-64K.
 - **Agent-harness tool calls.** `<function name=...>`, `<invoke name=...>`, `<function_calls>` and
   `<param name=...>` are read as tool calls (upstream PR #300 by Pavel Kochubey, via Wallawalla47), next
   to the Qwen form, and go through the same recovery pass.
 - **Structured output** through xgrammar, speculative decoding included, opt-in with
   `--structured-output` (upstream PR #294 by Andrey Shvartsman).
-- **First-token log probabilities.** With `--first-token-logprobs`, a Chat Completions request may ask
-  for `top_logprobs` and gets the first generated token's log probability with its alternatives
-  (IMGillusion).
+- **Token log probabilities.** Chat Completions `logprobs`/`top_logprobs` and Responses
+  `include: ["message.output_text.logprobs"]` report each content token's log probability with up to
+  20 alternatives, streamed or not, on every model family (Fedor Suchkov's frinfer design; it replaces
+  IMGillusion's first-token export).
 - **Rolling retention.** `--context-cache-policy rolling` lets one long conversation keep rolling
   its cached frontier forward (IMGillusion).
 - **Diverged-branch release.** `--release-diverged-checkpoints` lets the cache drop first a private
@@ -287,8 +341,8 @@ From other forks:
   graphs (`-DNINFER_PDL=ON` on compatibility builds), split-KV attention for short prefill steps
   over long contexts, a general BF16 GEMM fallback, MTP banks of mixed formats, the fused RMSNorm and
   NVFP4 attention input at every width, and converters for ModelOpt NVFP4/FP8 checkpoints, the
-  Quasar NVFP4 checkpoint and a `grouped_mse` scale search. A native Windows build against a
-  prebuilt vcpkg tree.
+  Quasar NVFP4 checkpoint and a least-squares scale search (now part of `grouped_search`). A native
+  Windows build against a prebuilt vcpkg tree.
 - **Unified Linear templates** (Neroued). The Q4, Q5, Q6 and Q8 A16 Linear templates with sliced-K
   schedules sit beside this line's routes, and each card takes them only at the widths where two
   sweeps on an RTX 3090, 4090 and 5090 measured them faster: Q5 from about 8 columns up to 96 (RTX
@@ -330,6 +384,51 @@ From other forks:
 
 The [maintainer map](docs/maintainer/consolidated-line.md) lists each change with the files it
 touches and the tests that cover it.
+
+## Docker
+
+`ghcr.io/iamwavecut/ninfer-all:latest` is built from every master commit that passes CI, on CUDA
+13.4 and Ubuntu 26.04. It carries two builds and starts the one that matches the GPU: `sm_86` for the
+RTX 30 series (compute capability 8.6), which also runs the RTX 40 series (8.9), and `sm_120a` for the
+RTX 50 series and the RTX PRO 6000 Blackwell (12.0). The host needs an NVIDIA driver of the CUDA 13
+branch (580 or newer) and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+Other tags: `sha-<commit>`, and the `VERSION` of the newest one; the registry keeps `latest` and the
+image published before it, which stays available under its `sha-` tag. The image
+is 1.6 GB compressed: Ubuntu, cuBLAS and the CUDA runtime from NVIDIA's repository, FFmpeg, and one
+multi-call executable per architecture that all four programs are names of. On an RTX 3090 and an
+RTX 5090 with driver 580.159.03 it downloaded the 27B and answered chat completions through
+`run qwen38-27b`; the 5090 started at the full 262,144-token context, the 3090 at 196,608 after two
+of the launcher's step-downs.
+
+```bash
+docker pull ghcr.io/iamwavecut/ninfer-all:latest
+# The model goes to ./models (19 GiB for the 27B).
+docker run --rm -v "$PWD/models:/models" ghcr.io/iamwavecut/ninfer-all download qwen38-27b
+# Serve it with the measured `tuned` profile on http://localhost:8080/v1.
+docker run --rm --gpus all -p 8080:8080 --ulimit memlock=-1 \
+  -v "$PWD/models:/models" -v ninfer-cache:/cache \
+  ghcr.io/iamwavecut/ninfer-all run qwen38-27b
+```
+
+Or with [compose.yaml](compose.yaml), which wires the GPU, the port and the volumes:
+
+```bash
+docker compose run --rm ninfer download qwen38-27b
+docker compose up -d
+```
+
+The container's command chooses what runs:
+
+| command | runs |
+|---|---|
+| `run <model> [profile]` (default `run qwen38-27b`) | `scripts/run.sh`: the launcher profiles, with the same `NINFER_*` overrides (`-e NINFER_SPEC=mtp`, `-e NINFER_CONTEXT=131072`, ...) |
+| `download <model>` | `scripts/download-model.sh` into `/models` |
+| `serve`, `ninfer`, `perplexity`, `calibrate` `[args]` | that binary, for any artifact and flags: `serve /models/my.ninfer --max-context 65536 ...` |
+
+Volumes: `/models` holds artifacts, `/cache` the device profile the engine measures on first start,
+and `/grafts/<model>/` optional [prompt grafts](docs/serving.md#prompt-grafts). The server listens on
+port 8080. `NINFER_IMAGE_ARCH=sm86|sm120a` overrides the GPU detection. `docker build -t ninfer .`
+builds the same image from source (`--build-arg ARCHS=86` for one architecture).
 
 ## Running
 
@@ -418,6 +517,10 @@ driver or clock change. See [device profiles](docs/device-profiles.md).
 |---|---|---|
 | Ternary Bonsai 2 27B | [WaveCut/Ternary-Bonsai-2-27B-NInfer-v3](https://huggingface.co/WaveCut/Ternary-Bonsai-2-27B-NInfer-v3) | 8.87 GiB. Ternary text tower, token table and head, Vision, Bonsai-trained MTP head and DFlash2 adapter, and an exact proposal head. Runs only on this line. |
 | Qwen3.8-27B GSQ-RCO IQ3_S | [WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3](https://huggingface.co/WaveCut/Qwen3.8-27B-GSQ-RCO-IQ3_S-NInfer-v3) | 13.99 GiB. ISTA-DASLab's 3.5-bit GGUF blocks kept byte for byte, their Q6_K MTP head, Vision, the DFlash2 adapter and a proposal head. Runs only on this line. |
+| Qwen3.8-Flash-Next n-gram table | [WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-ngram-table-NInfer-v3) | 26.82 GiB: the IQ4_NL n-gram table every Flash-Next artifact below reads (`--ngram-table`). Runs only on this line. |
+| Qwen3.8-Flash-Next GSQ-RCO Q2_0 | [WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-NInfer-v3](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-NInfer-v3) | 35.89 GiB: ISTA-DASLab's 2.4-bit GGUF blocks kept byte for byte, without the n-gram table, with the Vision tower. Experts on two 24 GB GPUs, in host memory or on disk. Runs only on this line. |
+| Qwen3.8-Flash-Next GSQ-RCO IQ3_S | [WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-NInfer-v3](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-NInfer-v3) | 51.90 GiB: ISTA-DASLab's 3.5-bit GGUF blocks kept byte for byte, without the n-gram table, with the Vision tower. Experts in host memory or on disk with one 24 GB GPU. Runs only on this line. |
+| Qwen3.8-Flash-Next Coder GSQ-RCO IQ1_M | [WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Coder-IQ1_M-NInfer-v3](https://huggingface.co/WaveCut/Qwen3.8-Flash-Next-GSQ-RCO-Coder-IQ1_M-NInfer-v3) | 28.42 GiB: ISTA-DASLab's expert-pruned coding build (256 experts per layer) in its GGUF blocks, without the n-gram table, with the Vision tower. Runs only on this line. |
 | Qwen3.8-27B | [neroued/Qwen3.8-27B-NInfer](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | 19 GiB, `groupwise-int` (Q4/Q5), the upstream artifact the reference tables use |
 | Qwen3.8-27B, abliterated | [WaveCut/Huihui-Qwen3.8-27B-abliterated-NInfer-v3](https://huggingface.co/WaveCut/Huihui-Qwen3.8-27B-abliterated-NInfer-v3) | 19.03 GiB, official `qwen3_8_27b` recipe with MTP, DFlash2 and a proposal head |
 | Qwen3.6-35B-A3B NVFP4 | [WaveCut/Qwen3.6-35B-A3B-NVFP4-NInfer-v3](https://huggingface.co/WaveCut/Qwen3.6-35B-A3B-NVFP4-NInfer-v3) | 20.39 GiB. RedHatAI's NVFP4 experts kept code for code, Q8 projections, Vision, MTP and a proposal head. Needs an `sm_120a` GPU. |
@@ -438,7 +541,8 @@ cmake --build build --target ninfer-serve ninfer-calibrate
 
 `CMAKE_CUDA_ARCHITECTURES` is `86` for the RTX 30 series, `89` for the RTX 40 series and `120a`
 for the RTX 50 series and the RTX PRO 6000 Blackwell (on the `mma.sync` compatibility path, which the
-ternary route needs). The
+ternary route needs; a `120a` build needs CUDA 13.1 or newer, since CUDA 12.8 and 12.9 miscompile
+sm_120a kernels and configure refuses them). The
 opt-in build options are listed in the [Linux build guide](docs/rtx-3090-linux.md#build-options).
 Windows builds, release packages, tests and benchmarks work as in the
 [NInfer-3090 README](https://github.com/ashalliants/ninfer-3090#readme).
