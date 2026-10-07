@@ -28,17 +28,25 @@ function-pointer tables.
 
 `src/ops/weight_input.cpp`, `input_projection(std::span<const WeightInput, 4>, bool)`.
 
-| accepted | hidden | attention q / k | GDN q / value |
-|---|---:|---|---|
-| `dense` | 5120 | 6144 / 1024 | 2048 / 6144 |
-| `moe` | 2048 | 4096 / 512 | 2048 / 4096 |
+| accepted | hidden | attention q / k | GDN q / value | model |
+|---|---:|---|---|---|
+| `dense` | 5120 | 6144 / 1024 | 2048 / 6144 | Qwen3.5-27B |
+| `moe` | 2048 | 4096 / 512 | 2048 / 4096 | Qwen3.6-35B-A3B |
+| `qwen9` | 4096 | 4096 / 1024 | 2048 / 4096 | Qwen3.5-9B |
+| `qwen4` | 2560 | 4096 / 1024 | 2048 / 4096 | Qwen3.5-4B |
 
-The check is `require(dense || moe, "input projection: unsupported logical
-projection geometry")`, so a Qwen3.5 model at any other hidden width is refused
-before its formats are examined. **The shape patterns are not what varies** — the
-third and fourth matrices equal the first two respectively in every case, and
-only `K` differs. The ratios do not generalise either: attention `q / k` is 6 on
-the 5120 model, 8 on the 2048 one, and 4 on Qwen3.5-9B.
+The check is `require(admitted, "input projection: unsupported logical projection
+geometry")`, so a Qwen3.5 model at any other hidden width is refused before its
+formats are examined. **The shape patterns are not what varies** — the third and
+fourth matrices equal the first two respectively in every case, and only `K`
+differs. The ratios do not generalise: attention `q / k` is 6 on the 5120 model, 8
+on the 2048 one, and 4 on both dense Qwen3.5 models, which therefore share one
+pattern and differ only in hidden width.
+
+The GGUF branch below that check asks for `admitted`, not for `dense`. It is
+geometry-agnostic by construction — it lays the parts out from the row counts it
+reads off the matrices — so the only thing it needs is a geometry that was already
+accepted above.
 
 Reached from `prepare_gdn_input_proj_weights`, so a failure surfaces as
 `startup failed | initializing frontend` with no message on the phase line;
@@ -130,8 +138,18 @@ its sm_86 tuning.
 ## The GDN control and the head geometry
 
 `prepare_gdn_gating_proj_weights` takes the A/B pair and admits
-`{48, 5120}` or `{32, 2048}`. The first is the 5120-hidden model's 48 control
-rows, the second the 2048-hidden model's 32.
+`{48, 5120}`, `{32, 2048}`, `{32, 4096}` or `{32, 2560}`. The first is the
+5120-hidden model's 48 control rows, the other three the three 32-control-row
+models at their own input widths. The wrapper looks these up in
+`kGdnControlGeometries` in `src/ops/wrapper/gdn_gating_proj.cpp`, and the pair's
+row count is twice the control-row count — which is why 64 recurs across three
+rows rather than being a coincidence to notice.
+
+The Op side keeps the same widths in `is_27` / `is_qwen9` / `is_qwen4` and in
+`kGdnControlGeometries` in
+`src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp`; the two are separate
+tables because the wrapper validates what the artifact bound and the Op validates
+what it compiled.
 
 `require_causal_geometry` admits `(24 query, 4 kv)` or `(16 query, 2 kv)` at
 `kHeadDim`. Note the ratio is not constant across them — 6 and 8 — so a width
@@ -195,6 +213,35 @@ work lists new projection kernels selecting GEMV, small-batch SIMT or MMA from
 the matrix shape and token count, wider prefill MMA tiles with matrix-geometry
 and column-tail selection, and a normalized-control op qualified for specific
 input widths, heads and token counts.
+
+## `linear_swiglu` — the compiled profile table
+
+`src/ops/wrapper/linear_swiglu.cpp`, `kSwiGluShapes`. A profile is named by the
+pair (hidden width, FFN intermediate); the gate/up parent is twice the intermediate
+and reduces over the hidden width, so the pair fixes every operand's shape. The
+registered rows are `(5120, 17408)`, `(2048, 6144)` and `(4096, 12288)`. A weight
+outside every row is rejected rather than executed on an uncompiled shape.
+
+Two flags ride on the row because they are bound to one model's release rather than
+to the shape, and a new row states explicitly whether they apply rather than
+inheriting them:
+
+- `native_formats` — that release also carries NVFP4, FP8 and T2 weights.
+- `a8_int_decode` — the A8 integer decode mainloop, measured at one width.
+
+They are separate because reusing one flag for both would claim the i8 route exists
+because the release has FP8 weights, which is a different fact.
+
+`linear_swiglu_compiles_a8_int_decode` is how a caller asks instead of naming a
+width. `parameters.cpp` used to test `n == 34816 && k == 5120` to pick the
+verify-phase policy, which meant the next profile added here would silently lose the
+decode route. `tests/models/qwen3_5/test_mlp_a8_decode_wiring.cpp` covers it, and
+that test used to restate the same comparison — a mirror that would have kept
+passing once the source stopped doing it.
+
+A GGUF-sourced FFN does not pass through here: `linear_swiglu` returns to
+`detail::gguf_swiglu` before the table is consulted, which is why a model converted
+from GGUF needs no row. A model converted from safetensors does need one.
 
 ## Related
 
