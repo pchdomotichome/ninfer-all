@@ -13,61 +13,78 @@
 namespace ninfer::ops::detail {
 namespace {
 
-// Qwen3.6/3.8-27B full attention: 24 query heads x 256 and 4 KV heads x 256, so each projection
-// is a 7168-row parent split at 6144 -- query_key into q and k, gate_value into gate and v.
-constexpr std::int32_t kParentRows = 7168;
-constexpr std::int32_t kSplitRow   = 6144;
-constexpr std::int32_t kHidden     = 5120;
+// One geometry per served model. A parent projection is a single weight whose rows split into
+// the head part and the KV part, so its row count is the sum of the two; qwen3_6_27b is 24 query
+// heads x 256 and 4 KV heads x 256 (7168 = 6144 + 1024 at hidden 5120), qwen3_5_9b is 16 x 256
+// and 4 x 256 (5120 = 4096 + 1024 at hidden 4096).
+struct AttnInputGeometry5120 {
+    static constexpr int kParentRows = 7168;
+    static constexpr int kSplitRow   = 6144;
+    static constexpr int kHidden     = 5120;
+};
+
+struct AttnInputGeometryQwen9 {
+    static constexpr int kParentRows = 5120;
+    static constexpr int kSplitRow   = 4096;
+    static constexpr int kHidden     = 4096;
+};
 
 std::int32_t leading_dimension(const Tensor& t) {
     return static_cast<std::int32_t>(t.nb[1] / sizeof(__nv_bfloat16));
 }
 
+template <class Geometry>
 struct AttnQueryKeyGeometry {
-    static constexpr int kInputRows    = kHidden;
-    static constexpr int kGroupsPerRow = kHidden / 64;
+    static constexpr int kInputRows    = Geometry::kHidden;
+    static constexpr int kGroupsPerRow = Geometry::kHidden / 64;
 };
 
+template <class Geometry>
 SmallTSplitStore split_store(Tensor& head, Tensor& tail, int columns) {
     return {static_cast<__nv_bfloat16*>(head.data),
             static_cast<__nv_bfloat16*>(tail.data),
             leading_dimension(head),
             leading_dimension(tail),
-            kSplitRow,
+            Geometry::kSplitRow,
             columns};
 }
 
-template <int XCols, int Stages, int KWarps = 8>
+template <class Geometry, int XCols, int Stages, int KWarps = 8>
 void launch_gate_value(const Tensor& x, const Weight& w, Tensor& gate, Tensor& v,
                        cudaStream_t stream) {
-    q5_small_t_mma_launch<kParentRows, kHidden, XCols, Stages, SmallTSplitStore, KWarps>(
+    q5_small_t_mma_launch<Geometry::kParentRows, Geometry::kHidden, XCols, Stages,
+                          SmallTSplitStore, KWarps>(
         stream, static_cast<const __nv_bfloat16*>(x.data),
         static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint8_t*>(w.qhigh),
-        static_cast<const std::uint8_t*>(w.scales), split_store(gate, v, x.ne[1]), x.ne[1]);
+        static_cast<const std::uint8_t*>(w.scales), split_store<Geometry>(gate, v, x.ne[1]),
+        x.ne[1]);
 }
 
-template <int TileCols, int KWarps = 8, int Stages = 1>
+template <class Geometry, int TileCols, int KWarps = 8, int Stages = 1>
 void launch_query_key(const Tensor& x, const Weight& w, Tensor& q, Tensor& k,
                       cudaStream_t stream) {
-    q4_ksplit_mma_launch<AttnQueryKeyGeometry, TileCols, TileCols, SmallTSplitStore,
+    q4_ksplit_mma_launch<AttnQueryKeyGeometry<Geometry>, TileCols, TileCols, SmallTSplitStore,
                          Q4KSplitIdentityRows, true, KWarps, Stages>(
-        kParentRows / SmallTLayout<KWarps>::kRowsPerCta, stream,
+        Geometry::kParentRows / SmallTLayout<KWarps>::kRowsPerCta, stream,
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
         static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(q.data),
-        split_store(q, k, x.ne[1]), Q4KSplitIdentityRows{}, x.ne[1]);
+        split_store<Geometry>(q, k, x.ne[1]), Q4KSplitIdentityRows{}, x.ne[1]);
 }
 
 } // namespace
 
-void q4_q5_attn_input_small_t_mma_launch(const Tensor& x, const Weight& query_key_weight,
-                                         const Weight& gate_value_weight, Tensor& q, Tensor& gate,
-                                         Tensor& k, Tensor& v, cudaStream_t stream) {
+template <class Geometry>
+void q4_q5_attn_input_small_t_mma_for_geometry(const Tensor& x, const Weight& query_key_weight,
+                                              const Weight& gate_value_weight, Tensor& q,
+                                              Tensor& gate, Tensor& k, Tensor& v,
+                                              cudaStream_t stream) {
     if (x.ne[1] < 1 || x.ne[1] > 32) {
         throw std::invalid_argument("Q4/Q5 attention input small-T MMA requires T in [1,32]");
     }
-    if (x.ne[0] != kHidden || query_key_weight.n != kParentRows ||
-        gate_value_weight.n != kParentRows || query_key_weight.padded_shape[1] != kHidden ||
-        gate_value_weight.padded_shape[1] != kHidden) {
+    if (x.ne[0] != Geometry::kHidden || query_key_weight.n != Geometry::kParentRows ||
+        gate_value_weight.n != Geometry::kParentRows ||
+        query_key_weight.padded_shape[1] != Geometry::kHidden ||
+        gate_value_weight.padded_shape[1] != Geometry::kHidden) {
         throw std::invalid_argument("Q4/Q5 attention input small-T MMA: unsupported shape");
     }
     // Wider extents share each staged activation slab between row tiles (KWarps < 8). One kernel,
@@ -80,23 +97,42 @@ void q4_q5_attn_input_small_t_mma_launch(const Tensor& x, const Weight& query_ke
     //   query_key [7168]     32  104.4              70.7 / 63.5 (s2)  70.7 / 57.3 (s2)
     const int columns = x.ne[1];
     if (columns <= 4) {
-        launch_gate_value<4, 2>(x, gate_value_weight, gate, v, stream);
+        launch_gate_value<Geometry, 4, 2>(x, gate_value_weight, gate, v, stream);
     } else if (columns <= 8) {
-        launch_gate_value<8, 1>(x, gate_value_weight, gate, v, stream);
+        launch_gate_value<Geometry, 8, 1>(x, gate_value_weight, gate, v, stream);
     } else if (columns <= 16) {
-        launch_gate_value<16, 1>(x, gate_value_weight, gate, v, stream);
+        launch_gate_value<Geometry, 16, 1>(x, gate_value_weight, gate, v, stream);
     } else {
-        launch_gate_value<32, 2, 2>(x, gate_value_weight, gate, v, stream);
+        launch_gate_value<Geometry, 32, 2, 2>(x, gate_value_weight, gate, v, stream);
     }
     CUDA_CHECK(cudaGetLastError());
     if (columns <= 8) {
-        launch_query_key<8>(x, query_key_weight, q, k, stream);
+        launch_query_key<Geometry, 8>(x, query_key_weight, q, k, stream);
     } else if (columns <= 16) {
-        launch_query_key<16, 4>(x, query_key_weight, q, k, stream);
+        launch_query_key<Geometry, 16, 4>(x, query_key_weight, q, k, stream);
     } else {
-        launch_query_key<32, 2, 2>(x, query_key_weight, q, k, stream);
+        launch_query_key<Geometry, 32, 2, 2>(x, query_key_weight, q, k, stream);
     }
     CUDA_CHECK(cudaGetLastError());
+}
+
+void q4_q5_attn_input_small_t_mma_launch(const Tensor& x, const Weight& query_key_weight,
+                                         const Weight& gate_value_weight, Tensor& q, Tensor& gate,
+                                         Tensor& k, Tensor& v, cudaStream_t stream) {
+    // The two projections are one weight each, split into a head part and a KV part, so the
+    // weight's own row count identifies the geometry. A shape with no instantiation is rejected
+    // by name rather than silently running another model's.
+    if (query_key_weight.n == 7168 && gate_value_weight.n == 7168) {
+        q4_q5_attn_input_small_t_mma_for_geometry<AttnInputGeometry5120>(
+            x, query_key_weight, gate_value_weight, q, gate, k, v, stream);
+        return;
+    }
+    if (query_key_weight.n == 5120 && gate_value_weight.n == 5120) {
+        q4_q5_attn_input_small_t_mma_for_geometry<AttnInputGeometryQwen9>(
+            x, query_key_weight, gate_value_weight, q, gate, k, v, stream);
+        return;
+    }
+    throw std::invalid_argument("Q4/Q5 attention input small-T MMA: no geometry for this shape");
 }
 
 } // namespace ninfer::ops::detail
