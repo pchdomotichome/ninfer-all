@@ -27,6 +27,13 @@ int main() {
         const int failures =
             run_profile("LinearSwiGLU Q4_A16",
                         {QType::Q4_G64_FP16, 34816, 5120, 17408, 1401U, ActivationCompute::A16},
+                        kTokenCases, std::array<std::int32_t, 7>{7, 25, 49, 128, 152, 168, 1024}) +
+            // The 4096-hidden dense model. Its intermediate is 12288, so every width in this kernel
+            // -- the gate/up row offset, the output stride and the launch grid -- differs from the
+            // 5120-hidden model's, and a constant left at the other model's value reads the wrong
+            // half of the parent and writes outside the output.
+            run_profile("LinearSwiGLU Q4_A16 9B",
+                        {QType::Q4_G64_FP16, 24576, 4096, 12288, 1402U, ActivationCompute::A16},
                         kTokenCases, std::array<std::int32_t, 7>{7, 25, 49, 128, 152, 168, 1024});
         std::cout << (failures == 0 ? "OK" : "FAIL") << " LinearSwiGLU Q4_A16 correctness\n";
         return failures == 0 ? 0 : 1;

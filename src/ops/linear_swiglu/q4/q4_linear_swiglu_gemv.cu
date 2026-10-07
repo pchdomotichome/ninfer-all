@@ -298,16 +298,16 @@ __global__ void q4_linear_swiglu_gemv_pair_kernel(const __nv_bfloat16* __restric
         codes + static_cast<std::int64_t>(out_row) * kGroups * BytesPerGroup;
     const std::uint8_t* gate_scale_row = scales + static_cast<std::int64_t>(out_row) * kGroups * 2;
     const std::uint8_t* up_code_row =
-        codes + static_cast<std::int64_t>(out_row + kIntermediate) * kGroups * kBytesPerGroup;
+        codes + static_cast<std::int64_t>(out_row + GateUpRows / 2) * kGroups * kBytesPerGroup;
     const std::uint8_t* up_scale_row =
-        scales + static_cast<std::int64_t>(out_row + kIntermediate) * kGroups * 2;
+        scales + static_cast<std::int64_t>(out_row + GateUpRows / 2) * kGroups * 2;
     const auto* x2 = reinterpret_cast<const __nv_bfloat162*>(x_sh);
 
     float gate_acc = 0.0f;
     float up_acc   = 0.0f;
 #pragma unroll
     for (int p = 0; p < kPrefetch; ++p) {
-        if (p < kTiles) {
+        if (p < Tiles) {
             q4_issue_pair_tile<VecsPerWarpTile, kGroupsPerWarpTile>(
                 code_tile[warp][p], scale_tile[warp][p], gate_code_row, gate_scale_row, up_code_row,
                 up_scale_row, p, lane);
@@ -317,9 +317,9 @@ __global__ void q4_linear_swiglu_gemv_pair_kernel(const __nv_bfloat16* __restric
     }
 
 #pragma unroll 1
-    for (int tile = 0; tile < kTiles; ++tile) {
+    for (int tile = 0; tile < Tiles; ++tile) {
         const int fetch = tile + kPrefetch;
-        if (fetch < kTiles) {
+        if (fetch < Tiles) {
             const int buf = fetch % kStages;
             q4_issue_pair_tile<VecsPerWarpTile, kGroupsPerWarpTile>(
                 code_tile[warp][buf], scale_tile[warp][buf], gate_code_row, gate_scale_row,
@@ -517,9 +517,9 @@ void q4_linear_swiglu_gemv_pair_launch_for(const Tensor& x, const Weight& w, Ten
     constexpr int kTilesFor         = kGroupsFor / kGroupsPerWarpTile;
     constexpr int kXVecsFor         = InputRows / 8;
     constexpr int kTileVecs = kGroupsPerWarpTile * kBytesPerGroup / kVecBytes;
-    static_assert(kIntermediate % kPairsPerBlock == 0);
+    static_assert((GateUpRows / 2) % kPairsPerBlock == 0);
     static_assert(kGroupsFor % kGroupsPerWarpTile == 0);
-    const int grid = kIntermediate / kPairsPerBlock;
+    const int grid = (GateUpRows / 2) / kPairsPerBlock;
     q4_linear_swiglu_gemv_pair_kernel<GateUpRows, InputRows, kGroupK, kBytesPerGroup, kVecBytes,
                                       kGroupsPerWarpTile, kTilesFor, kXVecsFor,
                                       kTileVecs>

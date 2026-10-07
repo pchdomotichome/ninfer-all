@@ -224,6 +224,11 @@ int verify_unchanged(std::string_view label, const test::GuardedDeviceBuffer& de
 void validate_profile(const Profile& profile) {
     const bool q4 = profile.qtype == QType::Q4_G64_FP16 && profile.gate_up_rows == 34816 &&
                     profile.input_rows == 5120 && profile.output_rows == 17408;
+    // The 4096-hidden dense model, also Q4: its intermediate is 12288, so it is a distinct
+    // compiled shape rather than a rescaling of the row above.
+    const bool q4_dense_4096 = profile.qtype == QType::Q4_G64_FP16 &&
+                               profile.gate_up_rows == 24576 && profile.input_rows == 4096 &&
+                               profile.output_rows == 12288;
     const bool q8_companion = profile.qtype == QType::Q8_G32_FP16 &&
                               profile.gate_up_rows == 12288 && profile.input_rows == 2048 &&
                               profile.output_rows == 6144;
@@ -233,7 +238,7 @@ void validate_profile(const Profile& profile) {
                        profile.input_rows == 5120 && profile.output_rows == 17408;
     const bool fp8 = profile.qtype == QType::FP8_E4M3FN_ROW_BF16 && profile.gate_up_rows == 34816 &&
                      profile.input_rows == 5120 && profile.output_rows == 17408;
-    if ((!q4 && !q8_companion && !q8_dflash2 && !nvfp4 && !fp8) ||
+    if ((!q4 && !q4_dense_4096 && !q8_companion && !q8_dflash2 && !nvfp4 && !fp8) ||
         profile.gate_up_rows != 2 * profile.output_rows) {
         throw std::invalid_argument("linear_swiglu test: profile is not registered");
     }
