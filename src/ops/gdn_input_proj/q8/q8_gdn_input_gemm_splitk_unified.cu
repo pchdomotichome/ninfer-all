@@ -51,12 +51,12 @@ struct Q8GdnSplitKConvEpilogue {
     }
 };
 
-template <int ActiveCols>
+template <int Hidden, int ActiveCols>
 void launch_active_cols(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                         cudaStream_t stream) {
     constexpr int TileCols =
         ActiveCols <= 8 ? 8 : (ActiveCols <= 16 ? 16 : (ActiveCols <= 24 ? 24 : 32));
-    using Geometry = Q8LinearGeometry<kRows, kHidden>;
+    using Geometry = Q8LinearGeometry<kRows, Hidden>;
     using Schedule = Q8SlicedKDefault<TileCols, ActiveCols>;
     static_assert((8192 % kRowsPerCta) == 0 && (4096 % kRowsPerCta) == 0);
     const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
@@ -65,14 +65,14 @@ void launch_active_cols(const Tensor& x, const Weight& weight, Tensor& qkv, Tens
         q8_linear_operands(x, weight), output, LinearIdentityEpilogue{}, stream);
 }
 
-template <int ActiveCols, class Publish>
+template <int Hidden, int ActiveCols, class Publish>
 void launch_active_cols_conv(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
                              const Tensor& conv_states, const Tensor& valid_columns,
                              const Tensor& initial_slot, Tensor& query, Tensor& key, Tensor& value,
                              Tensor& z, Publish publish, cudaStream_t stream) {
     static_assert(ActiveCols >= 2 && ActiveCols <= 16);
     constexpr int TileCols = ActiveCols <= 8 ? 8 : 16;
-    using Geometry         = Q8LinearGeometry<kRows, kHidden>;
+    using Geometry         = Q8LinearGeometry<kRows, Hidden>;
     using Schedule         = Q8SlicedKDefault<TileCols, ActiveCols>;
     const Output ignored_output{static_cast<__nv_bfloat16*>(query.data),
                                 static_cast<__nv_bfloat16*>(z.data)};
@@ -102,38 +102,38 @@ void launch_active_cols_conv(const Tensor& x, const Weight& weight, const Tensor
         q8_linear_operands(x, weight), ignored_output, epilogue, stream);
 }
 
-template <int ActiveCols>
+template <int Hidden, int ActiveCols>
 void launch_active_cols_conv_snapshot(const Tensor& x, const Weight& weight,
                                       const Tensor& conv_weight, Tensor& conv_states,
                                       const Tensor& valid_columns, const Tensor& initial_slot,
                                       const Tensor& snapshot_base_slot, Tensor& query, Tensor& key,
                                       Tensor& value, Tensor& z, cudaStream_t stream) {
-    launch_active_cols_conv<ActiveCols>(
+    launch_active_cols_conv<Hidden, ActiveCols>(
         x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key, value, z,
         SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
                                static_cast<const std::int32_t*>(snapshot_base_slot.data), 8192},
         stream);
 }
 
-template <int ActiveCols>
+template <int Hidden, int ActiveCols>
 void launch_active_cols_conv_record(const Tensor& x, const Weight& weight,
                                     const Tensor& conv_weight, const Tensor& conv_states,
                                     const Tensor& valid_columns, const Tensor& initial_slot,
                                     Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value,
                                     Tensor& z, cudaStream_t stream) {
-    launch_active_cols_conv<ActiveCols>(
+    launch_active_cols_conv<Hidden, ActiveCols>(
         x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key, value, z,
         RecordColumnPublish{static_cast<__nv_bfloat16*>(conv_record.data), 8192, ActiveCols},
         stream);
 }
 
-template <int TileCols, int KSplits, int NGroups, int MinBlocks>
+template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks>
 void launch_medium_cols(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
                         cudaStream_t stream) {
     static_assert((8192 % kRowsPerCta) == 0 && (4096 % kRowsPerCta) == 0);
     const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
     using Schedule =
-        Q8A16GroupedSlicedKMmaSchedule<TileCols, KSplits, NGroups, 1, MinBlocks, kHidden>;
+        Q8A16GroupedSlicedKMmaSchedule<TileCols, KSplits, NGroups, 1, MinBlocks, Hidden>;
     launch_q8_a16_grouped_sliced_k_mma<Schedule>(q8_linear_operands(x, weight), output,
                                                  LinearIdentityEpilogue{}, stream);
 }
@@ -146,52 +146,78 @@ using RecordLauncher = void (*)(const Tensor&, const Weight&, const Tensor&, con
                                 const Tensor&, const Tensor&, Tensor&, Tensor&, Tensor&, Tensor&,
                                 Tensor&, cudaStream_t);
 
-template <std::size_t... Offsets>
+template <int Hidden, std::size_t... Offsets>
 constexpr auto make_projection_launchers(std::index_sequence<Offsets...>) {
     return std::array<ProjectionLauncher, sizeof...(Offsets)>{
-        &launch_active_cols<kFirstExactCols + static_cast<int>(Offsets)>...};
+        &launch_active_cols<Hidden, kFirstExactCols + static_cast<int>(Offsets)>...};
 }
 
-template <std::size_t... Offsets>
+template <int Hidden, std::size_t... Offsets>
 constexpr auto make_snapshot_launchers(std::index_sequence<Offsets...>) {
     return std::array<SnapshotLauncher, sizeof...(Offsets)>{
-        &launch_active_cols_conv_snapshot<kFirstExactCols + static_cast<int>(Offsets)>...};
+        &launch_active_cols_conv_snapshot<Hidden, kFirstExactCols + static_cast<int>(Offsets)>...};
 }
 
-template <std::size_t... Offsets>
+template <int Hidden, std::size_t... Offsets>
 constexpr auto make_record_launchers(std::index_sequence<Offsets...>) {
     return std::array<RecordLauncher, sizeof...(Offsets)>{
-        &launch_active_cols_conv_record<kFirstExactCols + static_cast<int>(Offsets)>...};
+        &launch_active_cols_conv_record<Hidden, kFirstExactCols + static_cast<int>(Offsets)>...};
 }
 
-constexpr auto kProjectionLaunchers = make_projection_launchers(
-    std::make_index_sequence<kLastProjectionExactCols - kFirstExactCols + 1>{});
-constexpr auto kSnapshotLaunchers = make_snapshot_launchers(
-    std::make_index_sequence<kLastSnapshotExactCols - kFirstExactCols + 1>{});
-constexpr auto kRecordLaunchers =
-    make_record_launchers(std::make_index_sequence<kLastSnapshotExactCols - kFirstExactCols + 1>{});
+// One table per admitted input width, as in the legacy route: the tables are constexpr, so the
+// width cannot arrive at runtime.
+template <int Hidden>
+struct SplitKUnifiedLaunchers {
+    static constexpr auto projection = make_projection_launchers<Hidden>(
+        std::make_index_sequence<kLastProjectionExactCols - kFirstExactCols + 1>{});
+    static constexpr auto snapshot = make_snapshot_launchers<Hidden>(
+        std::make_index_sequence<kLastSnapshotExactCols - kFirstExactCols + 1>{});
+    static constexpr auto record = make_record_launchers<Hidden>(
+        std::make_index_sequence<kLastSnapshotExactCols - kFirstExactCols + 1>{});
+};
+
 
 } // namespace
 
-void q8_gdn_input_splitk_mma_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
-                                    cudaStream_t stream) {
+namespace {
+template <int Hidden>
+void splitk_mma_for_width(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
+                          cudaStream_t stream) {
     const std::int32_t cols = x.ne[1];
     if (cols < kFirstExactCols || cols > 96) {
         throw std::invalid_argument("Q8 GDN split-K MMA requires T=2..96");
     }
     if (cols <= kLastProjectionExactCols) {
-        kProjectionLaunchers[cols - kFirstExactCols](x, weight, qkv, z, stream);
+        SplitKUnifiedLaunchers<Hidden>::projection[cols - kFirstExactCols](x, weight, qkv, z,
+                                                                           stream);
     } else if (cols <= 48) {
-        launch_medium_cols<48, 4, 2, 3>(x, weight, qkv, z, stream);
+        launch_medium_cols<Hidden, 48, 4, 2, 3>(x, weight, qkv, z, stream);
     } else if (cols <= 64) {
-        launch_medium_cols<64, 4, 2, 2>(x, weight, qkv, z, stream);
+        launch_medium_cols<Hidden, 64, 4, 2, 2>(x, weight, qkv, z, stream);
     } else {
-        launch_medium_cols<96, 2, 4, 3>(x, weight, qkv, z, stream);
+        launch_medium_cols<Hidden, 96, 2, 4, 3>(x, weight, qkv, z, stream);
     }
     CUDA_CHECK(cudaGetLastError());
 }
+} // namespace
 
-void q8_gdn_input_splitk_conv_snapshot_launch(
+void q8_gdn_input_splitk_mma_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
+                                    cudaStream_t stream) {
+    switch (x.ne[0]) {
+    case 2048:
+        splitk_mma_for_width<2048>(x, weight, qkv, z, stream);
+        return;
+    case 4096:
+        splitk_mma_for_width<4096>(x, weight, qkv, z, stream);
+        return;
+    default:
+        throw std::invalid_argument("Q8 GDN split-K MMA: unsupported input width");
+    }
+}
+
+namespace {
+template <int Hidden>
+void splitk_conv_snapshot_for_width(
     const Tensor& x, const Weight& weight, const Tensor& conv_weight, Tensor& conv_states,
     const Tensor& valid_columns, const Tensor& initial_slot, const Tensor& snapshot_base_slot,
     Tensor& query, Tensor& key, Tensor& value, Tensor& z, cudaStream_t stream) {
@@ -199,25 +225,67 @@ void q8_gdn_input_splitk_conv_snapshot_launch(
     if (cols < kFirstExactCols || cols > kLastSnapshotExactCols) {
         throw std::invalid_argument("Q8 fused GDN input snapshot requires T=2..16");
     }
-    kSnapshotLaunchers[cols - kFirstExactCols](x, weight, conv_weight, conv_states, valid_columns,
-                                               initial_slot, snapshot_base_slot, query, key, value,
-                                               z, stream);
+    SplitKUnifiedLaunchers<Hidden>::snapshot[cols - kFirstExactCols](
+        x, weight, conv_weight, conv_states, valid_columns, initial_slot, snapshot_base_slot, query,
+        key, value, z, stream);
     CUDA_CHECK(cudaGetLastError());
 }
+} // namespace
+
+void q8_gdn_input_splitk_conv_snapshot_launch(
+    const Tensor& x, const Weight& weight, const Tensor& conv_weight, Tensor& conv_states,
+    const Tensor& valid_columns, const Tensor& initial_slot, const Tensor& snapshot_base_slot,
+    Tensor& query, Tensor& key, Tensor& value, Tensor& z, cudaStream_t stream) {
+    switch (x.ne[0]) {
+    case 2048:
+        splitk_conv_snapshot_for_width<2048>(x, weight, conv_weight, conv_states, valid_columns,
+                                             initial_slot, snapshot_base_slot, query, key, value, z,
+                                             stream);
+        return;
+    case 4096:
+        splitk_conv_snapshot_for_width<4096>(x, weight, conv_weight, conv_states, valid_columns,
+                                             initial_slot, snapshot_base_slot, query, key, value, z,
+                                             stream);
+        return;
+    default:
+        throw std::invalid_argument("Q8 fused GDN input snapshot: unsupported input width");
+    }
+}
+
+namespace {
+template <int Hidden>
+void splitk_conv_record_for_width(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
+                                  const Tensor& conv_states, const Tensor& valid_columns,
+                                  const Tensor& initial_slot, Tensor& conv_record, Tensor& query,
+                                  Tensor& key, Tensor& value, Tensor& z, cudaStream_t stream) {
+    const std::int32_t cols = x.ne[1];
+    if (cols < kFirstExactCols || cols > kLastSnapshotExactCols) {
+        throw std::invalid_argument("Q8 fused GDN input record requires T=2..16");
+    }
+    SplitKUnifiedLaunchers<Hidden>::record[cols - kFirstExactCols](
+        x, weight, conv_weight, conv_states, valid_columns, initial_slot, conv_record, query, key,
+        value, z, stream);
+    CUDA_CHECK(cudaGetLastError());
+}
+} // namespace
 
 void q8_gdn_input_splitk_conv_record_launch(const Tensor& x, const Weight& weight,
                                             const Tensor& conv_weight, const Tensor& conv_states,
                                             const Tensor& valid_columns, const Tensor& initial_slot,
                                             Tensor& conv_record, Tensor& query, Tensor& key,
                                             Tensor& value, Tensor& z, cudaStream_t stream) {
-    const std::int32_t cols = x.ne[1];
-    if (cols < kFirstExactCols || cols > kLastSnapshotExactCols) {
-        throw std::invalid_argument("Q8 fused GDN input record requires T=2..16");
+    switch (x.ne[0]) {
+    case 2048:
+        splitk_conv_record_for_width<2048>(x, weight, conv_weight, conv_states, valid_columns,
+                                           initial_slot, conv_record, query, key, value, z, stream);
+        return;
+    case 4096:
+        splitk_conv_record_for_width<4096>(x, weight, conv_weight, conv_states, valid_columns,
+                                           initial_slot, conv_record, query, key, value, z, stream);
+        return;
+    default:
+        throw std::invalid_argument("Q8 fused GDN input record: unsupported input width");
     }
-    kRecordLaunchers[cols - kFirstExactCols](x, weight, conv_weight, conv_states, valid_columns,
-                                             initial_slot, conv_record, query, key, value, z,
-                                             stream);
-    CUDA_CHECK(cudaGetLastError());
 }
 
 } // namespace ninfer::ops::detail::unified

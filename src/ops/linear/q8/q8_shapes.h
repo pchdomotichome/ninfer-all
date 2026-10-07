@@ -8,6 +8,11 @@ namespace ninfer::ops::detail {
 using Q8N1024K2048   = Q8LinearGeometry<1024, 2048>;
 using Q8N1024K5120   = Q8LinearGeometry<1024, 5120>;
 using Q8N2048K4096   = Q8LinearGeometry<2048, 4096>;
+using Q8N4096K4096   = Q8LinearGeometry<4096, 4096>;
+using Q8N4096K8192   = Q8LinearGeometry<4096, 8192>;
+using Q8N4096K12288  = Q8LinearGeometry<4096, 12288>;
+using Q8N10240K4096  = Q8LinearGeometry<10240, 4096>;
+using Q8N24576K4096  = Q8LinearGeometry<24576, 4096>;
 using Q8N2048K4608   = Q8LinearGeometry<2048, 4608>;
 using Q8N2048K16384  = Q8LinearGeometry<2048, 16384>;
 using Q8N4608K4608   = Q8LinearGeometry<4608, 4608>;
@@ -62,5 +67,12 @@ using Q8N248320K5120 = Q8LinearGeometry<248320, 5120>;
 [[nodiscard]] Q8Launch select_q8_n5120_k6144_unified(std::int32_t tokens);
 [[nodiscard]] Q8Launch select_q8_n6144_k5120_unified(std::int32_t tokens);
 [[nodiscard]] Q8Launch select_q8_n9216_k2048_unified(std::int32_t tokens);
+
+// The Qwen3.5-9B MTP layer's Q8 linears, at that model's own widths.
+[[nodiscard]] Q8Launch select_q8_n4096_k4096(std::int32_t tokens);
+[[nodiscard]] Q8Launch select_q8_n4096_k8192(std::int32_t tokens);
+[[nodiscard]] Q8Launch select_q8_n4096_k12288(std::int32_t tokens);
+[[nodiscard]] Q8Launch select_q8_n10240_k4096(std::int32_t tokens);
+[[nodiscard]] Q8Launch select_q8_n24576_k4096(std::int32_t tokens);
 
 } // namespace ninfer::ops::detail

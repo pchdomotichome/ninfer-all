@@ -51,6 +51,16 @@ constexpr std::array<Q8PairRouteSpec, 3> kK5120Routes{{
     {449, kAnyCols, Q8PairScheduleId::DualMmaR32C128},
 }};
 
+// Routes whose kernels treat the two parents as independent matrices, so they work whatever the
+// artifact's layout. The 5120-hidden model has always used them; a width whose parents are not
+// adjacent halves of one buffer must use them too, because the split-K family below requires that
+// adjacency and only the DFlash artifact provides it (see require_dflash_row_views).
+constexpr std::array<Q8PairRouteSpec, 3> kLayoutAgnosticRoutes{{
+    {1, 48, Q8PairScheduleId::TwoSimtR8C4},
+    {49, 448, Q8PairScheduleId::DualMmaR32C64},
+    {449, kAnyCols, Q8PairScheduleId::DualMmaR32C128},
+}};
+
 constexpr std::array<Q8PairRouteSpec, 29> kK2048Routes{{
     {1, 1, Q8PairScheduleId::DualDecodeR4},
     {2, 32, Q8PairScheduleId::DualSplitKMmaExactT},
@@ -444,8 +454,9 @@ Q8PairProblem q8_pair_problem(const Tensor& x, const Weight& first_weight,
 }
 
 bool q8_pair_admits(const Q8PairProblem& problem) noexcept {
-    return problem.rows == 1024 && (problem.k == 5120 || problem.k == 2048) &&
-           problem.padded_k == problem.k && problem.cols >= 1;
+    const bool width_admitted = problem.k == 5120 || problem.k == 2048 || problem.k == 4096;
+    return problem.rows == 1024 && width_admitted && problem.padded_k == problem.k &&
+           problem.cols >= 1;
 }
 
 Q8PairPlan q8_pair_resolve_plan(const Q8PairProblem& problem) {
@@ -460,7 +471,11 @@ Q8PairPlan q8_pair_resolve_plan(const Q8PairProblem& problem) {
         }
         throw std::logic_error("q8 pair: admitted problem has no covering route");
     };
-    return problem.k == 2048 ? resolve_from(kK2048Routes) : resolve_from(kK5120Routes);
+    // The 2048 table is the DFlash artifact's, whose parents are adjacent halves of one buffer and
+    // whose split-K routes require that. Every other width uses the layout-agnostic routes. The
+    // 4096 bands are the 5120 model's, which is a starting point rather than a measurement at this
+    // width -- but it is the only family whose kernels this width's packing admits.
+    return problem.k == 2048 ? resolve_from(kK2048Routes) : resolve_from(kLayoutAgnosticRoutes);
 }
 
 namespace {

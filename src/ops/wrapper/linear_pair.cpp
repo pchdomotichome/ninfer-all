@@ -93,7 +93,7 @@ std::size_t linear_pair_workspace_capacity_bytes(const Weight& first_weight,
                                                  const Weight& second_weight,
                                                  std::int32_t min_tokens, std::int32_t max_tokens) {
     if (min_tokens <= 0 || max_tokens < min_tokens ||
-        (first_weight.k != 5120 && first_weight.k != 2048)) {
+        (first_weight.k != 5120 && first_weight.k != 2048 && first_weight.k != 4096)) {
         throw std::invalid_argument("linear_pair: unsupported weight/column geometry");
     }
     require_weight(first_weight, first_weight.k, "first weight");
@@ -104,8 +104,9 @@ std::size_t linear_pair_workspace_capacity_bytes(const Weight& first_weight,
 void linear_pair(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
                  Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
     const std::int32_t cols = x.ne[1];
-    if (x.ne[0] != 5120 && x.ne[0] != 2048) {
-        throw std::invalid_argument("linear_pair: x K must be 5120 or 2048");
+    // The input width is the model's hidden size; 5120, 2048 and 4096 are the three served.
+    if (x.ne[0] != 5120 && x.ne[0] != 2048 && x.ne[0] != 4096) {
+        throw std::invalid_argument("linear_pair: x K must be 5120, 2048 or 4096");
     }
     require_matrix(x, x.ne[0], cols, "x");
     require_matrix(first_out, 1024, cols, "first output");
