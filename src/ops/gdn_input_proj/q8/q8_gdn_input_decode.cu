@@ -5,7 +5,7 @@
 #include "ops/linear/common/route_table.h"
 #include "core/device.h"
 #include "ops/gdn_input_proj/gdn_conv.cuh"
-#include "ops/linear/q8/q8_k2048_decode.cuh"
+#include "ops/linear/q8/q8_decode.cuh"
 
 namespace ninfer::ops::detail {
 namespace {
@@ -53,6 +53,34 @@ make_conv_epilogue(const Tensor& conv_weight, Tensor& conv_states, const Tensor&
     };
 }
 
+// The decode kernel is templated on K so one instantiation serves a width rather
+// than one being compiled per model; the runtime width selects between them.
+template <class Epilogue>
+void launch_decode_for_width(int hidden, const Tensor& x, const Weight& weight, Output output,
+                             Epilogue epilogue, cudaStream_t stream) {
+    constexpr int kRows       = 12288;
+    constexpr int kRowsPerCta = 8;
+    static_assert((8192 % kRowsPerCta) == 0 && (4096 % kRowsPerCta) == 0);
+    const auto* x_data     = static_cast<const __nv_bfloat16*>(x.data);
+    const auto* code_data  = static_cast<const std::uint8_t*>(weight.qdata);
+    const auto* scale_data = static_cast<const std::uint8_t*>(weight.scales);
+    switch (hidden) {
+    case 2048:
+        q8_decode_kernel<kRows, 2048, kRowsPerCta, Output, Epilogue>
+            <<<kRows / kRowsPerCta, kRowsPerCta * 32, 0, stream>>>(x_data, code_data, scale_data,
+                                                                   output, epilogue);
+        break;
+    case 4096:
+        q8_decode_kernel<kRows, 4096, kRowsPerCta, Output, Epilogue>
+            <<<kRows / kRowsPerCta, kRowsPerCta * 32, 0, stream>>>(x_data, code_data, scale_data,
+                                                                   output, epilogue);
+        break;
+    default:
+        throw std::invalid_argument("Q8 GDN input decode: unsupported input width");
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace
 
 void q8_gdn_input_decode_launch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
@@ -61,16 +89,8 @@ void q8_gdn_input_decode_launch(const Tensor& x, const Weight& weight, Tensor& q
         unified::q8_gdn_input_decode_launch(x, weight, qkv, z, stream);
         return;
     }
-    constexpr int kRows       = 12288;
-    constexpr int kRowsPerCta = 8;
-    static_assert((8192 % kRowsPerCta) == 0 && (4096 % kRowsPerCta) == 0);
     const Output output{static_cast<__nv_bfloat16*>(qkv.data), static_cast<__nv_bfloat16*>(z.data)};
-    q8_k2048_decode_kernel<kRows, kRowsPerCta>
-        <<<kRows / kRowsPerCta, kRowsPerCta * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), output);
-    CUDA_CHECK(cudaGetLastError());
+    launch_decode_for_width(x.ne[0], x, weight, output, Q8DecodeStoreEpilogue{}, stream);
 }
 
 void q8_gdn_input_decode_conv_snapshot_launch(
@@ -83,8 +103,6 @@ void q8_gdn_input_decode_conv_snapshot_launch(
             query, key, value, z, stream);
         return;
     }
-    constexpr int kRows       = 12288;
-    constexpr int kRowsPerCta = 8;
     const Output ignored_output{static_cast<__nv_bfloat16*>(query.data),
                                 static_cast<__nv_bfloat16*>(z.data)};
     const Q8GdnDecodeConvEpilogue epilogue{
@@ -92,12 +110,7 @@ void q8_gdn_input_decode_conv_snapshot_launch(
                            snapshot_base_slot, query, key, value),
         static_cast<__nv_bfloat16*>(z.data),
     };
-    q8_k2048_decode_kernel<kRows, kRowsPerCta, Output, Q8GdnDecodeConvEpilogue>
-        <<<kRows / kRowsPerCta, kRowsPerCta * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue);
-    CUDA_CHECK(cudaGetLastError());
+    launch_decode_for_width(x.ne[0], x, weight, ignored_output, epilogue, stream);
 }
 
 } // namespace ninfer::ops::detail

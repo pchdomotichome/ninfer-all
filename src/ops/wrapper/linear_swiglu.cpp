@@ -135,14 +135,20 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         detail::gguf_swiglu(x, gate_up_weight, nullptr, out, ws, stream);
         return;
     }
+    // The three registered shapes, each a model's own pair of widths: the gate/up parent is
+    // twice the FFN intermediate it produces, and it reduces over the hidden width.
     const bool large_shape = x.ne[0] == 5120 && out.ne[0] == 17408 && gate_up_weight.n == 34816 &&
                              gate_up_weight.k == 5120 && gate_up_weight.padded_shape[0] == 34816 &&
                              gate_up_weight.padded_shape[1] == 5120;
     const bool q8_shape = x.ne[0] == 2048 && out.ne[0] == 6144 && gate_up_weight.n == 12288 &&
                           gate_up_weight.k == 2048 && gate_up_weight.padded_shape[0] == 12288 &&
                           gate_up_weight.padded_shape[1] == 2048;
+    // The 4096-hidden dense model: FFN intermediate 12288, gate/up 24576.
+    const bool qwen9_shape = x.ne[0] == 4096 && out.ne[0] == 12288 && gate_up_weight.n == 24576 &&
+                             gate_up_weight.k == 4096 && gate_up_weight.padded_shape[0] == 24576 &&
+                             gate_up_weight.padded_shape[1] == 4096;
     if (t <= 0 || x.ne[2] != 1 || x.ne[3] != 1 || out.ne[1] != t || out.ne[2] != 1 ||
-        out.ne[3] != 1 || (!large_shape && !q8_shape)) {
+        out.ne[3] != 1 || (!large_shape && !q8_shape && !qwen9_shape)) {
         throw std::invalid_argument("linear_swiglu: invalid tensor shape");
     }
     if (!x.is_contiguous() || !out.is_contiguous()) {
@@ -158,11 +164,12 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         gate_up_weight.shape[0] == gate_up_weight.n &&
         gate_up_weight.shape[1] == gate_up_weight.k && gate_up_weight.qdata != nullptr &&
         gate_up_weight.scales != nullptr;
-    const bool q4_weight = large_shape && gate_up_weight.qtype == QType::Q4_G64_FP16 &&
+    const bool any_shape = large_shape || q8_shape || qwen9_shape;
+    const bool q4_weight = any_shape && gate_up_weight.qtype == QType::Q4_G64_FP16 &&
                            gate_up_weight.group_size == 64 && gate_up_weight.group == 64 &&
                            common_row_split;
     const bool q8_weight =
-        (q8_shape || large_shape) && gate_up_weight.qtype == QType::Q8_G32_FP16 &&
+        any_shape && gate_up_weight.qtype == QType::Q8_G32_FP16 &&
         gate_up_weight.group_size == 32 && gate_up_weight.group == 32 &&
         gate_up_weight.qhigh == nullptr && gate_up_weight.high_plane_bytes == 0 && common_row_split;
     const bool nvfp4_weight = large_shape && gate_up_weight.qtype == QType::NVFP4;

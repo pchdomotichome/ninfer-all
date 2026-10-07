@@ -20,16 +20,20 @@ struct Q8DecodeStoreEpilogue {
     }
 };
 
-template <std::int32_t Rows, std::int32_t RowsPerCta, class Output,
+// K is a template parameter rather than a fixed 2048: every width this kernel
+// serves is a multiple of the 256 values a phase consumes, and the only shape it
+// hard-coded was that width. A new K is a new instantiation, not a new kernel.
+template <std::int32_t Rows, std::int32_t K, std::int32_t RowsPerCta, class Output,
           class Epilogue = Q8DecodeStoreEpilogue>
 __global__ __launch_bounds__(RowsPerCta * 32,
-                             2) void q8_k2048_decode_kernel(const __nv_bfloat16* __restrict__ x,
-                                                            const std::uint8_t* __restrict__ codes,
-                                                            const std::uint8_t* __restrict__ scales,
-                                                            Output output, Epilogue epilogue = {}) {
+                             2) void q8_decode_kernel(const __nv_bfloat16* __restrict__ x,
+                                                      const std::uint8_t* __restrict__ codes,
+                                                      const std::uint8_t* __restrict__ scales,
+                                                      Output output, Epilogue epilogue = {}) {
     static_assert(Rows > 0 && RowsPerCta > 0 && (Rows % RowsPerCta) == 0);
     static_assert(RowsPerCta * 32 <= 1024);
-    constexpr int kK                 = 2048;
+    static_assert(K > 0 && (K % 256) == 0, "decode phases consume 256 values of K each");
+    constexpr int kK                 = K;
     constexpr int kGroup             = 32;
     constexpr int kGroupsPerRow      = kK / kGroup;
     constexpr int kValuesPerLane     = 8;

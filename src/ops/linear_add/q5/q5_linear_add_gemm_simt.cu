@@ -39,6 +39,16 @@ void dispatch_shape(const Tensor& x, const Weight& w, Tensor& residual_out, cuda
         launch_split2<Cols, 6, 6144>(x, w, residual_out, stream);
     } else if (w.k == 17408) {
         launch_split2<Cols, 17, 17408>(x, w, residual_out, stream);
+    } else if (w.k == 4096) {
+        // The split count follows the reduction width: the two registered widths take 6
+        // splits at 6144 and 17 at 17408, which is one split per 384 and per 1024 columns
+        // respectively -- not a single rule. These are the counts that put the same
+        // elements-per-split in range for the 4096-hidden model's widths.
+        launch_split2<Cols, 4, 4096>(x, w, residual_out, stream);
+    } else if (w.k == 12288) {
+        launch_split2<Cols, 12, 12288>(x, w, residual_out, stream);
+    } else if (w.k == 24576) {
+        launch_split2<Cols, 24, 24576>(x, w, residual_out, stream);
     } else {
         throw std::invalid_argument("q5 linear_add split2: unsupported exact K");
     }

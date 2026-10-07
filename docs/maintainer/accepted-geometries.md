@@ -1,11 +1,28 @@
 # Accepted geometries and formats
 
-Three validators enumerate, by literal, what they accept. Everything else in the
-engine derives its widths from the artifact's own `TextConfig` — the frontend
-included — so these three are where a model outside the registered set stops.
-This file records what each admits, where the enumeration lives, and what the
-rest of the engine already handles. It is the reference to read before changing
-any of the three, and before concluding that a model is unsupported.
+Six places enumerate, by literal, what they accept. Five are predicates; the
+sixth is compiled. Everything else in the engine derives its widths from the
+artifact's own `TextConfig` — the frontend included — so these are where a model
+outside the registered set stops. This file records what each admits, where the
+enumeration lives, and where the boundary between a predicate and a kernel sits.
+It is the reference to read before changing any of them, and before concluding
+that a model is unsupported.
+
+Measured on 2026-10-07 by walking Qwen3.5-9B (hidden 4096, 32 layers, 16/4 heads)
+from a working conversion down to the first failure. The first five were admitted
+with 29 lines across four files; the sixth needed the width turned from a constant
+into a parameter, which was a larger change than it looked because the split-K
+translation unit held it in template position across five launchers and three
+function-pointer tables.
+
+| # | validator | file | admits | nature |
+|---|---|---|---|---|
+| 1 | `input_projection` | `src/ops/weight_input.cpp` | two geometries | predicate |
+| 2 | `prepare_gdn_gating_proj_weights` | `src/ops/weight_input.cpp` | two A/B shapes | predicate |
+| 3 | `require_causal_geometry` | `.../dense/causal_cache/causal_softmax_attention.cpp` | two head pairs | predicate over kernels |
+| 4 | `bf16_gdn_gating_admits` | `.../bf16_gdn_gating_proj_plan.cpp` | `is_27` \|\| `is_35` | predicate over a schedule table |
+| 5 | `gdn_input_proj_workspace_capacity_bytes` | `src/ops/wrapper/gdn_input_proj.cpp` | one Q8 profile | predicate |
+| 6 | `q8_gdn_input_admits` | `.../q8/q8_gdn_input_plan.cpp` | every instantiated width | **was a compiled `kHidden`; now a parameter** |
 
 ## `input_projection` — attention and GDN input projections
 
@@ -109,6 +126,75 @@ gone rather than loosened. Porting that is a larger change than deriving the
 widths from the config, and it also opens the mixed `(Q4, Q5)` GDN mixer that the
 contiguous path refuses; it is not compatible with this fork's merge history or
 its sm_86 tuning.
+
+## The GDN control and the head geometry
+
+`prepare_gdn_gating_proj_weights` takes the A/B pair and admits
+`{48, 5120}` or `{32, 2048}`. The first is the 5120-hidden model's 48 control
+rows, the second the 2048-hidden model's 32.
+
+`require_causal_geometry` admits `(24 query, 4 kv)` or `(16 query, 2 kv)` at
+`kHeadDim`. Note the ratio is not constant across them — 6 and 8 — so a width
+derived from the other members of a group is not sufficient; the pair has to be
+enumerated.
+
+## `bf16_gdn_gating_admits` and the schedule table
+
+`src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp` selects among
+`MmaCooperativeSplit{32,16,8,4,2}`, `MmaUnsplit`, `GemvPairedRows`,
+`SmallTSplit10` and `SimtWarpRowC{4,8}`. The MMA tile width is
+`is_35(problem) ? 64 : 128`, so a new geometry lands on the 128 path unless it
+is added to `is_35` deliberately. Which schedule wins also depends on `sm_count`,
+because a cooperative schedule needs its whole grid resident — so a width added
+here is re-measured per device rather than inherited.
+
+## `q8_gdn_input_admits` — the width is a parameter now, not a constant
+
+`src/ops/gdn_input_proj/q8/q8_gdn_input_plan.cpp` admits a shape through
+`supported_shape`, which took an exact `input_rows == 2048` and
+`padded_k == 2048`. It now admits every width the decode kernel is instantiated
+for and requires `padded_k == input_rows`. The `kRoutes` table selects on the
+column count, never on `K`, so admitting a width adds no route.
+
+The schedules were named for the width they were written against
+(`gdn_input_proj.q8.decode.r8.direct.k2048.split2` and siblings) and the kernels
+matched them (`q8_k2048_decode.cuh`, `q8_k2048_decode_kernel<…>`, plus a
+file-scope `constexpr int kHidden = 2048` in both `q8_gdn_input_gemm_mma.cu` and
+`q8_gdn_input_gemm_splitk.cu`). **That is gone.** The decode kernel is
+`q8_decode_kernel<Rows, K, RowsPerCta, …>` in `ops/linear/q8/q8_decode.cuh`, where
+`K` is a template parameter and every quantity the kernel derives from it —
+`kGroupsPerRow`, `kValuesPerPhase`, `kPhases` — follows; it reads global memory and
+has no shared-memory or register footprint that depends on the width. The MMA
+launcher passes `x.ne[0]` as the runtime argument the kernel already took. The
+split-K translation unit carries `Hidden` through its kernel, its five launchers and
+its three function-pointer tables, one table per width in `SplitKLaunchers<Hidden>`,
+selected by a runtime `switch` that rejects any other width by name.
+
+`q8_gdn_input_schedule_name` no longer carries a width: the schedule is the same
+one for every admitted width, so a name naming one would be wrong for the other.
+The width belongs to the problem, not the schedule.
+
+**Two paths reach the same op.** `unified::q8_gdn_input_decode_launch` and its
+siblings pass the width as the `StaticK` argument of `Q8A16GemvSchedule`, and
+`q8_a16_gemv_kernel` falls back to `operands.k` when `StaticK` is zero — so the
+unified path was always width-generic. It is not the path that runs on this fork:
+`device_profiles.json` gives the sm_86 profile no `unified/q8_gdn_input` key, so
+`fused_route_table` resolves to `Legacy` and the legacy route is the live one.
+Check which path a device actually takes before concluding a kernel is dead; the
+RTX 5090 entry has the key and the RTX 3090 entry does not.
+
+`catalog_is_closed()` guards the *column* domain — the ranges must tile
+`[1, kAnyCols]` contiguously — not `K`, so a new width does not disturb it.
+
+A new width is therefore a new instantiation and a new entry in each dispatch
+switch, plus a qualification against the op oracle: `tests/ops/test_gdn_input_proj.cpp`
+runs every admitted width against `projection_oracle` in FP64.
+
+That is the same wall a fork adding Qwen3.5-0.8B describes: its record of the
+work lists new projection kernels selecting GEMV, small-batch SIMT or MMA from
+the matrix shape and token count, wider prefill MMA tiles with matrix-geometry
+and column-tail selection, and a normalized-control op qualified for specific
+input widths, heads and token counts.
 
 ## Related
 

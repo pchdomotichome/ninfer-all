@@ -57,6 +57,13 @@ GdnControlParentGeometry require_bf16_parent(const Weight& parent) {
         require_bf16_weight(parent, 64, 2048, "ab_weight");
         return {.input_rows = 2048, .heads = 32};
     }
+    // The 4096-hidden model: the same 32 control rows as the 2048-hidden one, at this
+    // model's wider input. n is twice the heads because the A and B projections are
+    // stored as one parent, which is why 64 recurs above.
+    if (parent.n == 64 && parent.k == 4096) {
+        require_bf16_weight(parent, 64, 4096, "ab_weight");
+        return {.input_rows = 4096, .heads = 32};
+    }
     throw std::invalid_argument("gdn_gating_proj: unsupported ab_weight geometry");
 }
 

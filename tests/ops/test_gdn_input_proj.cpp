@@ -248,41 +248,47 @@ int run_t2() {
     return failures;
 }
 
-int run_q8_case(DevicePackedWeight& parent, std::int32_t tokens) {
-    constexpr std::int32_t kHidden      = 2048;
+int run_q8_case(DevicePackedWeight& parent, std::int32_t tokens, std::int32_t hidden) {
     constexpr std::int32_t kQkvRows     = 8192;
     constexpr std::int32_t kZRows       = 4096;
-    const std::vector<float> activation = make_bf16_activation(kHidden, tokens, 501U + tokens);
+    const std::vector<float> activation = make_bf16_activation(hidden, tokens, 501U + tokens);
     const std::vector<std::uint16_t> activation_bits = bf16_bits(activation);
     DeviceBuffer device_activation                   = to_device(activation_bits);
     GuardedBf16Tensor qkv(kQkvRows, tokens);
     GuardedBf16Tensor z(kZRows, tokens);
-    Tensor x(device_activation.p, DType::BF16, {kHidden, tokens});
+    Tensor x(device_activation.p, DType::BF16, {hidden, tokens});
     Tensor qkv_output = qkv.tensor();
     Tensor z_output   = z.tensor();
     ops::gdn_input_proj(x, parent.view(), qkv_output, z_output, nullptr);
     cuda_synchronize();
 
-    const std::string suffix = " Q8 A16 T=" + std::to_string(tokens);
+    const std::string suffix =
+        " Q8 A16 T=" + std::to_string(tokens) + " K=" + std::to_string(hidden);
     int failures             = qkv.verify_guards("gdn qkv" + suffix);
     failures += z.verify_guards("gdn z" + suffix);
     failures += qkv.verify_fully_written("gdn qkv" + suffix);
     failures += z.verify_fully_written("gdn z" + suffix);
     failures += verify_output_range("gdn qkv" + suffix, qkv, kQkvRows, 0, kQkvRows, parent.host, 0,
-                                    activation, kHidden, tokens);
+                                    activation, hidden, tokens);
     failures += verify_output_range("gdn z" + suffix, z, kZRows, 0, kZRows, parent.host, kQkvRows,
-                                    activation, kHidden, tokens);
+                                    activation, hidden, tokens);
     failures += verify_preserved("gdn x" + suffix, device_activation, activation_bits);
     failures += parent.verify_preserved("gdn parent weight" + suffix);
     return failures;
 }
 
 int run_q8() {
-    constexpr std::int32_t kHidden = 2048;
-    DevicePackedWeight parent(
-        quantized_weight::make_patterned_weight(QType::Q8_G32_FP16, 12288, kHidden, 503U));
     int failures = 0;
-    for (const std::int32_t tokens : {1, 2, 97}) { failures += run_q8_case(parent, tokens); }
+    // Every input width the decode kernel is instantiated for. 2048 is the 2048-hidden
+    // model; 4096 is the 4096-hidden one. Both are qualified here against the same
+    // FP64 oracle, so a new instantiation cannot be added without being checked.
+    for (const std::int32_t hidden : {2048, 4096}) {
+        DevicePackedWeight parent(
+            quantized_weight::make_patterned_weight(QType::Q8_G32_FP16, 12288, hidden, 503U));
+        for (const std::int32_t tokens : {1, 2, 97}) {
+            failures += run_q8_case(parent, tokens, hidden);
+        }
+    }
     return failures;
 }
 

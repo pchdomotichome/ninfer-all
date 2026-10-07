@@ -323,6 +323,64 @@ std::size_t checked_partial_bytes(std::int32_t heads, std::int32_t split_k, std:
     return elements * sizeof(float);
 }
 
+// Every cooperative launcher below takes the same arguments and differs only in the geometry
+// its kernel was compiled for, so the choice is one of three function pointers rather than a
+// branch at every schedule. Adding a geometry is then one row here instead of one branch per
+// schedule.
+using GdnGatingCooperativeLaunch = bool (*)(Bf16GdnGatingTokenVariant, const Tensor&,
+                                            const Weight&, const Weight&, const Tensor&,
+                                            const Tensor&, void*, Tensor&, Tensor&,
+                                            std::int32_t, cudaStream_t);
+
+GdnGatingCooperativeLaunch cooperative_launch_for(const Bf16GdnGatingScheduleId schedule,
+                                                  const Bf16GdnGatingProblem& problem) {
+    if (is_qwen9(problem)) {
+        switch (schedule) {
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
+            return bf16_gdn_gating_proj_qwen9_mma_split32_launch;
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
+            return bf16_gdn_gating_proj_qwen9_mma_split16_launch;
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
+            return bf16_gdn_gating_proj_qwen9_mma_split8_launch;
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
+            return bf16_gdn_gating_proj_qwen9_mma_split4_launch;
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
+            return bf16_gdn_gating_proj_qwen9_mma_split2_launch;
+        default:
+            break;
+        }
+    }
+    if (is_35(problem)) {
+        switch (schedule) {
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
+            return bf16_gdn_gating_proj_35_mma_split32_launch;
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
+            return bf16_gdn_gating_proj_35_mma_split16_launch;
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
+            return bf16_gdn_gating_proj_35_mma_split8_launch;
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
+            return bf16_gdn_gating_proj_35_mma_split4_launch;
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
+            return bf16_gdn_gating_proj_35_mma_split2_launch;
+        default:
+            break;
+        }
+    }
+    // The 5120-hidden geometry only has the three narrow splits compiled; its own route
+    // table never names the two wider ones.
+    switch (schedule) {
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
+        return bf16_gdn_gating_proj_mma_split8_launch;
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
+        return bf16_gdn_gating_proj_mma_split4_launch;
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
+        return bf16_gdn_gating_proj_mma_split2_launch;
+    default:
+        break;
+    }
+    throw std::logic_error("BF16 GDN gating: schedule is not a cooperative MMA one");
+}
+
 void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem& problem,
                       const Tensor& x, const Weight& a_weight, const Weight& b_weight,
                       const Tensor& A_log, const Tensor& dt_bias, WorkspaceArena& ws, Tensor& g,
@@ -331,7 +389,10 @@ void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem&
     DeviceSpan scratch{};
     if (plan.workspace_bytes != 0) { scratch = ws.alloc_bytes(plan.workspace_bytes); }
     const auto launch_unsplit = [&] {
-        if (is_35(problem)) {
+        if (is_qwen9(problem)) {
+            bf16_gdn_gating_proj_qwen9_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight,
+                                                         A_log, dt_bias, g, beta, execution.stream);
+        } else if (is_35(problem)) {
             bf16_gdn_gating_proj_35_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight,
                                                        A_log, dt_bias, g, beta, execution.stream);
         } else {
@@ -366,47 +427,13 @@ void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem&
                                                execution.stream);
         return;
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
-        finish_cooperative(bf16_gdn_gating_proj_35_mma_split32_launch(
-            plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
-            execution.multiprocessor_count, execution.stream));
-        return;
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
-        finish_cooperative(bf16_gdn_gating_proj_35_mma_split16_launch(
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
+        finish_cooperative(cooperative_launch_for(plan.schedule, problem)(
             plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
             execution.multiprocessor_count, execution.stream));
-        return;
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
-        if (is_35(problem)) {
-            finish_cooperative(bf16_gdn_gating_proj_35_mma_split8_launch(
-                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
-                execution.multiprocessor_count, execution.stream));
-        } else {
-            finish_cooperative(bf16_gdn_gating_proj_mma_split8_launch(
-                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
-                execution.multiprocessor_count, execution.stream));
-        }
-        return;
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
-        if (is_35(problem)) {
-            finish_cooperative(bf16_gdn_gating_proj_35_mma_split4_launch(
-                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
-                execution.multiprocessor_count, execution.stream));
-        } else {
-            finish_cooperative(bf16_gdn_gating_proj_mma_split4_launch(
-                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
-                execution.multiprocessor_count, execution.stream));
-        }
-        return;
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
-        if (is_35(problem)) {
-            finish_cooperative(bf16_gdn_gating_proj_35_mma_split2_launch(
-                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
-                execution.multiprocessor_count, execution.stream));
-        } else {
-            finish_cooperative(bf16_gdn_gating_proj_mma_split2_launch(
-                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
-                execution.multiprocessor_count, execution.stream));
-        }
         return;
     case Bf16GdnGatingScheduleId::MmaUnsplit:
         launch_unsplit();
@@ -528,6 +555,9 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
         throw std::invalid_argument(
             "BF16 GDN gating: exact problem or column count is not admitted");
     }
+    // The 4096-hidden model shares the 2048-hidden model's 32 control rows, so its column
+    // bands are the same ones; only the reduction width differs, and that is a launch-time
+    // constant in the geometry rather than a different route.
     return is_27(problem) ? resolve_from_routes(k27Routes, problem, sm_count)
                           : resolve_from_routes(k35Routes, problem, sm_count);
 }

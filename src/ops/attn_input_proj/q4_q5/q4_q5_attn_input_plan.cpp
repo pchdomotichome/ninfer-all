@@ -5,13 +5,20 @@
 #include "ops/common/device_route.h"
 
 #include <array>
+#include <string>
 #include <limits>
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
 
-constexpr std::string_view kQ4Q5AttnInputRouteKey = "q4_q5_attn_input/5120x6144x1024";
+// The device-profile route key names the shape it was tuned on, so it is built from the
+// problem rather than fixed: a width with no profile entry of its own simply matches none,
+// which leaves the table below in charge instead of silently taking another's tuning.
+std::string q4_q5_attn_input_route_key(const Q4Q5AttnInputProblem& problem) {
+    return "q4_q5_attn_input/" + std::to_string(problem.input_rows) + "x" +
+           std::to_string(problem.query_rows) + "x" + std::to_string(problem.kv_rows);
+}
 
 constexpr std::int32_t kAnyCols = std::numeric_limits<std::int32_t>::max();
 
@@ -109,9 +116,15 @@ constexpr bool catalog_is_closed() noexcept {
 
 static_assert(catalog_is_closed(), "attention input routes must be exact and closed");
 
+// The three row counts are the model's own head geometry and the input width is its hidden
+// size; padded_k must equal the width because these are row-split with no K padding. Which
+// of the two registered head geometries a problem has is decided by its query rows.
 bool supported_shape(const Q4Q5AttnInputProblem& problem) noexcept {
-    return problem.input_rows == 5120 && problem.query_rows == 6144 && problem.kv_rows == 1024 &&
-           problem.padded_k == 5120;
+    const bool gqa_24 = problem.query_rows == 6144 && problem.kv_rows == 1024;
+    const bool gqa_16 = problem.query_rows == 4096 && problem.kv_rows == 1024;
+    const bool width_ok =
+        problem.input_rows == 5120 || problem.input_rows == 4096 || problem.input_rows == 2048;
+    return (gqa_24 || gqa_16) && width_ok && problem.padded_k == problem.input_rows;
 }
 
 } // namespace
@@ -162,7 +175,7 @@ Q4Q5AttnInputPlan q4_q5_attn_input_resolve_plan(const Q4Q5AttnInputProblem& prob
         {"mixed_r64_c128_s2", Id::MixedR64C128S2, 0},
     }};
     if (const auto* routed =
-            routed_candidate<Id>(kQ4Q5AttnInputRouteKey, problem.cols, kCandidates)) {
+            routed_candidate<Id>(q4_q5_attn_input_route_key(problem), problem.cols, kCandidates)) {
         return {routed->id};
     }
 

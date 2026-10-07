@@ -33,6 +33,7 @@ static_assert(kK % kSmallTKSlice == 0, "small-T K split must divide K");
 
 constexpr int k35N           = 32;
 constexpr int k35K           = 2048;
+constexpr int kQwen9K         = 4096;
 constexpr int k35LogicalRows = 2 * k35N;
 
 template <int TokenTile, int KSlice, int RowsPerBlock>
@@ -257,6 +258,14 @@ void require_shape35(const Weight& w, const char* name) {
     }
 }
 
+// The 4096-hidden model: the same 32 control rows, twice the input width.
+void require_shape_qwen9(const Weight& w, const char* name) {
+    if (w.n != k35N || w.k != kQwen9K || w.shape[0] != k35N || w.shape[1] != kQwen9K) {
+        throw std::invalid_argument(std::string("gdn_gating_proj: ") + name +
+                                    " requires contiguous BF16 [32,4096]");
+    }
+}
+
 template <class Geometry, int SplitK>
 constexpr std::int32_t cooperative_resident_ctas_per_sm() noexcept {
     static_assert(SplitK > 1);
@@ -267,7 +276,8 @@ constexpr std::int32_t cooperative_resident_ctas_per_sm() noexcept {
         // allocation both admit two resident CTAs per SM uniformly across the three.
         return 2;
     } else {
-        static_assert(std::is_same_v<Geometry, Bf16Gdn35Geometry>);
+        static_assert(std::is_same_v<Geometry, Bf16Gdn35Geometry> ||
+                      std::is_same_v<Geometry, Bf16GdnQwen9Geometry>);
         static_assert(SplitK == 32 || SplitK == 16 || SplitK == 8 || SplitK == 4 || SplitK == 2);
         // Measured on the sm_86 build (cuobjdump -res-usage): split-32 uses 122-126 registers
         // with 256 threads and is register-bound to two resident CTAs per SM; split-16 uses 56
@@ -635,4 +645,70 @@ void bf16_gdn_gating_proj_35_mma_unsplit_launch(Bf16GdnGatingTokenVariant varian
                                                            nullptr, g, beta, stream);
 }
 
+bool bf16_gdn_gating_proj_qwen9_mma_split32_launch(
+    Bf16GdnGatingTokenVariant variant, const Tensor& x, const Weight& a_weight,
+    const Weight& b_weight, const Tensor& A_log, const Tensor& dt_bias, void* workspace, Tensor& g,
+    Tensor& beta, std::int32_t multiprocessor_count, cudaStream_t stream) {
+    require_shape_qwen9(a_weight, "a_weight");
+    require_shape_qwen9(b_weight, "b_weight");
+    return launch_bf16_prefill_mma<Bf16GdnQwen9Geometry, 32, 8>(
+        variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g, beta,
+        stream, multiprocessor_count);
+}
+
+bool bf16_gdn_gating_proj_qwen9_mma_split16_launch(
+    Bf16GdnGatingTokenVariant variant, const Tensor& x, const Weight& a_weight,
+    const Weight& b_weight, const Tensor& A_log, const Tensor& dt_bias, void* workspace, Tensor& g,
+    Tensor& beta, std::int32_t multiprocessor_count, cudaStream_t stream) {
+    require_shape_qwen9(a_weight, "a_weight");
+    require_shape_qwen9(b_weight, "b_weight");
+    return launch_bf16_prefill_mma<Bf16GdnQwen9Geometry, 16, 8>(
+        variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g, beta,
+        stream, multiprocessor_count);
+}
+
+bool bf16_gdn_gating_proj_qwen9_mma_split8_launch(
+    Bf16GdnGatingTokenVariant variant, const Tensor& x, const Weight& a_weight,
+    const Weight& b_weight, const Tensor& A_log, const Tensor& dt_bias, void* workspace, Tensor& g,
+    Tensor& beta, std::int32_t multiprocessor_count, cudaStream_t stream) {
+    require_shape_qwen9(a_weight, "a_weight");
+    require_shape_qwen9(b_weight, "b_weight");
+    return launch_bf16_prefill_mma<Bf16GdnQwen9Geometry, 8, 8>(
+        variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g, beta,
+        stream, multiprocessor_count);
+}
+
+bool bf16_gdn_gating_proj_qwen9_mma_split4_launch(
+    Bf16GdnGatingTokenVariant variant, const Tensor& x, const Weight& a_weight,
+    const Weight& b_weight, const Tensor& A_log, const Tensor& dt_bias, void* workspace, Tensor& g,
+    Tensor& beta, std::int32_t multiprocessor_count, cudaStream_t stream) {
+    require_shape_qwen9(a_weight, "a_weight");
+    require_shape_qwen9(b_weight, "b_weight");
+    return launch_bf16_prefill_mma<Bf16GdnQwen9Geometry, 4, 8>(
+        variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g, beta,
+        stream, multiprocessor_count);
+}
+
+bool bf16_gdn_gating_proj_qwen9_mma_split2_launch(
+    Bf16GdnGatingTokenVariant variant, const Tensor& x, const Weight& a_weight,
+    const Weight& b_weight, const Tensor& A_log, const Tensor& dt_bias, void* workspace, Tensor& g,
+    Tensor& beta, std::int32_t multiprocessor_count, cudaStream_t stream) {
+    require_shape_qwen9(a_weight, "a_weight");
+    require_shape_qwen9(b_weight, "b_weight");
+    return launch_bf16_prefill_mma<Bf16GdnQwen9Geometry, 2, 8>(
+        variant, x, nullptr, 0.0F, nullptr, a_weight, b_weight, A_log, dt_bias, workspace, g, beta,
+        stream, multiprocessor_count);
+}
+
+void bf16_gdn_gating_proj_qwen9_mma_unsplit_launch(Bf16GdnGatingTokenVariant variant,
+                                                    const Tensor& x, const Weight& a_weight,
+                                                    const Weight& b_weight, const Tensor& A_log,
+                                                    const Tensor& dt_bias, Tensor& g, Tensor& beta,
+                                                    cudaStream_t stream) {
+    require_shape_qwen9(a_weight, "a_weight");
+    require_shape_qwen9(b_weight, "b_weight");
+    (void)launch_bf16_prefill_mma<Bf16GdnQwen9Geometry, 1, 8>(variant, x, nullptr, 0.0F, nullptr,
+                                                                 a_weight, b_weight, A_log, dt_bias,
+                                                                 nullptr, g, beta, stream);
+}
 } // namespace ninfer::ops::detail

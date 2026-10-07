@@ -277,13 +277,17 @@ void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, cons
     }
 }
 
-void require_q8_rowsplit(const Weight& weight, std::int32_t rows, const char* label) {
+// `columns` is the weight's own input width, taken from the artifact rather than named here: the
+// mixer row count is fixed by the op's output layout, but the width it reduces over is the model's.
+void require_q8_rowsplit(const Weight& weight, std::int32_t rows, std::int32_t columns,
+                         const char* label) {
     if (weight.qtype != QType::Q8_G32_FP16 || weight.layout != QuantLayout::RowSplit ||
         weight.scale_dtype != DType::FP16 || weight.group_size != 32 || weight.group != 32 ||
-        weight.ndim != 2 || weight.n != rows || weight.k != 2048 || weight.shape[0] != rows ||
-        weight.shape[1] != 2048 || weight.padded_shape[0] != rows ||
-        weight.padded_shape[1] != 2048 || weight.qhigh != nullptr || weight.high_plane_bytes != 0 ||
-        !aligned_to(weight.qdata, 16) || !aligned_to(weight.scales, 16)) {
+        weight.ndim != 2 || weight.n != rows || weight.k != columns || weight.shape[0] != rows ||
+        weight.shape[1] != columns || weight.padded_shape[0] != rows ||
+        weight.padded_shape[1] != columns || weight.qhigh != nullptr ||
+        weight.high_plane_bytes != 0 || !aligned_to(weight.qdata, 16) ||
+        !aligned_to(weight.scales, 16)) {
         throw std::invalid_argument(std::string("gdn_input_proj: invalid ") + label);
     }
 }
@@ -353,15 +357,17 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& qkv, 
         return;
     }
 
-    constexpr std::int32_t kHidden  = 2048;
+    // The input width is x's row extent; the mixer's own split is fixed by the op's
+    // output layout. Only the width varies between the models this form serves, so
+    // the guard reads it rather than naming it.
     constexpr std::int32_t kQkvRows = 8192;
     constexpr std::int32_t kZRows   = 4096;
     constexpr std::int32_t kRows    = kQkvRows + kZRows;
-    require_matrix(x, kHidden, cols, "x");
+    require_matrix(x, x.ne[0], cols, "x");
     require_matrix(qkv, kQkvRows, cols, "qkv");
     require_matrix(z, kZRows, cols, "z");
     require_single_parent_nonoverlap(x, qkv, z);
-    require_q8_rowsplit(weight, kRows, "query/key/value/z weight");
+    require_q8_rowsplit(weight, kRows, x.ne[0], "query/key/value/z weight");
     detail::q8_gdn_input_dispatch(x, weight, qkv, z, stream);
 }
 
@@ -542,14 +548,13 @@ void dispatch_single_parent_snapshot(const Tensor& x, const Weight& weight,
         return;
     }
 
-    constexpr std::int32_t kHidden    = 2048;
     constexpr std::int32_t kQueryRows = 2048;
     constexpr std::int32_t kKeyRows   = 2048;
     constexpr std::int32_t kValueRows = 4096;
     constexpr std::int32_t kZRows     = 4096;
     constexpr std::int32_t kChannels  = kQueryRows + kKeyRows + kValueRows;
-    const ConvGeometry geometry       = require_snapshot_input(x, kHidden);
-    require_q8_rowsplit(weight, kChannels + kZRows, "query/key/value/z weight");
+    const ConvGeometry geometry       = require_snapshot_input(x, x.ne[0]);
+    require_q8_rowsplit(weight, kChannels + kZRows, x.ne[0], "query/key/value/z weight");
     require_snapshot_operands(conv_weight, conv_states, valid_columns, initial_state_slots,
                               snapshot_base_slots, kChannels, geometry);
     require_conv_tensor(query, kQueryRows, geometry.width, geometry.batch,
@@ -691,14 +696,13 @@ void dispatch_single_parent_record(const Tensor& x, const Weight& weight, const 
         return;
     }
 
-    constexpr std::int32_t kHidden    = 2048;
     constexpr std::int32_t kQueryRows = 2048;
     constexpr std::int32_t kKeyRows   = 2048;
     constexpr std::int32_t kValueRows = 4096;
     constexpr std::int32_t kZRows     = 4096;
     constexpr std::int32_t kChannels  = kQueryRows + kKeyRows + kValueRows;
-    const ConvGeometry geometry       = require_record_input(x, kHidden);
-    require_q8_rowsplit(weight, kChannels + kZRows, "query/key/value/z weight");
+    const ConvGeometry geometry       = require_record_input(x, x.ne[0]);
+    require_q8_rowsplit(weight, kChannels + kZRows, x.ne[0], "query/key/value/z weight");
     require_record_operands(conv_weight, conv_states, valid_columns, initial_state_slots, kChannels,
                             geometry);
     require_conv_tensor(conv_record, kChannels, geometry.width, geometry.batch,

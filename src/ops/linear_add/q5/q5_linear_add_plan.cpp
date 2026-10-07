@@ -36,9 +36,19 @@ struct RouteSpec {
     Q5LinearAddScheduleId schedule;
 };
 
-constexpr std::array<SupportSpec, 2> kSupports{{
+constexpr std::array<SupportSpec, 5> kSupports{{
     {5120, 6144, 6144},
     {5120, 17408, 17408},
+    // The 4096-hidden dense model, whose FFN intermediate is 12288. Its three Q5 shapes:
+    // the fused gate+up reads the hidden width and writes twice that intermediate; the
+    // attention output stays inside the hidden width; the down projection reads the
+    // intermediate and writes the hidden width. Note the two are transposes of each other
+    // over different widths, so the input width of one is the output width of the other.
+    // The first two entries are 5120-hidden models, where 5120 is that model's FFN
+    // intermediate rather than a shared constant.
+    {24576, 4096, 4096},
+    {4096, 4096, 4096},
+    {4096, 12288, 12288},
 }};
 
 // The 2..10 band is measured too (2026-09-09, same bench, --tokens 1,2,4,6,8,10,12,16, medians of
@@ -317,10 +327,15 @@ Q5LinearAddPlan q5_linear_add_resolve_plan(const Q5LinearAddProblem& problem) {
         throw std::logic_error("q5 linear_add: admitted problem has no covering route");
     };
     const std::string shape = std::to_string(problem.rows) + "x" + std::to_string(problem.k);
+    // Which column bands a width uses is a measurement on this card, not a function of the
+    // width, so it is tabulated per width rather than derived. A width with no measurement of
+    // its own takes the widest registered width's bands; that is a starting point, not a
+    // claim the boundaries are right for it.
+    const bool k6144_bands = problem.k == 6144;
     if (fused_route_table("unified/q5_linear_add/" + shape, problem.cols) ==
         LinearRouteTable::Unified) {
-        return problem.k == 6144 ? resolve_from(kK6144UnifiedRoutes)
-                                 : resolve_from(kK17408UnifiedRoutes);
+        return k6144_bands ? resolve_from(kK6144UnifiedRoutes)
+                           : resolve_from(kK17408UnifiedRoutes);
     }
     using Id = Q5LinearAddScheduleId;
     static constexpr std::array<DeviceRouteCandidate<Id>, 9> kCandidates{{
@@ -338,7 +353,7 @@ Q5LinearAddPlan q5_linear_add_resolve_plan(const Q5LinearAddProblem& problem) {
     if (const auto* routed = routed_candidate<Id>(key, problem.cols, kCandidates)) {
         return {routed->id, 0};
     }
-    return problem.k == 6144 ? resolve_from(kK6144Routes) : resolve_from(kK17408Routes);
+    return k6144_bands ? resolve_from(kK6144Routes) : resolve_from(kK17408Routes);
 }
 
 std::size_t q5_linear_add_capacity_workspace_bytes(std::int32_t rows, std::int32_t k,
