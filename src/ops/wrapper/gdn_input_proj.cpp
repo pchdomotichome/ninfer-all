@@ -934,7 +934,8 @@ std::size_t gdn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int
         }
         return detail::fp8_gdn_input_workspace_capacity_bytes(policy, min_tokens, max_tokens);
     }
-    if (parent_qtype == QType::Q8_G32_FP16 && parent_rows == 12288 && input_rows == 2048) {
+    if (parent_qtype == QType::Q8_G32_FP16 && parent_rows == 12288 &&
+        (input_rows == 2048 || input_rows == 4096)) {
         (void)detail::q8_gdn_input_resolve_plan(
             {input_rows, 8192, 4096, parent_rows, input_rows, min_tokens});
         (void)detail::q8_gdn_input_resolve_plan(
