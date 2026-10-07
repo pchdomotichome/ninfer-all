@@ -440,8 +440,9 @@ bool attn_input_proj_fused_rmsnorm_nvfp4_eligible(const Weight& weight, LinearPo
     // norm+SIMT variant measured a regression (see plan.h), so the gap is deliberate.
     const bool supported_tokens = tokens == 1 || tokens >= 4;
     return policy == LinearPolicy::AllowA4 && supported_tokens && weight.qtype == QType::NVFP4 &&
-           weight.layout == QuantLayout::BlockScaleK16M128x4 && weight.n == 14336 &&
-           weight.k == 5120;
+           weight.layout == QuantLayout::BlockScaleK16M128x4 &&
+           weight.n == detail::Nvfp4N14336K5120::kOutputRows &&
+           weight.k == detail::Nvfp4N14336K5120::kInputRows;
 }
 
 void attn_input_proj_fused_rmsnorm_nvfp4(const Tensor& residual, const Tensor& norm_weight,

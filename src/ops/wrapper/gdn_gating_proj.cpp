@@ -48,26 +48,23 @@ struct GdnControlParentGeometry {
     std::int32_t heads;
 };
 
+// One row per compiled model: the control rows of the A/B parent and the input width they
+// reduce over. The parent holds the A and B projections together, so its row count is twice the
+// control-row count, which is why 64 recurs across the three 32-control-row models. A model with
+// a different control-row count gets its own row rather than a separate branch.
+constexpr std::array<GdnControlParentGeometry, 4> kGdnControlGeometries{{
+    {5120, 48},  // the 5120-hidden model
+    {2048, 32},  // the 2048-hidden model
+    {4096, 32},  // the 4096-hidden dense model
+    {2560, 32},  // the 2560-hidden dense model
+}};
+
 GdnControlParentGeometry require_bf16_parent(const Weight& parent) {
-    if (parent.n == 96 && parent.k == 5120) {
-        require_bf16_weight(parent, 96, 5120, "ab_weight");
-        return {.input_rows = 5120, .heads = 48};
-    }
-    if (parent.n == 64 && parent.k == 2048) {
-        require_bf16_weight(parent, 64, 2048, "ab_weight");
-        return {.input_rows = 2048, .heads = 32};
-    }
-    // The 4096-hidden model: the same 32 control rows as the 2048-hidden one, at this
-    // model's wider input. n is twice the heads because the A and B projections are
-    // stored as one parent, which is why 64 recurs above.
-    if (parent.n == 64 && parent.k == 4096) {
-        require_bf16_weight(parent, 64, 4096, "ab_weight");
-        return {.input_rows = 4096, .heads = 32};
-    }
-    // The 2560-hidden model: the same 32 control rows again at its own width.
-    if (parent.n == 64 && parent.k == 2560) {
-        require_bf16_weight(parent, 64, 2560, "ab_weight");
-        return {.input_rows = 2560, .heads = 32};
+    for (const auto& geometry : kGdnControlGeometries) {
+        if (parent.n == 2 * geometry.heads && parent.k == geometry.input_rows) {
+            require_bf16_weight(parent, 2 * geometry.heads, geometry.input_rows, "ab_weight");
+            return geometry;
+        }
     }
     throw std::invalid_argument("gdn_gating_proj: unsupported ab_weight geometry");
 }

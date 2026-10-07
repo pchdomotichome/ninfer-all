@@ -16,6 +16,7 @@
 #include "ops/linear_swiglu/q8/q8_linear_swiglu_plan.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <stdexcept>
 
@@ -40,6 +41,41 @@ void validate_policy(LinearPolicy policy) {
         return;
     }
     throw std::invalid_argument("linear_swiglu: invalid compute policy");
+}
+
+// One row per compiled model width: the hidden size and the FFN intermediate. The gate/up parent
+// is twice the intermediate and reduces over the hidden width, so a row fixes every operand's
+// shape and an unregistered pair is not compiled here. The two flags are routes bound to one
+// model's release rather than to the shape, so a new row states explicitly whether they apply
+// instead of inheriting them by default: `native_formats` for the non-integer NVFP4/FP8/T2
+// weights that release carries, and `a8_int_decode` for the A8 integer decode mainloop, which
+// is measured at one width and nowhere else.
+struct SwiGluShape {
+    std::int32_t hidden;
+    std::int32_t intermediate;
+    bool native_formats;
+    bool a8_int_decode;
+};
+
+constexpr std::array<SwiGluShape, 3> kSwiGluShapes{{
+    {5120, 17408, true, true},   // the 5120-hidden model
+    {2048, 6144, false, false},  // the 2048-hidden model
+    {4096, 12288, false, false}, // the 4096-hidden dense model
+}};
+
+// The row the operands name, or null when they do not name one. The padded shape is checked
+// because the integer routes index a tile width taken from it, so a parent padded to something
+// else is not the shape it was registered as.
+const SwiGluShape* registered_shape(const Tensor& x, const Tensor& out, const Weight& gate_up) {
+    for (const auto& row : kSwiGluShapes) {
+        const std::int32_t gate_up_rows = 2 * row.intermediate;
+        if (x.ne[0] == row.hidden && out.ne[0] == row.intermediate &&
+            gate_up.n == gate_up_rows && gate_up.k == row.hidden &&
+            gate_up.padded_shape[0] == gate_up_rows && gate_up.padded_shape[1] == row.hidden) {
+            return &row;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -135,20 +171,14 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         detail::gguf_swiglu(x, gate_up_weight, nullptr, out, ws, stream);
         return;
     }
-    // The three registered shapes, each a model's own pair of widths: the gate/up parent is
-    // twice the FFN intermediate it produces, and it reduces over the hidden width.
-    const bool large_shape = x.ne[0] == 5120 && out.ne[0] == 17408 && gate_up_weight.n == 34816 &&
-                             gate_up_weight.k == 5120 && gate_up_weight.padded_shape[0] == 34816 &&
-                             gate_up_weight.padded_shape[1] == 5120;
-    const bool q8_shape = x.ne[0] == 2048 && out.ne[0] == 6144 && gate_up_weight.n == 12288 &&
-                          gate_up_weight.k == 2048 && gate_up_weight.padded_shape[0] == 12288 &&
-                          gate_up_weight.padded_shape[1] == 2048;
-    // The 4096-hidden dense model: FFN intermediate 12288, gate/up 24576.
-    const bool qwen9_shape = x.ne[0] == 4096 && out.ne[0] == 12288 && gate_up_weight.n == 24576 &&
-                             gate_up_weight.k == 4096 && gate_up_weight.padded_shape[0] == 24576 &&
-                             gate_up_weight.padded_shape[1] == 4096;
+    // The registered widths, one row per model: its hidden size and the FFN intermediate it
+    // produces. The gate/up parent is twice that intermediate and reduces over the hidden width,
+    // so the pair fixes the shape and no other width is compiled. `native_formats` marks the rows
+    // whose releases also carry NVFP4/FP8/T2 weights, which are bound to one model rather than
+    // to the shape.
+    const SwiGluShape* shape = registered_shape(x, out, gate_up_weight);
     if (t <= 0 || x.ne[2] != 1 || x.ne[3] != 1 || out.ne[1] != t || out.ne[2] != 1 ||
-        out.ne[3] != 1 || (!large_shape && !q8_shape && !qwen9_shape)) {
+        out.ne[3] != 1 || shape == nullptr) {
         throw std::invalid_argument("linear_swiglu: invalid tensor shape");
     }
     if (!x.is_contiguous() || !out.is_contiguous()) {
@@ -164,7 +194,7 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         gate_up_weight.shape[0] == gate_up_weight.n &&
         gate_up_weight.shape[1] == gate_up_weight.k && gate_up_weight.qdata != nullptr &&
         gate_up_weight.scales != nullptr;
-    const bool any_shape = large_shape || q8_shape || qwen9_shape;
+    const bool any_shape = shape != nullptr;
     const bool q4_weight = any_shape && gate_up_weight.qtype == QType::Q4_G64_FP16 &&
                            gate_up_weight.group_size == 64 && gate_up_weight.group == 64 &&
                            common_row_split;
@@ -172,9 +202,10 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         any_shape && gate_up_weight.qtype == QType::Q8_G32_FP16 &&
         gate_up_weight.group_size == 32 && gate_up_weight.group == 32 &&
         gate_up_weight.qhigh == nullptr && gate_up_weight.high_plane_bytes == 0 && common_row_split;
-    const bool nvfp4_weight = large_shape && gate_up_weight.qtype == QType::NVFP4;
-    const bool fp8_weight   = large_shape && gate_up_weight.qtype == QType::FP8_E4M3FN_ROW_BF16;
-    const bool t2_weight    = large_shape && gate_up_weight.qtype == QType::T2_G128_FP16 &&
+    const bool native_formats = shape->native_formats;
+    const bool nvfp4_weight = native_formats && gate_up_weight.qtype == QType::NVFP4;
+    const bool fp8_weight   = native_formats && gate_up_weight.qtype == QType::FP8_E4M3FN_ROW_BF16;
+    const bool t2_weight    = native_formats && gate_up_weight.qtype == QType::T2_G128_FP16 &&
                               gate_up_weight.qhigh == nullptr &&
                               gate_up_weight.high_plane_bytes == 0 && common_row_split;
     if (!q4_weight && !q8_weight && !nvfp4_weight && !fp8_weight && !t2_weight) {
@@ -226,9 +257,8 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
     }
     // Decode and verify widths, opt-in only: the integer small-T route wins from sixteen columns
     // up and loses below, so the narrow widths stay on A16 (q4_small_t_mma_i8.cuh has the table).
-    if (policy == LinearPolicy::AllowA8IntDecode && q4_weight &&
-        detail::q4_linear_swiglu_small_t_i8_supported(t) &&
-        gate_up_weight.n == 34816 && gate_up_weight.k == 5120) {
+    if (policy == LinearPolicy::AllowA8IntDecode && q4_weight && shape->a8_int_decode &&
+        detail::q4_linear_swiglu_small_t_i8_supported(t)) {
         detail::q4_linear_swiglu_small_t_tiled_i8_launch(x, gate_up_weight, out, ws, stream);
         return;
     }
@@ -267,6 +297,16 @@ std::size_t linear_swiglu_pair_workspace_capacity_bytes(QType gate_qtype, QType 
     const detail::GgufShape gate{gate_qtype, rows, input_rows};
     const detail::GgufShape up{up_qtype, rows, input_rows};
     return detail::gguf_swiglu_workspace_bytes(gate, &up, min_tokens, max_tokens);
+}
+
+bool linear_swiglu_compiles_a8_int_decode(std::int32_t gate_up_rows, std::int32_t input_rows) {
+    for (const auto& row : kSwiGluShapes) {
+        if (row.a8_int_decode && gate_up_rows == 2 * row.intermediate &&
+            input_rows == row.hidden) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace ninfer::ops

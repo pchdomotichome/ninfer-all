@@ -287,15 +287,21 @@ std::int32_t schedule_cols(Q8PairScheduleId schedule) {
     throw std::logic_error("q8 pair: unknown schedule");
 }
 
+// The pair Op's one compiled row width: the K/V parent rows, which the kernel templates on. The
+// reduction width K is a parameter (it is the model's hidden size), so a new model needs a new row
+// width registered here and nothing else.
+constexpr std::int32_t kPairRows = 1024;
+
 void require_pair_weights(const Weight& first_weight, const Weight& second_weight, std::int32_t k) {
     const auto valid = [k](const Weight& w) {
         const std::uint64_t groups = static_cast<std::uint64_t>(k / 32);
         const std::uint64_t payload_bytes =
-            static_cast<std::uint64_t>(1024) * k + static_cast<std::uint64_t>(1024) * groups * 2;
+            static_cast<std::uint64_t>(kPairRows) * k +
+            static_cast<std::uint64_t>(kPairRows) * groups * 2;
         return w.qtype == QType::Q8_G32_FP16 && w.layout == QuantLayout::RowSplit &&
                w.scale_dtype == DType::FP16 && w.group == 32 && w.group_size == 32 && w.ndim == 2 &&
-               w.n == 1024 && w.k == k && w.shape[0] == 1024 && w.shape[1] == k &&
-               w.padded_shape[0] == 1024 && w.padded_shape[1] == k &&
+               w.n == kPairRows && w.k == k && w.shape[0] == kPairRows && w.shape[1] == k &&
+               w.padded_shape[0] == kPairRows && w.padded_shape[1] == k &&
                w.payload_bytes >= payload_bytes && w.qdata != nullptr && w.qhigh == nullptr &&
                w.high_plane_bytes == 0 && w.scales != nullptr;
     };
@@ -455,7 +461,7 @@ Q8PairProblem q8_pair_problem(const Tensor& x, const Weight& first_weight,
 
 bool q8_pair_admits(const Q8PairProblem& problem) noexcept {
     const bool width_admitted = problem.k == 5120 || problem.k == 2048 || problem.k == 4096;
-    return problem.rows == 1024 && width_admitted && problem.padded_k == problem.k &&
+    return problem.rows == kPairRows && width_admitted && problem.padded_k == problem.k &&
            problem.cols >= 1;
 }
 

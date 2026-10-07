@@ -2,6 +2,7 @@
 #include "models/qwen3_5/execution/rotation.h"
 
 #include "core/weight_view.h"
+#include "ninfer/ops/linear_swiglu.h"
 
 #include <array>
 #include <limits>
@@ -166,7 +167,7 @@ public:
         out.verify_gate_up_policy = out.gate_up.policy;
 #if defined(NINFER_SM8X_COMPAT)
         if (model_.options().mlp_a8_decode && out.gate_up.weight.qtype == QType::Q4_G64_FP16 &&
-            out.gate_up.weight.n == 34816 && out.gate_up.weight.k == 5120) {
+            ops::linear_swiglu_compiles_a8_int_decode(out.gate_up.weight.n, out.gate_up.weight.k)) {
             out.verify_gate_up_policy = ops::LinearPolicy::AllowA8IntDecode;
         }
 #endif
