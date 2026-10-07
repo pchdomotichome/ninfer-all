@@ -58,6 +58,7 @@ The built-in recipes are ordinary Python functions in
 | `qwen3_8_27b_q6` | Q4/Q5 projections, Q6 MLP gate/up, Q8 vocabulary weights | None |
 | `qwen3_8_27b_imatrix` | `grouped_search` with signed scales; Q4/Q5 projections, Q4 mixer outputs and MLP down in layers 36-63, Q4 embedding, Q6 head | `imatrix` |
 | `qwen3_6_35b_a3b` | Q4 experts, Q5/Q6 expert down, Q8 shared/projection weights | None |
+| `qwen3_6_35b_a3b_apex` | Q4 experts, Q6 expert down across the edge layers, Q8 shared/projection weights | None |
 | `qwen3_6_35b_a3b_nvfp4` | Imported NVFP4 routed and shared experts, Q8 projection weights, Q8/Q6 vocabulary weights | `quantized` |
 | `qwen3_6_27b_nvfp4` | Imported NVFP4, selected BF16 projections, Q8 vocabulary weights | `quantized` |
 | `qwen3_8_27b_nvfp4` | Imported NVFP4/FP8, FP8 embedding generated from BF16 | `quantized` |
@@ -136,6 +137,51 @@ python3 -m tools.convert \
   --name qwen3.8-27b \
   --out models/qwen3_8_27b_nvfp4.ninfer
 ```
+
+`qwen3_6_35b_a3b_apex` widens the edge that `qwen3_6_35b_a3b` already grades. The official recipe
+lifts the routed experts' `down` to Q6, but only at layers 34, 38 and 39; this one gives the ten
+edge layers that width, derived from `num_hidden_layers` at an eighth of the depth, and drops the
+ad-hoc exceptions with it — layer 34 is APEX's near-edge, so a symmetric boundary returns it to
+Q5. `gate` and `up` stay Q4, the shared expert stays Q8, and attention, SSM and the input
+projections stay Q8.
+
+One bit of [APEX](https://github.com/localai-org/apex-quant)'s layer gradient is expressible here,
+and the rest is pinned by the engine rather than chosen. `prepare_sparse_moe_weights` treats the
+four expert matrices as one profile — the prefill route quantises the activation and its gate/up
+epilogue emits the encoded intermediate `down` consumes — so only (Q4, Q5) and (Q4, Q6) exist and
+a gate at Q6 has no route at any token count. `prepare_input_projection_weight` admits Q8_G32 for
+this model and nothing else. The shared expert cannot move either, because the same groupwise
+check requires Q8_G32. APEX grades `gate` and `up` on the edge layers as well, and those two
+parameters are the bulk of the model, so a (Q6, Q6) expert profile is what would recover that
+half; it is an engine change rather than a recipe one.
+
+APEX's own report is worth reading before choosing between the paths: it measures that five custom
+quantization-algorithm changes (error feedback, enhanced scale search, super-block refinement,
+Gaussian-density weighting) all produced zero improvement, so the gain is in the allocation and
+not the encoder. Its `-I` tiers additionally want a diverse importance matrix (chat, code,
+reasoning and tool-calling, no Wikipedia), which its author publishes as a GGUF rather than in a
+reusable form.
+
+```bash
+python3 -m tools.convert \
+  --model /path/to/Qwen3.6-35B-A3B \
+  --recipe qwen3_6_35b_a3b_apex \
+  --components text,vision,mtp \
+  --proposal \
+  --name qwen3.6-35b-a3b-apex \
+  --out models/qwen3_6_35b_a3b_apex.ninfer
+```
+
+Perplexity against the flat recipe, measured on this fork's RTX 3090 over a 391,005-token
+`--disjoint` corpus with `--kv-dtype bf16`: 4.940150 against 4.941651 for `qwen3_6_35b_a3b`, for
+22.62 GB against 22.39 GB. The edge buys 0.03% for 1% more bytes, which is not worth it, and the
+measurement says the `down` half of APEX's gradient is not where its quality comes from. APEX
+raises `gate` and `up` on the edge layers too, and those two are the bulk of the model.
+
+For scale, APEX's own tiers for this checkpoint score 4.8120 at 17.33 GB (I-Compact), 4.7494 at
+23.48 GB (I-Quality) and 4.7450 at 26.06 GB (I-Balanced) under `llama-perplexity` at `n_ctx 4096`,
+the protocol this table's `--disjoint` matches. I-Quality and I-Balanced are within each other's
+error bar, so the extra 2.6 GB buys nothing and the useful budget is near 23 GB.
 
 Vision uses the main source, and so does MTP unless `--source mtp=PATH` supplies a separately trained
 head under the checkpoint's `mtp.*` tensor names. DFlash and DFlash2 use the corresponding named
