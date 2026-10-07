@@ -243,24 +243,40 @@ A GGUF-sourced FFN does not pass through here: `linear_swiglu` returns to
 `detail::gguf_swiglu` before the table is consulted, which is why a model converted
 from GGUF needs no row. A model converted from safetensors does need one.
 
-## Known fault: Qwen3.5-9B's ordinary decode path, at native formats only
+## Fixed: Qwen3.5-9B's ordinary decode path (Q4 LinearSwiGLU GEMV)
 
-A Qwen3.5-9B artifact built from a safetensors recipe starts and generates with
-`--spec mtp`, and fails the warmup without it: the target returns a token outside
-the public domain, which is what a non-finite logit set produces.
+A Qwen3.5-9B artifact built from a safetensors recipe started, generated with
+`--spec mtp`, and failed its warmup without it: the target returned a token outside
+the public token domain, which is what a non-finite logit set produces.
 
-**It is not the geometry.** A second artifact of the identical geometry — hidden
-4096, 32 layers, 8 full-attention, 16/4 heads of 256, FFN 12288, GDN 16/32 by 128 —
-converted from a GGUF passes the same warmup with and without `--spec mtp`. The
-two artifacts differ in weight format: `q4_g64_fp16`, `q5_g64_fp16`, `q8_g32_fp16`
-and `q6_g64_fp16` against `gguf_q8_0`.
+It was two file-level constants in `src/ops/linear_swiglu/q4/q4_linear_swiglu_gemv.cu`
+fixed at the 5120-hidden model's values and reached from the decode path's T=1 GEMV:
+`kIntermediate` (17408, used as the gate-to-up row offset and the launch grid) and
+`kTiles`, which the kernel body read instead of its own `Tiles` template parameter.
+Both are now derived from the template's `GateUpRows`.
 
-So the fault is in a native-format linear kernel on the decode path, which a GGUF
-artifact never reaches. A width constant placed against a templatised kernel, a
-geometry predicate and layout-based routing were all suspected first and are all
-excluded: each would fail identically through the GGUF route. Look at the native
-Q4/Q5/Q8/Q6 group-split decode kernels, and use a GGUF artifact of the same model
-as the control.
+**This section replaces an earlier claim that native-quant formats were at fault.**
+That was wrong: a control across six artifacts showed the 5120-hidden model's native
+formats passing the same warmup, so the format was not the discriminator. What
+separated the failing artifact from the passing one was the *shape* -- the 9B's
+`{24576, 4096, 12288}` was the only Q4 LinearSwiGLU profile in use that the Op's
+numerical test did not cover, and the constants that disagreed with it were the
+5120-hidden model's. The GGUF 9B passed because a GGUF-sourced FFN never reaches
+this kernel, not because GGUF is correct.
+
+The reproduction is now the Op oracle rather than a model:
+`tests/ops/linear_swiglu/test_q4_a16.cpp` runs both registered Q4 profiles.
+
+Two diagnostics that misled first, recorded so they are not retried: the
+linear-route family (`NINFER_LINEAR_ROUTES=unified` reports the same fault) and the
+activation-compute policy (all five gate_up policy flags report it). And
+`compute-sanitizer --tool memcheck` reports zero errors on the failing case, because
+the wrong bytes read are inside the allocation -- an in-bounds read of the wrong
+region is not a memory error.
+
+Still open: the routed candidate key in `q4_linear_swiglu_plan.cpp` is the literal
+`"q4_linear_swiglu/34816x17408x5120"`, so every profile consults the 5120-hidden
+model's device route table.
 
 ## Related
 
