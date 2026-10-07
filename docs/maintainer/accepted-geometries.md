@@ -243,6 +243,25 @@ A GGUF-sourced FFN does not pass through here: `linear_swiglu` returns to
 `detail::gguf_swiglu` before the table is consulted, which is why a model converted
 from GGUF needs no row. A model converted from safetensors does need one.
 
+## Known fault: Qwen3.5-9B's ordinary decode path, at native formats only
+
+A Qwen3.5-9B artifact built from a safetensors recipe starts and generates with
+`--spec mtp`, and fails the warmup without it: the target returns a token outside
+the public domain, which is what a non-finite logit set produces.
+
+**It is not the geometry.** A second artifact of the identical geometry — hidden
+4096, 32 layers, 8 full-attention, 16/4 heads of 256, FFN 12288, GDN 16/32 by 128 —
+converted from a GGUF passes the same warmup with and without `--spec mtp`. The
+two artifacts differ in weight format: `q4_g64_fp16`, `q5_g64_fp16`, `q8_g32_fp16`
+and `q6_g64_fp16` against `gguf_q8_0`.
+
+So the fault is in a native-format linear kernel on the decode path, which a GGUF
+artifact never reaches. A width constant placed against a templatised kernel, a
+geometry predicate and layout-based routing were all suspected first and are all
+excluded: each would fail identically through the GGUF route. Look at the native
+Q4/Q5/Q8/Q6 group-split decode kernels, and use a GGUF artifact of the same model
+as the control.
+
 ## Related
 
 - [Engine architecture](engine-architecture.md) — ownership between Models, Ops
