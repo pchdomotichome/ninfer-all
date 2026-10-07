@@ -59,9 +59,18 @@ struct Bf16GdnQwen9Geometry {
     static constexpr int kBlockN = 64;
 };
 
+// The 2560-hidden model: the same 32 control rows again at its own input width, so kBlockN is
+// again the 2048-hidden model's and for the same reason.
+struct Bf16GdnQwen4Geometry {
+    static constexpr int kHeads  = 32;
+    static constexpr int kHidden = 2560;
+    static constexpr int kBlockN = 64;
+};
+
 static_assert(Bf16Gdn27Geometry::kHidden % kBf16GdnBlockK == 0);
 static_assert(Bf16Gdn35Geometry::kHidden % kBf16GdnBlockK == 0);
 static_assert(Bf16GdnQwen9Geometry::kHidden % kBf16GdnBlockK == 0);
+static_assert(Bf16GdnQwen4Geometry::kHidden % kBf16GdnBlockK == 0);
 
 __device__ __forceinline__ int bf16_gdn_swizzle(int row, int col) {
     return (col & ~63) + gemm_swz64(row, col & 63);

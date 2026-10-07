@@ -21,6 +21,7 @@ from .recipe import Recipe
 from .sources.gguf import GGUFFile
 from .sources.safetensors import SafetensorsSource
 from .gguf_blocks import RECIPES as GGUF_RECIPES
+from .gguf_blocks_dense import RECIPES as GGUF_DENSE_RECIPES
 from .gguf_blocks_moe import RECIPES as GGUF_MOE_RECIPES
 from .ternary import RECIPES as TERNARY_RECIPES
 
@@ -95,6 +96,7 @@ def _function(value: str):
         **TERNARY_RECIPES,
         **GGUF_RECIPES,
         **GGUF_MOE_RECIPES,
+        **GGUF_DENSE_RECIPES,
         **QWEN4_EXP_GGUF_RECIPES,
     }
     if value in recipes:

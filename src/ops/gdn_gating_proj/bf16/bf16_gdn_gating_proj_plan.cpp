@@ -186,6 +186,10 @@ bool is_35(const Bf16GdnGatingProblem& problem) noexcept {
 
 // Qwen3.5-9B: the 35B's 32 control rows at the 27B's wider input rows, so it takes the
 // 128-column tile the 27B takes and the cooperative schedules both of them use.
+bool is_qwen4(const Bf16GdnGatingProblem& problem) noexcept {
+    return problem.heads == 32 && problem.input_rows == 2560;
+}
+
 bool is_qwen9(const Bf16GdnGatingProblem& problem) noexcept {
     return problem.heads == 32 && problem.input_rows == 4096;
 }
@@ -334,6 +338,20 @@ using GdnGatingCooperativeLaunch = bool (*)(Bf16GdnGatingTokenVariant, const Ten
 
 GdnGatingCooperativeLaunch cooperative_launch_for(const Bf16GdnGatingScheduleId schedule,
                                                   const Bf16GdnGatingProblem& problem) {
+    if (is_qwen4(problem)) {
+        // 2560 is 40 blocks of K, so only splits 8, 4 and 2 divide it; the route table below
+        // names no others.
+        switch (schedule) {
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
+            return bf16_gdn_gating_proj_qwen4_mma_split8_launch;
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
+            return bf16_gdn_gating_proj_qwen4_mma_split4_launch;
+        case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
+            return bf16_gdn_gating_proj_qwen4_mma_split2_launch;
+        default:
+            break;
+        }
+    }
     if (is_qwen9(problem)) {
         switch (schedule) {
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
@@ -389,7 +407,10 @@ void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem&
     DeviceSpan scratch{};
     if (plan.workspace_bytes != 0) { scratch = ws.alloc_bytes(plan.workspace_bytes); }
     const auto launch_unsplit = [&] {
-        if (is_qwen9(problem)) {
+        if (is_qwen4(problem)) {
+            bf16_gdn_gating_proj_qwen4_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight,
+                                                         A_log, dt_bias, g, beta, execution.stream);
+        } else if (is_qwen9(problem)) {
             bf16_gdn_gating_proj_qwen9_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight,
                                                          A_log, dt_bias, g, beta, execution.stream);
         } else if (is_35(problem)) {
@@ -498,7 +519,7 @@ const char* bf16_gdn_norm_gating_schedule_name(Bf16GdnNormGatingScheduleId sched
 
 bool bf16_gdn_gating_admits(const Bf16GdnGatingProblem& problem) noexcept {
     if (problem.cols < 1) { return false; }
-    return is_27(problem) || is_35(problem) || is_qwen9(problem);
+    return is_27(problem) || is_35(problem) || is_qwen9(problem) || is_qwen4(problem);
 }
 
 Bf16GdnGatingPlan bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId schedule,
@@ -558,6 +579,10 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
     // The 4096-hidden model shares the 2048-hidden model's 32 control rows, so its column
     // bands are the same ones; only the reduction width differs, and that is a launch-time
     // constant in the geometry rather than a different route.
+    // The 2560-hidden model has 40 blocks of K, so only the narrow splits are compiled for it and
+    // it takes the 5120-hidden model's table, which names exactly those. Its column bands are that
+    // model's, which is a starting point rather than a measurement at this width.
+    if (is_qwen4(problem)) { return resolve_from_routes(k27Routes, problem, sm_count); }
     return is_27(problem) ? resolve_from_routes(k27Routes, problem, sm_count)
                           : resolve_from_routes(k35Routes, problem, sm_count);
 }

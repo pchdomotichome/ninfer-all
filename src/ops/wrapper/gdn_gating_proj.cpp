@@ -64,6 +64,11 @@ GdnControlParentGeometry require_bf16_parent(const Weight& parent) {
         require_bf16_weight(parent, 64, 4096, "ab_weight");
         return {.input_rows = 4096, .heads = 32};
     }
+    // The 2560-hidden model: the same 32 control rows again at its own width.
+    if (parent.n == 64 && parent.k == 2560) {
+        require_bf16_weight(parent, 64, 2560, "ab_weight");
+        return {.input_rows = 2560, .heads = 32};
+    }
     throw std::invalid_argument("gdn_gating_proj: unsupported ab_weight geometry");
 }
 
