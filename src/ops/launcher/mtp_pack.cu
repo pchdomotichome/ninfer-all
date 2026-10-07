@@ -33,11 +33,17 @@ void mtp_split_attn_in_launch(const Tensor& attn_in, Tensor& q, Tensor& k, Tenso
     const std::int64_t n = static_cast<std::int64_t>(attn_in.ne[0]) * attn_in.ne[1];
     const int grid =
         static_cast<int>(std::max<std::int64_t>(1, div_up(n, static_cast<std::int64_t>(kBlock))));
-    // The parent's shape is the input's; the three outputs say how it splits.
+    // The parent's shape is the input's; the three outputs say how it splits. A projection's row
+    // count is head_dim * heads, and the outputs arrive as [head_dim, heads, T] views, so it is the
+    // product of the first two extents -- not the first one, which is only head_dim. The kernel uses
+    // it as the per-token stride of each output, so passing head_dim here splits the parent at the
+    // wrong offsets and every part is filled from another part's rows.
+    const std::int32_t q_rows  = q.ne[0] * q.ne[1];
+    const std::int32_t kv_rows = k.ne[0] * k.ne[1];
     mtp_split_attn_in_kernel<<<grid, kBlock, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(attn_in.data), static_cast<__nv_bfloat16*>(q.data),
         static_cast<__nv_bfloat16*>(k.data), static_cast<__nv_bfloat16*>(gate.data),
-        static_cast<__nv_bfloat16*>(v.data), attn_in.ne[1], attn_in.ne[0], q.ne[0], k.ne[0]);
+        static_cast<__nv_bfloat16*>(v.data), attn_in.ne[1], attn_in.ne[0], q_rows, kv_rows);
     CUDA_CHECK(cudaGetLastError());
 }
 

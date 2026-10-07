@@ -68,10 +68,14 @@ int pack_case(std::int32_t hidden, std::int32_t tokens) {
     return failures;
 }
 
-int split_case(std::int32_t tokens) {
-    constexpr std::int32_t kInputRows = 14336;
-    constexpr std::int32_t kQueryRows = 6144;
-    constexpr std::int32_t kKvRows    = 1024;
+int split_case(std::int32_t tokens, std::int32_t head_dim, std::int32_t query_heads,
+               std::int32_t kv_heads) {
+    // The geometry is a parameter because this op's row counts were once constants taken from the
+    // 5120-hidden model's head count; a model with different heads then split the parent at the
+    // wrong offsets while every check still passed. Both registered head layouts are run below.
+    const std::int32_t kQueryRows = head_dim * query_heads;
+    const std::int32_t kKvRows    = head_dim * kv_heads;
+    const std::int32_t kInputRows = 2 * (kQueryRows + kKvRows);
     const auto input = bit_pattern(static_cast<std::size_t>(kInputRows) * tokens, 0x2468'ace0u);
     std::vector<std::uint16_t> expected_query(static_cast<std::size_t>(kQueryRows) * tokens);
     std::vector<std::uint16_t> expected_key(static_cast<std::size_t>(kKvRows) * tokens);
@@ -105,10 +109,10 @@ int split_case(std::int32_t tokens) {
     device_value.fill(0xcd);
 
     Tensor input_tensor(device_input.data(), DType::BF16, {kInputRows, tokens});
-    Tensor query_tensor(device_query.data(), DType::BF16, {256, 24, tokens});
-    Tensor key_tensor(device_key.data(), DType::BF16, {256, 4, tokens});
-    Tensor gate_tensor(device_gate.data(), DType::BF16, {256, 24, tokens});
-    Tensor value_tensor(device_value.data(), DType::BF16, {256, 4, tokens});
+    Tensor query_tensor(device_query.data(), DType::BF16, {head_dim, query_heads, tokens});
+    Tensor key_tensor(device_key.data(), DType::BF16, {head_dim, kv_heads, tokens});
+    Tensor gate_tensor(device_gate.data(), DType::BF16, {head_dim, query_heads, tokens});
+    Tensor value_tensor(device_value.data(), DType::BF16, {head_dim, kv_heads, tokens});
     ops::mtp_split_attn_in(input_tensor, query_tensor, key_tensor, gate_tensor, value_tensor,
                            nullptr);
     cuda_synchronize();
@@ -152,9 +156,12 @@ int main() {
     failures += pack_case(2048, 1);
     failures += pack_case(2048, 6);
     failures += pack_case(2048, 48);
-    failures += split_case(1);
-    failures += split_case(6);
-    failures += split_case(48);
+    // The 5120-hidden model's head layout, then the 4096-hidden dense model's: 16 query heads and
+    // 4 KV heads of the same head dimension, so the row counts differ only in the query half.
+    for (const std::int32_t tokens : {1, 6, 48}) {
+        failures += split_case(tokens, 256, 24, 4);
+        failures += split_case(tokens, 256, 16, 4);
+    }
     std::cout << (failures ? "FAIL" : "OK") << " mtp_pack\n";
     return failures ? 1 : 0;
 }
