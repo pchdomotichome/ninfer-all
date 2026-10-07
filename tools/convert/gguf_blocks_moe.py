@@ -470,6 +470,19 @@ def text_sources(gguf: GGUFFile, *, mtp: bool) -> dict[str, tuple[LogicalSource,
         g, p = f"blk.{MTP_BLOCK}.", "mtp/layers/0/"
         out |= _moe_layer(gguf, g, p, experts)
         out |= _attention(gguf, g, p + "attention/")
+        # The nextn head itself: the projection that fuses the embedding and the
+        # hidden state, and the three zero-centred norms around it. The dense
+        # recipe produces the same four under the same names.
+        out["mtp/input_projection"] = (
+            block_source(gguf, g + "nextn.eh_proj.weight", (HIDDEN, 2 * HIDDEN), rows()),
+            True,
+        )
+        for role, tensor in (
+            ("embedding_norm", "nextn.enorm.weight"),
+            ("hidden_norm", "nextn.hnorm.weight"),
+            ("final_norm", "nextn.shared_head_norm.weight"),
+        ):
+            out["mtp/" + role] = (_norm(gguf, g + tensor, True), False)
     return out
 
 
@@ -511,7 +524,13 @@ def qwen3_6_35b_a3b_gguf(model, recipe, sources):
     gguf = sources["gguf"]
     if not isinstance(gguf, GGUFFile):
         raise ValueError("--source gguf must name the model's .gguf file")
-    mtp = validate(gguf)
+    # validate() reports whether the FILE carries the MTP layer; what the
+    # groupings need is whether the MODEL does, which --components decides. The
+    # dense recipe draws the same distinction.
+    file_has_mtp = validate(gguf)
+    mtp = "mtp" in model.components
+    if mtp and not file_has_mtp:
+        raise ValueError(f"{gguf.path}: the MTP component needs a file with blk.{MTP_BLOCK}.nextn.*")
     experts = expert_count(gguf)
 
     formats: dict[str, str] = {}
