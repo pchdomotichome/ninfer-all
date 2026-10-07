@@ -55,6 +55,7 @@ other references own narrower contracts:
 | [Numeric formats](maintainer/tensor-formats.md) | represented values, codes/scales, conversion arithmetic and numerical interpretation |
 | [Storage layouts](maintainer/storage-layouts.md) | packing, plane offsets, padding, encoded sizes and view addressing |
 | [Qwen3.5 model](maintainer/qwen3_5-model.md) | Dense/MoE mathematics, instance config, logical parameters, MTP, Vision and state semantics |
+| [Accepted geometries and formats](maintainer/accepted-geometries.md) | the three validators that enumerate what they admit, what the rest of the engine already derives from the config, and what was searched across the forks |
 | [Qwen3.8-Flash-Next plan](maintainer/qwen3-8-flash-next-plan.md) | the active plan for the `Qwen4ExpForConditionalGeneration` family: its mathematics, byte census, mapping onto the engine, milestones and what is done |
 | [DFlash and DFlash2](maintainer/dflash.md) | conditioning, masked draft computation, proposal distributions and backend state |
 | [Resource scheduling and context cache](maintainer/resource-scheduling-and-context-cache.md) | candidate selection, retention, materialization and Device/Host checkpoint policy |
