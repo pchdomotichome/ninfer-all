@@ -376,12 +376,13 @@ quantising activations to s8 with one scale per (token, 64-k group) and feeding
 `mma.m16n8k32.s8.s8.s32`. It buys a little speed and costs a little fidelity.
 
 **The Op, paired against the BF16 small-T kernel inside one sitting** (the card drifts several
-percent between sittings, so only the pairing is meaningful), cold, median of 15:
+percent between sittings, so only the pairing is meaningful), cold, median of 15. Positive means
+the integer route is the faster of the pair:
 
 | columns | 8 | 12 | 16 | 20 | 24 | 28 | 32 |
 |---|---|---|---|---|---|---|---|
-| run 1 | +10.7% | -5.8% | -3.4% | -4.8% | -4.8% | -5.0% | -4.5% |
-| run 2 | +7.5% | +4.3% | -0.7% | -5.9% | -6.1% | -4.0% | -6.4% |
+| run 1 | -10.7% | +5.8% | +3.4% | +4.8% | +4.8% | +5.0% | +4.5% |
+| run 2 | -7.5% | -4.3% | +0.7% | +5.9% | +6.1% | +4.0% | +6.4% |
 
 It wins from sixteen columns up and loses at eight, so the route is admitted for 16..32 columns
 only and every narrower width stays on the BF16 kernel. A cohort round reaches those widths through

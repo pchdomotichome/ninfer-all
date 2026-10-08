@@ -19,13 +19,17 @@ constexpr int kN            = 34816;
 constexpr int kK            = 5120;
 constexpr int kIntermediate = kN / 2;
 
+// `Intermediate` is where the gate/up parent's second half begins, so it is half its row count. It
+// is a template parameter rather than the file's constant: a model whose intermediate is not the
+// 5120-hidden model's would otherwise read its up half from the wrong weight rows.
+template <int Intermediate>
 struct Q4SwiGluSmallTRows {
     static constexpr int kOutputRowsPerCta = 8;
 
     __host__ __device__ int output_rows(int rows) const { return rows / 2; }
 
     __device__ __forceinline__ int weight_row(int output_row0, int local_row) const {
-        return output_row0 + (local_row & 7) + (local_row >= 8 ? kIntermediate : 0);
+        return output_row0 + (local_row & 7) + (local_row >= 8 ? Intermediate : 0);
     }
 };
 
@@ -55,7 +59,7 @@ void launch_small_t_active(const Tensor& x, const Weight& w, Tensor& out, cudaSt
     launch_q4_a16_sliced_k_mma<Schedule>(
         q4_linear_operands(x, w),
         LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), Intermediate},
-        Q4SwiGluSmallTEpilogue{}, stream, Q4SwiGluSmallTRows{});
+        Q4SwiGluSmallTEpilogue{}, stream, Q4SwiGluSmallTRows<Intermediate>{});
 }
 
 
