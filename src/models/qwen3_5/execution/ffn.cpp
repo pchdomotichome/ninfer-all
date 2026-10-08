@@ -2,13 +2,17 @@
 #include "models/qwen3_5/execution/rotation.h"
 
 #include "core/layout.h"
+#include "ninfer/ops/cast.h"
 #include "ninfer/ops/hadamard_transform.h"
+#include "ninfer/ops/moe_experts.h"
+#include "ninfer/ops/moe_route.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer/ops/residual_add.h"
 #include "ninfer/ops/silu_mul.h"
 
+#include <cstdint>
 #include <stdexcept>
 
 namespace ninfer::models::qwen3_5::execution {
@@ -71,6 +75,18 @@ std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t fi
     if (const auto* moe = std::get_if<ops::SparseMoeWeights>(&parameters)) {
         return ops::sparse_moe_workspace_capacity_bytes(moe->routed_gate_up.qtype,
                                                         moe->routed_down.qtype, first, last);
+    }
+    if (const auto* gguf = std::get_if<GgufMoeParameters>(&parameters)) {
+        // The router's ids, weights and shared gate, then the experts' own transient capacity, then
+        // the FP32 expert result and the BF16 copy the residual add takes. Sized for the interval's
+        // high end because neither Op takes a range.
+        const std::size_t tokens = static_cast<std::size_t>(last);
+        const std::size_t pairs  = tokens * static_cast<std::size_t>(gguf->top_k);
+        return ops::moe_route_workspace_bytes(last, gguf->banks.experts) +
+               ops::moe_experts_gguf_workspace_bytes(last) +
+               pairs * sizeof(std::int32_t) + pairs * sizeof(float) + tokens * sizeof(float) +
+               tokens * static_cast<std::size_t>(gguf->router.ne[0]) *
+                   (sizeof(float) + sizeof(std::uint16_t));
     }
     const auto& p = std::get<DenseParameters>(parameters);
     if (rotated_dense(p)) {
@@ -151,6 +167,25 @@ void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual
         WorkspaceArena scratch(storage);
         ops::sparse_moe(hidden, *moe, ops::SparseMoeEpilogue::AddResidual, residual, hints, scratch,
                         stream);
+        return;
+    }
+    if (const auto* gguf = std::get_if<GgufMoeParameters>(&parameters)) {
+        const auto storage =
+            workspace.alloc_bytes(ffn_workspace_bytes(parameters, columns, columns));
+        WorkspaceArena scratch(storage);
+        const std::int32_t rows  = gguf->router.ne[0];
+        const std::int32_t top_k = gguf->top_k;
+        Tensor ids     = scratch.alloc(DType::I32, {top_k, columns});
+        Tensor weights = scratch.alloc(DType::FP32, {top_k, columns});
+        Tensor shared  = scratch.alloc(DType::FP32, {columns});
+        ops::moe_route(hidden, gguf->router, gguf->shared_gate, scratch, ids, weights, shared, stream);
+        // The experts write FP32; the residual is BF16, so the sum needs the cast in between. The
+        // native Op adds the residual itself because it fuses the whole block.
+        Tensor experts = scratch.alloc(DType::FP32, {rows, columns});
+        ops::moe_experts_gguf(hidden, ids, weights, shared, gguf->banks, scratch, experts, stream);
+        Tensor bf16 = scratch.alloc(DType::BF16, {rows, columns});
+        ops::cast_fp32_to_bf16(experts, bf16, stream);
+        ops::residual_add(bf16, residual, stream);
         return;
     }
     const auto& p = std::get<DenseParameters>(parameters);

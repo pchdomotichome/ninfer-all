@@ -1,6 +1,8 @@
 #pragma once
 
 #include "models/qwen3_5/model.h"
+#include "core/arena.h"
+#include "ninfer/ops/moe_experts.h"
 #include "ninfer/ops/weight_input.h"
 
 #include <array>
@@ -41,7 +43,25 @@ struct DenseParameters {
     std::optional<LinearParameters> up;
 };
 
-using FfnParameters = std::variant<DenseParameters, ops::SparseMoeWeights>;
+// The routed and shared experts of an artifact that stores them as GGUF blocks. Opposite of
+// SparseMoeWeights: the banks are tables of expert base pointers rather than one fused native
+// Weight per bank, and the router and shared gate arrive already materialised because moe_route
+// projects from tensors, not from weights.
+struct GgufMoeParameters {
+    ops::GgufMoeWeights banks;
+    // BF16 [hidden, experts] and BF16 [hidden].
+    Tensor router;
+    Tensor shared_gate;
+    // Experts a token selects. The router Op's ids and weights are [top_k, tokens], so the caller
+    // has to state it; it is the model's, not the Op's, and the Op only instantiates it.
+    std::int32_t top_k = 0;
+};
+
+// A dense block's FFN, or its experts. A MoE block is one or the other: the GGUF form is separate
+// from the native one because the two run different Ops over different weight representations, not
+// because the mathematics differs.
+using FfnParameters =
+    std::variant<DenseParameters, ops::SparseMoeWeights, GgufMoeParameters>;
 
 struct AttentionParameters {
     ops::ProjectionWeights projection;
@@ -174,6 +194,10 @@ public:
     std::optional<VisionParameters> vision;
     std::optional<DraftParameters> draft;
     std::optional<ProposalParameters> proposal;
+    // The device arrays of expert base pointers that a GgufMoeParameters' banks name. Owned here
+    // because the builder that produces them is transient, and these have to outlive the parameters
+    // that point into them; one per MoE bank per layer, plus the shared expert's three.
+    std::vector<DeviceBuffer> expert_tables;
 };
 
 } // namespace ninfer::models::qwen3_5::execution
