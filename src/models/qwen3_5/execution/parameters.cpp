@@ -360,15 +360,17 @@ public:
         out.final_norm          = tensor(w.final_norm);
         // A bank whose parts share no contiguous parent -- GGUF parts of different block types, or
         // mixed formats such as Q8 K/V beside BF16 Q/gate -- has no packed form, and the dense
-        // rows below serve alone.
+        // rows below serve alone. Which architectures reach that is not this function's business:
+        // the Op that reads the rows projects each one on its own, whatever produced it. `packed`
+        // still wins wherever it exists, so a model whose parts do join is untouched.
+        //
+        // A MoE-architecture MTP lands here whenever its GGUF release splits the projections the way
+        // this one does -- query and gate head-interleaved in one tensor, key and value in two more.
         const bool packable = ops::joins(inputs);
-        if (!packable && model_.config().text.architecture != Architecture::Qwen3_5) {
-            throw std::invalid_argument("MTP attention weights share no contiguous parent");
-        }
         if (packable) {
             out.projection.packed = ops::prepare_linear_weight(inputs);
         }
-        if (model_.config().text.architecture == Architecture::Qwen3_5) {
+        if (!packable || model_.config().text.architecture == Architecture::Qwen3_5) {
             out.projection.rows = {linear(a.query), linear(a.key), linear(a.gate), linear(a.value)};
         }
         out.query_norm  = tensor(a.query_norm);
