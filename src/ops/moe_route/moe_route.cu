@@ -19,16 +19,17 @@
 namespace ninfer::ops {
 namespace {
 
-constexpr int kHidden     = 2560;
-constexpr int kMaxExperts = 512;
-constexpr int kTopK       = 10;
 // The logits GEMV: one warp per row, eight rows and eight token columns per CTA.
 constexpr int kRowWarps    = 8;
 constexpr int kColumnChunk = 8;
-constexpr int kVectors     = kHidden / 8; // 16-byte vectors per router row
-// The selection: one warp per token, sixteen logits per lane.
-constexpr int kSelectWarps   = 4;
-constexpr int kLogitsPerLane = kMaxExperts / 32;
+// The selection: one warp per token, one value per expert the lane owns.
+constexpr int kSelectWarps = 4;
+
+// Unlike the MoE experts Op, this geometry reaches the device and is templated rather than passed:
+// the logits kernel walks Hidden/8 vectors per row, and the selection keeps MaxExperts/32 logits and
+// TopK winners per lane in registers. Both are computed inside their kernels rather than through a
+// helper: this build does not pass --expt-relaxed-constexpr, so a constexpr free function is
+// host-only and a kernel cannot call it.
 
 __device__ __forceinline__ float warp_sum(float value) {
 #pragma unroll
@@ -61,18 +62,19 @@ __device__ __forceinline__ void load_input(const Input* p, float (&out)[8]) {
 }
 
 // logits[t, row] for rows 0..E (row E the shared gate), FP32 [E + 1, tokens].
-template <typename Input>
+template <typename Input, int Hidden>
 __global__ void __launch_bounds__(kRowWarps * 32)
     moe_route_logits_kernel(const Input* __restrict__ m, const __nv_bfloat16* __restrict__ router,
                             const __nv_bfloat16* __restrict__ shared_gate, int experts, int tokens,
                             float* __restrict__ logits) {
+    constexpr int kVectors = Hidden / 8;
     const int row   = blockIdx.x * kRowWarps + (threadIdx.x >> 5);
     const int lane  = threadIdx.x & 31;
     const int t0    = blockIdx.y * kColumnChunk;
     const int count = min(kColumnChunk, tokens - t0);
     if (row > experts) { return; }
     const auto* w = reinterpret_cast<const uint4*>(
-        row < experts ? router + static_cast<std::int64_t>(row) * kHidden : shared_gate);
+        row < experts ? router + static_cast<std::int64_t>(row) * Hidden : shared_gate);
     float acc[kColumnChunk] = {};
     for (int v = lane; v < kVectors; v += 32) {
         float wf[8];
@@ -81,7 +83,7 @@ __global__ void __launch_bounds__(kRowWarps * 32)
         for (int j = 0; j < kColumnChunk; ++j) {
             if (j < count) {
                 float x[8];
-                load_input(m + static_cast<std::int64_t>(t0 + j) * kHidden + 8 * v, x);
+                load_input(m + static_cast<std::int64_t>(t0 + j) * Hidden + 8 * v, x);
 #pragma unroll
                 for (int e = 0; e < 8; ++e) { acc[j] = fmaf(wf[e], x[e], acc[j]); }
             }
@@ -101,10 +103,12 @@ __device__ __forceinline__ bool better(float value, int index, float other, int 
     return value > other || (value == other && index < other_index);
 }
 
+template <int MaxExperts, int TopK>
 __global__ void __launch_bounds__(kSelectWarps * 32)
     moe_route_select_kernel(const float* __restrict__ logits, int experts, int tokens,
                             int* __restrict__ ids, float* __restrict__ weights,
                             float* __restrict__ shared) {
+    constexpr int kLogitsPerLane = MaxExperts / 32;
     const int t    = blockIdx.x * kSelectWarps + (threadIdx.x >> 5);
     const int lane = threadIdx.x & 31;
     if (t >= tokens) { return; }
@@ -116,10 +120,10 @@ __global__ void __launch_bounds__(kSelectWarps * 32)
         const int e = lane + 32 * i;
         values[i]   = e < experts ? row[e] : -INFINITY;
     }
-    float chosen[kTopK];
-    int chosen_index[kTopK];
+    float chosen[TopK];
+    int chosen_index[TopK];
 #pragma unroll
-    for (int k = 0; k < kTopK; ++k) {
+    for (int k = 0; k < TopK; ++k) {
         float best = -INFINITY;
         int slot   = 0;
 #pragma unroll
@@ -130,7 +134,7 @@ __global__ void __launch_bounds__(kSelectWarps * 32)
             }
         }
         // A lane with nothing left offers an index past every expert.
-        int index = best == -INFINITY ? kMaxExperts + lane : lane + 32 * slot;
+        int index = best == -INFINITY ? MaxExperts + lane : lane + 32 * slot;
 #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             const float other     = __shfl_xor_sync(0xffffffffu, best, offset);
@@ -151,15 +155,15 @@ __global__ void __launch_bounds__(kSelectWarps * 32)
     }
     if (lane != 0) { return; }
     shared[t] = 1.0f / (1.0f + __expf(-row[experts]));
-    // Renormalised softmax over the chosen ten: the full softmax's denominator cancels.
+    // Renormalised softmax over the chosen top-k: the full softmax's denominator cancels.
     float sum = 0.0f;
-    float e[kTopK];
+    float e[TopK];
 #pragma unroll
-    for (int k = 0; k < kTopK; ++k) { sum += (e[k] = __expf(chosen[k] - chosen[0])); }
+    for (int k = 0; k < TopK; ++k) { sum += (e[k] = __expf(chosen[k] - chosen[0])); }
 #pragma unroll
-    for (int k = 0; k < kTopK; ++k) {
-        ids[t * kTopK + k]     = chosen_index[k];
-        weights[t * kTopK + k] = e[k] / sum;
+    for (int k = 0; k < TopK; ++k) {
+        ids[t * TopK + k]     = chosen_index[k];
+        weights[t * TopK + k] = e[k] / sum;
     }
 }
 
@@ -169,39 +173,31 @@ void require(bool condition, const char* message) {
     if (!condition) { throw std::invalid_argument(std::string("moe_route: ") + message); }
 }
 
-} // namespace
-
-std::size_t moe_route_workspace_bytes(std::int32_t tokens, std::int32_t experts) {
-    require(tokens > 0 && experts >= kTopK && experts <= kMaxExperts,
-            "tokens must be positive and experts in [10, 512]");
-    WorkspaceLayoutBuilder layout;
-    (void)layout.alloc(DType::FP32, {experts + 1, tokens});
-    return layout.peak_bytes(1);
-}
-
-void moe_route(const Tensor& m, const Tensor& router, const Tensor& shared_gate,
-               WorkspaceArena& workspace, Tensor& ids, Tensor& weights, Tensor& shared,
-               cudaStream_t stream) {
+// One geometry's call, instantiated: `Hidden` fixes the logits kernel's row walk and `MaxExperts`
+// with `TopK` fix the selection's registers.
+template <int Hidden, int MaxExperts, int TopK>
+void run(const Tensor& m, const Tensor& router, const Tensor& shared_gate, WorkspaceArena& workspace,
+         Tensor& ids, Tensor& weights, Tensor& shared, cudaStream_t stream) {
     require((m.dtype == DType::BF16 || m.dtype == DType::FP32) && m.is_contiguous() &&
-                m.data != nullptr && aligned16(m.data) && m.ne[0] == kHidden && m.ne[1] > 0 &&
+                m.data != nullptr && aligned16(m.data) && m.ne[0] == Hidden && m.ne[1] > 0 &&
                 m.ne[2] == 1,
-            "m must be contiguous 16-byte aligned BF16 or FP32 [2560, tokens]");
+            "m must be contiguous 16-byte aligned BF16 or FP32 [hidden, tokens]");
     const std::int32_t tokens  = m.ne[1];
     const std::int32_t experts = router.ne[1];
     require(router.dtype == DType::BF16 && router.is_contiguous() && router.data != nullptr &&
-                aligned16(router.data) && router.ne[0] == kHidden && experts >= kTopK &&
-                experts <= kMaxExperts && router.ne[2] == 1,
-            "router must be 16-byte aligned BF16 [2560, experts] with 10 to 512 experts");
+                aligned16(router.data) && router.ne[0] == Hidden && experts >= TopK &&
+                experts <= MaxExperts && router.ne[2] == 1,
+            "router must be 16-byte aligned BF16 [hidden, experts] with top_k to max_experts experts");
     require(shared_gate.dtype == DType::BF16 && shared_gate.is_contiguous() &&
                 shared_gate.data != nullptr && aligned16(shared_gate.data) &&
-                shared_gate.ne[0] == kHidden && shared_gate.ne[1] == 1,
-            "shared_gate must be 16-byte aligned BF16 [2560]");
+                shared_gate.ne[0] == Hidden && shared_gate.ne[1] == 1,
+            "shared_gate must be 16-byte aligned BF16 [hidden]");
     require(ids.dtype == DType::I32 && ids.is_contiguous() && ids.data != nullptr &&
-                ids.ne[0] == kTopK && ids.ne[1] == tokens,
-            "ids must be I32 [10, tokens]");
+                ids.ne[0] == TopK && ids.ne[1] == tokens,
+            "ids must be I32 [top_k, tokens]");
     require(weights.dtype == DType::FP32 && weights.is_contiguous() && weights.data != nullptr &&
-                weights.ne[0] == kTopK && weights.ne[1] == tokens,
-            "weights must be FP32 [10, tokens]");
+                weights.ne[0] == TopK && weights.ne[1] == tokens,
+            "weights must be FP32 [top_k, tokens]");
     require(shared.dtype == DType::FP32 && shared.is_contiguous() && shared.data != nullptr &&
                 shared.ne[0] == tokens,
             "shared must be FP32 [tokens]");
@@ -213,18 +209,66 @@ void moe_route(const Tensor& m, const Tensor& router, const Tensor& shared_gate,
     const dim3 grid(static_cast<unsigned>((experts + 1 + kRowWarps - 1) / kRowWarps),
                     static_cast<unsigned>((tokens + kColumnChunk - 1) / kColumnChunk));
     if (m.dtype == DType::FP32) {
-        moe_route_logits_kernel<float><<<grid, kRowWarps * 32, 0, stream>>>(
+        moe_route_logits_kernel<float, Hidden><<<grid, kRowWarps * 32, 0, stream>>>(
             static_cast<const float*>(m.data), r, g, experts, tokens, logits_p);
     } else {
-        moe_route_logits_kernel<__nv_bfloat16><<<grid, kRowWarps * 32, 0, stream>>>(
+        moe_route_logits_kernel<__nv_bfloat16, Hidden><<<grid, kRowWarps * 32, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(m.data), r, g, experts, tokens, logits_p);
     }
     CUDA_CHECK(cudaGetLastError());
-    moe_route_select_kernel<<<static_cast<unsigned>((tokens + kSelectWarps - 1) / kSelectWarps),
-                              kSelectWarps * 32, 0, stream>>>(
-        logits_p, experts, tokens, static_cast<int*>(ids.data), static_cast<float*>(weights.data),
-        static_cast<float*>(shared.data));
+    moe_route_select_kernel<MaxExperts, TopK>
+        <<<static_cast<unsigned>((tokens + kSelectWarps - 1) / kSelectWarps), kSelectWarps * 32, 0,
+           stream>>>(logits_p, experts, tokens, static_cast<int*>(ids.data),
+                     static_cast<float*>(weights.data), static_cast<float*>(shared.data));
     CUDA_CHECK(cudaGetLastError());
+}
+
+// One row per instantiation: the hidden width and the top-k a call states select it, and the
+// expert count is a bound rather than part of the key because an expert-pruned release keeps fewer
+// entries of the same geometry.
+struct RouteGeometry {
+    std::int32_t hidden;
+    std::int32_t max_experts;
+    std::int32_t top_k;
+    void (*run)(const Tensor&, const Tensor&, const Tensor&, WorkspaceArena&, Tensor&, Tensor&,
+                Tensor&, cudaStream_t);
+};
+
+constexpr RouteGeometry kGeometries[]{
+    // Qwen3.8-Flash-Next (qwen4_exp): 512 experts, or the 256 an expert-pruned release keeps.
+    {2560, 512, 10, &run<2560, 512, 10>},
+    // Qwen3.6-35B-A3B (qwen3_5_moe).
+    {2048, 256, 8, &run<2048, 256, 8>},
+};
+
+} // namespace
+
+std::size_t moe_route_workspace_bytes(std::int32_t tokens, std::int32_t experts) {
+    require(tokens > 0, "tokens must be positive");
+    std::int32_t top_k = 0;
+    for (const RouteGeometry& geometry : kGeometries) {
+        if (experts >= geometry.top_k && experts <= geometry.max_experts) { top_k = geometry.top_k; }
+    }
+    require(top_k != 0, "the expert count fits no registered geometry");
+    WorkspaceLayoutBuilder layout;
+    (void)layout.alloc(DType::FP32, {experts + 1, tokens});
+    return layout.peak_bytes(1);
+}
+
+void moe_route(const Tensor& m, const Tensor& router, const Tensor& shared_gate,
+               WorkspaceArena& workspace, Tensor& ids, Tensor& weights, Tensor& shared,
+               cudaStream_t stream) {
+    // `m` carries the hidden width and `ids` the top-k, so a call names its own geometry; the
+    // expert count is checked inside the instantiation against its bound.
+    const RouteGeometry* geometry = nullptr;
+    for (const RouteGeometry& candidate : kGeometries) {
+        if (candidate.hidden == m.ne[0] && candidate.top_k == ids.ne[0]) {
+            geometry = &candidate;
+            break;
+        }
+    }
+    require(geometry != nullptr, "no instantiation for this hidden width and top-k");
+    geometry->run(m, router, shared_gate, workspace, ids, weights, shared, stream);
 }
 
 } // namespace ninfer::ops

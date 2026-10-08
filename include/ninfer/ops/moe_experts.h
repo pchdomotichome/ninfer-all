@@ -63,6 +63,10 @@ struct GgufMoeWeights {
     GgufExpertTable shared_gate, shared_up, shared_down;
     // Entries of the routed tables: 512, or the 256 an expert-pruned release keeps.
     std::int32_t experts = 512;
+    // Each expert's own width: the rows of one expert's gate and of its down. Not derivable from
+    // the call's tensors (`m` carries the hidden width, `ids` the top-k), and it selects the
+    // geometry: the pairs of (hidden, width, experts, top-k) this Op has instantiations for.
+    std::int32_t width = 640;
     // Every entry in device memory, zeros past each down bank (see above).
     bool device_resident = false;
 };

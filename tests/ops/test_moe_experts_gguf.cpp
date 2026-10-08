@@ -33,7 +33,21 @@ namespace {
 
 using namespace ninfer;
 
-constexpr int kHidden = 2560, kWidth = 640, kExperts = 512, kTopK = 10;
+// The pairs of (hidden, expert width, experts, top-k) the Op has instantiations for. Both are
+// exercised here: the first is Qwen3.8-Flash-Next, the second Qwen3.6-35B-A3B. The geometry is a
+// parameter rather than a file constant because the Op dispatches on it at runtime.
+struct Geometry {
+    const char* name;
+    int hidden;
+    int width;
+    int experts;
+    int top_k;
+};
+
+constexpr Geometry kQwen4Exp{/*name=*/"Qwen3.8-Flash-Next", /*hidden=*/2560, /*width=*/640,
+                             /*experts=*/512, /*top_k=*/10};
+constexpr Geometry kQwen35Moe{/*name=*/"Qwen3.6-35B-A3B", /*hidden=*/2048, /*width=*/512,
+                              /*experts=*/256, /*top_k=*/8};
 
 void check(cudaError_t status, const char* what) {
     if (status != cudaSuccess) {
@@ -138,7 +152,8 @@ double silu(double x) { return x / (1.0 + std::exp(-x)); }
 
 // down . (silu(gate . x) * (up . x)) in FP64.
 std::vector<double> expert_output(const float* gate, const float* up, const float* down,
-                                  const std::vector<float>& x) {
+                                  const std::vector<float>& x, const Geometry& g) {
+    const int kWidth = g.width, kHidden = g.hidden;
     std::vector<double> middle(kWidth);
     for (int r = 0; r < kWidth; ++r) {
         double g = 0, u = 0;
@@ -168,7 +183,8 @@ struct Case {
     int expert_pool; // routes draw from experts [0, expert_pool)
 };
 
-int run_case(const Case& c, std::uint32_t seed) {
+int run_case(const Case& c, std::uint32_t seed, const Geometry& g) {
+    const int kHidden = g.hidden, kWidth = g.width, kExperts = g.experts, kTopK = g.top_k;
     std::mt19937 rng(seed);
     const Bank gate(c.gate, kWidth, kHidden, c.distinct, kExperts, rng);
     const Bank up(c.up, kWidth, kHidden, c.distinct, kExperts, rng);
@@ -183,15 +199,25 @@ int run_case(const Case& c, std::uint32_t seed) {
         if (tokens > 8) { calls.emplace_back(tokens, false); }
     }
     for (const auto& [tokens, device_resident] : calls) {
-        const ops::GgufMoeWeights banks{gate.view(),  up.view(),  down.view(), sgate.view(),
-                                        sup.view(),   sdown.view(), kExperts,  device_resident};
+        // Designated, not positional: the Op picks its instantiation from `width`, and a field
+        // inserted before `device_resident` would otherwise land a bool in an int without a warning.
+        const ops::GgufMoeWeights banks{.gate           = gate.view(),
+                                        .up             = up.view(),
+                                        .down           = down.view(),
+                                        .shared_gate    = sgate.view(),
+                                        .shared_up      = sup.view(),
+                                        .shared_down    = sdown.view(),
+                                        .experts        = kExperts,
+                                        .width          = kWidth,
+                                        .device_resident = device_resident};
         std::normal_distribution<float> normal(0.0f, 1.0f);
         std::uniform_real_distribution<float> unit(0.05f, 1.0f);
         std::vector<__nv_bfloat16> m(std::size_t(kHidden) * tokens);
         for (auto& v : m) { v = __float2bfloat16(normal(rng)); }
         std::vector<std::int32_t> ids(std::size_t(kTopK) * tokens);
         std::vector<float> weights(ids.size()), shared(tokens);
-        std::vector<int> pool(c.expert_pool);
+        // A pool may not exceed the geometry's expert count; the two differ (512 and 256).
+        std::vector<int> pool(std::min(c.expert_pool, kExperts));
         std::iota(pool.begin(), pool.end(), 0);
         for (int t = 0; t < tokens; ++t) {
             std::shuffle(pool.begin(), pool.end(), rng);
@@ -241,11 +267,11 @@ int run_case(const Case& c, std::uint32_t seed) {
                 const int e = ids[t * kTopK + j];
                 auto& o     = outputs[e % c.distinct];
                 if (o.empty()) {
-                    o = expert_output(gate.rows_of(e), up.rows_of(e), down.rows_of(e), x);
+                    o = expert_output(gate.rows_of(e), up.rows_of(e), down.rows_of(e), x, g);
                 }
                 for (int r = 0; r < kHidden; ++r) { want[r] += weights[t * kTopK + j] * o[r]; }
             }
-            const auto s = expert_output(sgate.rows_of(0), sup.rows_of(0), sdown.rows_of(0), x);
+            const auto s = expert_output(sgate.rows_of(0), sup.rows_of(0), sdown.rows_of(0), x, g);
             for (int r = 0; r < kHidden; ++r) { want[r] += shared[t] * s[r]; }
             for (int r = 0; r < kHidden; ++r) {
                 const double d = double(got[std::size_t(t) * kHidden + r]) - want[r];
@@ -259,7 +285,7 @@ int run_case(const Case& c, std::uint32_t seed) {
                      max = worst / std::max(scale, 1e-30);
         // Two q8_1 activations (the token and the middle) per product chain.
         const bool ok = std::isfinite(rms) && rms < 4e-2 && max < 1.6e-1;
-        std::cout << (ok ? "OK   " : "FAIL ") << c.name << " T=" << tokens
+        std::cout << (ok ? "OK   " : "FAIL ") << g.name << " | " << c.name << " T=" << tokens
                   << (tokens > 8 ? (device_resident ? " matrix" : " vector") : "") << " rms=" << rms
                   << " max=" << max << '\n';
         failures += ok ? 0 : 1;
@@ -288,7 +314,7 @@ int main() {
              Q::GGUF_Q5_0,
              8,
              {1, 2, 3, 8, 40},
-             kExperts},
+             512},
             // Experts concentrated on a few ids: several columns per pass (chunks 4 and 8).
             {"q2_0 dense routing",
              Q::GGUF_Q2_0,
@@ -310,7 +336,7 @@ int main() {
              Q::GGUF_Q8_0,
              4,
              {1, 5, 24},
-             kExperts},
+             512},
             {"iq1_m/iq3_xxs",
              Q::GGUF_IQ1_M,
              Q::GGUF_IQ1_M,
@@ -320,7 +346,7 @@ int main() {
              Q::GGUF_IQ4_NL,
              4,
              {1, 4, 16},
-             kExperts},
+             512},
             // The GSQ-RCO IQ3_S release's routed types on the matrix path: its IQ3_S layers, and
             // routes concentrated on a few experts (several columns per expert) in the IQ3_XXS
             // and IQ4_XS layers, with both of its down types.
@@ -333,7 +359,7 @@ int main() {
              Q::GGUF_IQ4_NL,
              4,
              {9, 24},
-             kExperts},
+             512},
             {"iq3_xxs dense routing",
              Q::GGUF_IQ3_XXS,
              Q::GGUF_IQ3_XXS,
@@ -357,7 +383,9 @@ int main() {
         };
         int failures       = 0;
         std::uint32_t seed = 4242;
-        for (const auto& c : cases) { failures += run_case(c, seed++); }
+        for (const Geometry& g : {kQwen4Exp, kQwen35Moe}) {
+            for (const auto& c : cases) { failures += run_case(c, seed++, g); }
+        }
         std::cout << (failures == 0 ? "OK" : "FAIL") << " MoE experts GGUF\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {
