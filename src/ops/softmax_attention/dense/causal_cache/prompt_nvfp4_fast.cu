@@ -102,6 +102,11 @@ void causal_attention_prompt_nvfp4_fast_launch(const Tensor& q, const Tensor& po
                                           max_visible_keys, workspace, out, stream);
         return;
     }
+    if (cache.num_kv_heads == CausalD256H16Kv4::KVHeads) {
+        launch_fast_for<CausalD256H16Kv4>(q, positions, valid_columns, table_rows, scale, cache,
+                                          max_visible_keys, workspace, out, stream);
+        return;
+    }
     launch_fast_for<CausalD256H16Kv2>(q, positions, valid_columns, table_rows, scale, cache,
                                       max_visible_keys, workspace, out, stream);
 }

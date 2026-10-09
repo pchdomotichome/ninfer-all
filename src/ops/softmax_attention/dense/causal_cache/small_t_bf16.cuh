@@ -123,8 +123,7 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
     }
 
     const int window = last_pos + 1;
-    const int active_split_count =
-        causal_small_t_active_splits<Geometry, false>(window, split_count, TokenTile);
+    const int active_split_count = causal_small_t_bf16_active_splits<Geometry>(window, split_count);
     if (split >= active_split_count) { return; }
 
     const int logical_tiles = div_up(window, Bc);

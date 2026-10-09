@@ -151,10 +151,22 @@ The Op side keeps the same widths in `is_27` / `is_qwen9` / `is_qwen4` and in
 tables because the wrapper validates what the artifact bound and the Op validates
 what it compiled.
 
-`require_causal_geometry` admits `(24 query, 4 kv)` or `(16 query, 2 kv)` at
-`kHeadDim`. Note the ratio is not constant across them — 6 and 8 — so a width
-derived from the other members of a group is not sufficient; the pair has to be
-enumerated.
+`require_causal_geometry` admits `(24 query, 4 kv)`, `(16 query, 2 kv)` or
+`(16 query, 4 kv)` at `kHeadDim`. Note the ratio is not constant across them —
+6, 8 and 4 — so a width derived from the other members of a group is not
+sufficient; the pair has to be enumerated.
+
+The `(16, 4)` pair is what both dense Qwen3.5 artifacts carry
+(`num_key_value_heads = 4` on the 4B GGUF and the 9B). It was admitted by the
+predicate but had no kernel: the small-T and prompt dispatchers fell through to
+`CausalD256H16Kv2`, whose kernel uses the compile-time 2 KV heads as the input
+token stride. Token 0 is unaffected (stride times zero), so single-column decode
+looked right while every later column of a multi-column speculative verify read
+the wrong K/V planes. `CausalD256H16Kv4` and its dispatch branches in
+`small_t.cu`, `prompt.cu` and the fp8/nvfp4/k8v4 launchers fix it. A geometry
+that the predicate admits but no dispatcher names is a silent wrong-kernel bug,
+not an unsupported model: enumerate the pair in a `switch`/`if` chain rather
+than only in the predicate.
 
 ## `bf16_gdn_gating_admits` and the schedule table
 

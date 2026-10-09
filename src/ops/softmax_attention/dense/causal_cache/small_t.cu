@@ -108,6 +108,18 @@ std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens
     // The 27B was not conclusive either way (its fp8 control moved +-3% between identical runs,
     // which is worth knowing before trusting any single-sample result on that model).
 
+    // BF16 is one split per whole key tile (causal_small_t_bf16_active_splits). A speculative
+    // verify appends a draft column and extends the window by one key; a tile-aligned partition
+    // keeps the anchor's online-softmax merge bit-identical to single-token decode, which the
+    // greedy-equivalence witness requires. Only while the tile grid fits the split budget: past
+    // SmallTMaximumSplits the reduction scratch cannot hold one slot per tile, and the measured
+    // default tier below applies instead. The int8 and quantized tiers keep their own measured
+    // policies. This is the device function's rule restated; the two are duplicated by design.
+    if (storage == KvCacheStorage::BFloat16) {
+        const std::int32_t tiles = div_up(window, kCausalSmallTTileKeys);
+        if (tiles < Geometry::SmallTMaximumSplits) { return tiles; }
+    }
+
     // A 64-key default split just above a 32-key boundary makes the partial kernel execute a
     // nearly empty second tile. T=5 uses one 32-key tile per split; the short T>=6 profile keeps
     // all newly appended rows in one tail split while retaining a useful B=8 grid.
@@ -143,6 +155,12 @@ std::int32_t causal_small_t_launch_capacity(CausalAttentionExecutionEnvelope env
     };
     include(envelope.min_visible_keys);
     include(envelope.max_visible_keys);
+    // The tile-aligned BF16 partition peaks one tile short of SmallTMaximumSplits -- at that window
+    // the tile grid is still inside the budget and as large as it ever gets. That point is neither
+    // an interval end nor a policy segment end, so without it an envelope containing the peak would
+    // size its partial buffer for less than the device can activate.
+    include(static_cast<std::uint32_t>((Geometry::SmallTMaximumSplits - 1) *
+                                       kCausalSmallTTileKeys));
     // The policy is monotonic inside these finite segments and may drop when crossing a boundary.
     // Evaluating every segment end plus both interval ends gives the exact interval maximum.
     constexpr std::uint32_t ends[] = {128, 160, 512, 4096, 5000, 8198, 16390};
@@ -299,10 +317,18 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     do {                                                                                           \
         const auto launch_profile = [&]<bool MultiBatch, bool Masked>() {                          \
             if (kv_cache_is_int8_family(cache.storage)) {                                          \
-                launch_small_t_i8<Geometry, (TOKENS), CacheInput>(                                 \
-                    MultiBatch, Masked, q, input, pos, scale, cache, invocation, logical_capacity, \
-                    implementation_window, splits, wave_splits, partial_acc, partial_m, partial_l, \
-                    stream);                                                                       \
+                /* Registered int8 geometries are (16 q, 2 kv) and (24 q, 4 kv). A new        */ \
+                /* geometry needs its own launch_small_t_i8 instantiations before it lands    */ \
+                /* here; until then refuse loudly instead of running the wrong K/V stride.   */ \
+                if constexpr (Geometry::KVHeads == 2 || Geometry::QHeads == 24) {                  \
+                    launch_small_t_i8<Geometry, (TOKENS), CacheInput>(                             \
+                        MultiBatch, Masked, q, input, pos, scale, cache, invocation,               \
+                        logical_capacity, implementation_window, splits, wave_splits, partial_acc, \
+                        partial_m, partial_l, stream);                                             \
+                } else {                                                                           \
+                    throw std::invalid_argument(                                                   \
+                        "causal small-T: int8 route is not registered for this head geometry");    \
+                }                                                                                  \
             } else {                                                                               \
                 launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS), MultiBatch, Masked>(           \
                     q, input, pos, scale, cache, invocation, logical_capacity, splits,             \
@@ -365,7 +391,7 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
         const dim3 grid(Geometry::QHeads, div_up(kCausalHeadDim, kDChunk),
                           invocation.width * invocation.batch_size);
         causal_attention_small_t_reduce_output_kernel<Geometry, kDChunk, Int8, MultiBatch, Masked,
-                                                        Offset><<<grid, kReduceBlock, 0, stream>>>(
+                                                        Offset, !Int8><<<grid, kReduceBlock, 0, stream>>>(
             static_cast<const float*>(partial_acc.data), static_cast<const float*>(partial_m.data),
             static_cast<const float*>(partial_l.data), static_cast<const std::int32_t*>(pos.data),
             invocation.valid_columns
@@ -442,6 +468,12 @@ void causal_attention_small_t_launch(const Tensor& q, const Tensor& k, const Ten
             out, stream, gate);
         return;
     }
+    if (cache.num_kv_heads == CausalD256H16Kv4::KVHeads) {
+        causal_attention_small_t_launch_for<CausalD256H16Kv4>(
+            q, input, pos, scale, cache, invocation, envelope, partial_acc, partial_m, partial_l,
+            out, stream, gate);
+        return;
+    }
     causal_attention_small_t_launch_for<CausalD256H16Kv2>(q, input, pos, scale, cache, invocation,
                                                           envelope, partial_acc, partial_m,
                                                           partial_l, out, stream, gate);
@@ -479,6 +511,12 @@ void causal_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, 
     const PagedKVBatchLayerView batch_cache = single_row_paged_kv_batch_view(cache);
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
         causal_attention_small_t_launch_for<CausalD256H24Kv4>(q, input, pos, scale, batch_cache,
+                                                              invocation, envelope, partial_acc,
+                                                              partial_m, partial_l, out, stream);
+        return;
+    }
+    if (cache.num_kv_heads == CausalD256H16Kv4::KVHeads) {
+        causal_attention_small_t_launch_for<CausalD256H16Kv4>(q, input, pos, scale, batch_cache,
                                                               invocation, envelope, partial_acc,
                                                               partial_m, partial_l, out, stream);
         return;
@@ -560,6 +598,12 @@ void causal_attention_small_t_tiles_launch(const Tensor& q, const Tensor& positi
                                                               invocation, envelope, partial_acc,
                                                               partial_m, partial_l, out, stream,
                                                               gate);
+        return;
+    }
+    if (cache.num_kv_heads == CausalD256H16Kv4::KVHeads) {
+        causal_attention_small_t_launch_for<CausalD256H16Kv4>(
+            q, input, positions, scale, cache, invocation, envelope, partial_acc, partial_m,
+            partial_l, out, stream, gate);
         return;
     }
     causal_attention_small_t_launch_for<CausalD256H16Kv2>(q, input, positions, scale, cache,

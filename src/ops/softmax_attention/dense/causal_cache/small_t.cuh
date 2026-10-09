@@ -21,6 +21,10 @@ namespace ninfer::ops {
 
 inline constexpr int kCausalHeadDim = 256;
 
+// Key-tile width of the small-T partial kernel's Bc axis. Splits below are aligned to whole tiles
+// of this many keys so a window and the same window plus a speculative draft share one partition.
+inline constexpr int kCausalSmallTTileKeys = 32;
+
 // The most keys one split may cover: a split stages at most 64 physical-page IDs, and two 64-key
 // pages go to key-tile rounding and page alignment. A split that must cover more, past the maximum
 // split count, reads its pages from the block table instead.
@@ -145,6 +149,27 @@ causal_small_t_quantized_active_splits(int window, int launch_capacity, int toke
     return splits < launch_capacity ? splits : launch_capacity;
 }
 
+// BF16 split count: one split per whole key tile. Unlike the int8/quantized tiers this never
+// key-splits within a tile, so the partition of [0, anchor] is a function of the tile grid alone.
+// A speculative verify that appends a draft column extends the window by one key; the extra key
+// falls in a trailing tile or is masked, and the anchor's online-softmax merge is unchanged. The
+// int8 and quantized tiers keep their measured fixes and stay off this path.
+//
+// Only while the tile grid fits the split budget. One partial slot per key tile is what keeps the
+// partition anchor-only, but the reduction scratch holds SmallTMaximumSplits of them (see the
+// static_assert below), so past that the tile grid is not a legal launch and the measured default
+// tier takes over. Its partition moves with the window again, which is why it cannot be used where
+// the witness compares a verify against single-token decode. causal_small_t_split_count in
+// small_t.cu states the same rule for the host side; the two are duplicated by design, as the int8
+// tiers already are.
+template <typename Geometry>
+__device__ __forceinline__ int causal_small_t_bf16_active_splits(int window, int launch_capacity) {
+    const int tiles = div_up(window, kCausalSmallTTileKeys);
+    const int splits =
+        tiles < Geometry::SmallTMaximumSplits ? tiles : causal_small_t_default_splits<Geometry>(window);
+    return splits < launch_capacity ? splits : launch_capacity;
+}
+
 __device__ __forceinline__ int causal_small_t_tc_swz(int row, int col) {
     return (((col >> 3) ^ (row & 7)) << 3) | (col & 7);
 }
@@ -209,7 +234,8 @@ causal_merge_split_statistics(const float* partial_m, const float* partial_l, in
     return total;
 }
 
-template <typename Geometry, int DChunk, bool Int8, bool MultiBatch, bool Masked, bool Offset>
+template <typename Geometry, int DChunk, bool Int8, bool MultiBatch, bool Masked, bool Offset,
+          bool TileAligned = false>
 __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_kernel(
     const float* partial_acc, const float* partial_m, const float* partial_l,
     const std::int32_t* positions, const std::int32_t* valid_columns, std::int32_t tokens,
@@ -268,7 +294,9 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
 
     const int window = last_pos + 1;
     const int active_split_count =
-        causal_small_t_active_splits<Geometry, Int8>(window, split_count, tokens, wave_splits);
+        TileAligned ? causal_small_t_bf16_active_splits<Geometry>(window, split_count)
+                    : causal_small_t_active_splits<Geometry, Int8>(window, split_count, tokens,
+                                                                   wave_splits);
 
     __shared__ float weights[256], warp_sums[8], scalars[2];
     const float head_l =
