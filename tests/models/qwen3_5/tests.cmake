@@ -171,6 +171,14 @@ set_tests_properties(
   ninfer_qwen3_5_dflash_real_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
+ninfer_add_test(ninfer_qwen3_5_mtp_greedy_equivalence_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_mtp_greedy_equivalence_real.cpp"
+  LIBRARIES ninfer_engine)
+
+set_tests_properties(
+  ninfer_qwen3_5_mtp_greedy_equivalence_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
 ninfer_add_test(ninfer_tool_call_parser_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../../test_tool_call_parser.cpp"
   LIBRARIES ninfer_engine ninfer::json)
