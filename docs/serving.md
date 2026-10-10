@@ -1049,6 +1049,48 @@ prompt-only live snapshot described above: `time_ms` is integral milliseconds wh
 `timings.prompt_ms` keeps sub-millisecond precision, and the prompt rates cover the 2,048
 processed suffix tokens so far.
 
+### Per-request speculative-decoding acceptance
+
+Every successful Chat Completions response from a speculative backend additionally carries a
+`metrics.speculative_decoding` response extension with the request's acceptance record. Presence
+mirrors `timings.draft_n`: the object exists only when a speculative backend ran and draft work
+occurred. In a stream it rides the same trailing chunk as `timings` (the usage chunk when
+`stream_options.include_usage` is true, otherwise the finish-reason chunk).
+
+```json
+{
+  "metrics": {
+    "speculative_decoding": {
+      "producer": "ninfer",
+      "num_spec_tokens": 3,
+      "verify_steps": 17,
+      "draft_tokens": 49,
+      "accepted_draft_tokens": 42,
+      "mean_acceptance_length": 3.47,
+      "draft_acceptance_rate": 0.857,
+      "acceptance_histogram": [0, 4, 1, 12]
+    }
+  }
+}
+```
+
+- `num_spec_tokens` is the fixed per-step draft window; `verify_steps` counts verification
+  rounds, `draft_tokens` the drafts proposed, and `accepted_draft_tokens` the drafts accepted
+  (bonus tokens excluded), matching the terminal `timings.draft_n` / `draft_n_accepted`.
+- `acceptance_histogram` is dense: index `j` holds the number of verify steps that accepted
+  exactly `j` drafts, so its length is `num_spec_tokens + 1` and its counts sum to
+  `verify_steps`. It is derived from the Engine's per-position acceptance counters, not sampled.
+- `mean_acceptance_length` is `1 + accepted / steps` and `draft_acceptance_rate` is
+  `accepted / drafted`; both are omitted when their denominator is zero.
+
+The shape tracks the record benchmarking tools like [AIPerf] consume, but it is ninfer's own: the
+payload names its origin (`producer`) and the step count (`verify_steps`), and deliberately does
+not carry the exact key pair AIPerf's vLLM adapter auto-detects, so a ninfer adapter labels the
+engine correctly instead of being claimed as vllm. AIPerf reads the payload as-is and turns it
+into its Spec Decode console section and exports without additional flags.
+
+[AIPerf]: https://github.com/ai-dynamo/aiperf
+
 The initial event has `processed == cache`. Later cumulative events are published only after the
 corresponding prefill unit commits, may be coalesced when the consumer is slower than prefill, and
 never move backwards. The final event has `processed == total` and precedes the first output delta.

@@ -1034,8 +1034,14 @@ GenerationOutcome sample_outcome() {
     outcome.metrics.prefix_cache_hit_tokens     = 12;
     outcome.metrics.prompt_wall_seconds         = 0.04;
     outcome.metrics.generation_wall_seconds     = 0.03;
-    outcome.metrics.speculative_draft_tokens    = 9;
-    outcome.metrics.speculative_accepted_tokens = 6;
+    outcome.metrics.speculative_draft_tokens    = 30;
+    outcome.metrics.speculative_accepted_tokens = 16;
+    // Ten verify steps: eight accepted at least one draft, five at least two, three all three.
+    // The accepted total is the histogram's weighted sum (3 + 4 + 9), so the record is self
+    // consistent and a mismatch between the counters and the per-position tails is a failure.
+    outcome.metrics.speculative_draft_window    = 3;
+    outcome.metrics.speculative_rounds          = 10;
+    outcome.metrics.speculative_accepted_per_position = {8, 5, 3};
     return outcome;
 }
 
@@ -1087,7 +1093,7 @@ int test_aggregate_response() {
             response["timings"]["predicted_n"] == 7 &&
             response["timings"]["predicted_ms"] == 30.0 &&
             response["timings"]["predicted_per_second"] == 200.0 &&
-            response["timings"]["draft_n"] == 9 && response["timings"]["draft_n_accepted"] == 6,
+            response["timings"]["draft_n"] == 30 && response["timings"]["draft_n_accepted"] == 16,
         "aggregate timings use exact cache and N-1 generation intervals");
     failures += check(!response.contains("id_slot") && !response.contains("session_digest"),
                       "an unretained session advertised a slot identity");
@@ -1097,6 +1103,35 @@ int test_aggregate_response() {
     const Json slotted = Json::parse(make_chat_completion_response(identity(), retained));
     failures += check(slotted["id_slot"] == 3 && slotted["session_digest"] == "0123456789abcdef",
                       "aggregate response omits the retained slot identity");
+
+    failures += check(
+        response["metrics"]["speculative_decoding"]["producer"] == "ninfer" &&
+            response["metrics"]["speculative_decoding"]["num_spec_tokens"] == 3 &&
+            response["metrics"]["speculative_decoding"]["verify_steps"] == 10 &&
+            response["metrics"]["speculative_decoding"]["acceptance_histogram"] ==
+                Json::array({2, 3, 2, 3}) &&
+            response["metrics"]["speculative_decoding"]["draft_tokens"] == 30 &&
+            response["metrics"]["speculative_decoding"]["accepted_draft_tokens"] == 16 &&
+            std::abs(response["metrics"]["speculative_decoding"]["mean_acceptance_length"]
+                         .get<double>() -
+                     2.6) < 1e-9,
+        "per-request spec-decode acceptance derives its histogram from the position tails");
+    // The payload must not carry vLLM's auto-detection signature pair: AIPerf's vLLM adapter
+    // claims a payload by acceptance_histogram + num_spec_steps and would mislabel this engine.
+    failures += check(
+        response["metrics"]["speculative_decoding"].contains("num_spec_steps") == false,
+        "ninfer payload avoids the vLLM adapter signature so the engine labels itself");
+    const GenerationOutcome plain = [] {
+        GenerationOutcome o;
+        o.text              = "plain";
+        o.prompt_tokens     = 3;
+        o.completion_tokens = 2;
+        return o;
+    }();
+    const Json without_spec = Json::parse(make_chat_completion_response(identity(), plain));
+    failures += check(!without_spec.contains("metrics") &&
+                          !without_spec["timings"].contains("draft_n"),
+                      "no spec-decode metrics without a speculative backend");
 
     outcome.text.clear();
     outcome.tool_calls.push_back(ninfer::GeneratedToolCall{

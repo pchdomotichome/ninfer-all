@@ -484,6 +484,11 @@ std::string make_text_completion_response(const TextCompletionContext& context,
                        openai_finish_reason(outcome.finish_reason))});
     payload["usage"]   = openai_usage_json(outcome);
     payload["timings"] = completion_timings_json(outcome);
+    if (outcome.metrics.speculative_rounds != 0 ||
+        outcome.metrics.speculative_draft_tokens != 0) {
+        payload["metrics"] =
+            OutJson{{"speculative_decoding", spec_decode_metrics_json(outcome.metrics)}};
+    }
     add_slot_identity(payload, outcome);
     return dump(payload);
 }
@@ -604,8 +609,14 @@ std::vector<std::string> TextCompletionStream::finish(const GenerationOutcome& o
     OutJson final_chunk = openai_base(context_);
     final_chunk["choices"] =
         OutJson::array({openai_choice(std::string(), openai_finish_reason(outcome.finish_reason))});
+    const bool has_spec_decode = outcome.metrics.speculative_rounds != 0 ||
+                                 outcome.metrics.speculative_draft_tokens != 0;
     if (!context_.response.include_usage) {
         final_chunk["timings"] = completion_timings_json(outcome);
+        if (has_spec_decode) {
+            final_chunk["metrics"] =
+                OutJson{{"speculative_decoding", spec_decode_metrics_json(outcome.metrics)}};
+        }
         add_slot_identity(final_chunk, outcome);
     }
     events.push_back(event(final_chunk));
@@ -614,6 +625,10 @@ std::vector<std::string> TextCompletionStream::finish(const GenerationOutcome& o
         usage["choices"] = OutJson::array();
         usage["usage"]   = openai_usage_json(outcome);
         usage["timings"] = completion_timings_json(outcome);
+        if (has_spec_decode) {
+            usage["metrics"] =
+                OutJson{{"speculative_decoding", spec_decode_metrics_json(outcome.metrics)}};
+        }
         add_slot_identity(usage, outcome);
         events.push_back(event(usage));
     }

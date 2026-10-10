@@ -244,6 +244,11 @@ std::string usage_chunk(const OpenAIChatResponseIdentity& identity, const Comple
     payload["choices"] = with_choice ? Json::array({stream_choice(Json::object())}) : Json::array();
     payload["usage"]   = usage_json(usage);
     payload["timings"] = std::move(timings);
+    if (outcome.metrics.speculative_rounds != 0 ||
+        outcome.metrics.speculative_draft_tokens != 0) {
+        payload["metrics"] =
+            Json{{"speculative_decoding", spec_decode_metrics_json(outcome.metrics)}};
+    }
     add_slot_identity(payload, &outcome);
     return event(std::move(payload));
 }
@@ -256,6 +261,52 @@ void require_prefix(std::string_view complete, std::string_view streamed, const 
 }
 
 } // namespace
+
+// Per-request speculative-decoding acceptance, at the response root under
+// metrics.speculative_decoding. Everything here is derived from counters the Engine already
+// keeps (GenerationMetrics' speculative_* fields), so the record costs no new accounting.
+//
+// The payload carries `producer` and names the verify-step count `verify_steps` rather than
+// vLLM's `num_spec_steps`: consumers that auto-detect engines (AIPerf's spec-decode adapters)
+// claim a payload by the key pair acceptance_histogram + num_spec_steps, and emitting both
+// would make its vLLM adapter claim this record and label the engine wrongly. A ninfer-shaped
+// payload keeps the label honest and still carries the same semantics.
+Json spec_decode_metrics_json(const GenerationMetrics& metrics) {
+    Json histogram = Json::array();
+    // accepted_per_position[i] counts the verify steps whose draft position i was accepted.
+    // Acceptance is a prefix, so position i is accepted only if every earlier one was, and
+    // `steps accepting at least i+1 drafts` == accepted_per_position[i]. Differencing
+    // consecutive tails yields the steps that accepted exactly j drafts; the last bucket is
+    // the full draft window.
+    std::uint64_t at_least = metrics.speculative_rounds;
+    for (std::uint32_t j = 0; j <= metrics.speculative_draft_window; ++j) {
+        const std::uint64_t tail =
+            j < metrics.speculative_accepted_per_position.size()
+                ? metrics.speculative_accepted_per_position[j]
+                : 0;
+        histogram.push_back(tail <= at_least ? at_least - tail : 0);
+        at_least = tail;
+    }
+    Json output = {{"producer", "ninfer"},
+                   {"num_spec_tokens", metrics.speculative_draft_window},
+                   {"verify_steps", metrics.speculative_rounds},
+                   {"draft_tokens", metrics.speculative_draft_tokens},
+                   {"accepted_draft_tokens", metrics.speculative_accepted_tokens},
+                   {"acceptance_histogram", std::move(histogram)}};
+    if (metrics.speculative_rounds != 0) {
+        output["mean_acceptance_length"] =
+            1.0 + static_cast<double>(metrics.speculative_accepted_tokens) /
+                      static_cast<double>(metrics.speculative_rounds);
+    }
+    if (metrics.speculative_draft_tokens != 0) {
+        output["draft_acceptance_rate"] =
+            static_cast<double>(metrics.speculative_accepted_tokens) /
+            static_cast<double>(metrics.speculative_draft_tokens);
+    }
+    return output;
+}
+
+
 
 Json completion_timings_json(const GenerationOutcome& outcome) {
     return timings_json(outcome_timings(outcome));
@@ -307,6 +358,10 @@ std::string make_chat_completion_response(const OpenAIChatResponseIdentity& iden
                has_tool_calls ? Json("tool_calls") : Json(finish_reason(outcome.finish_reason))}}});
     payload["usage"]   = usage_json(usage_from(outcome));
     payload["timings"] = timings_json(outcome_timings(outcome));
+    if (outcome.metrics.speculative_rounds != 0 ||
+        outcome.metrics.speculative_draft_tokens != 0) {
+        payload["metrics"] = Json{{"speculative_decoding", spec_decode_metrics_json(outcome.metrics)}};
+    }
     add_slot_identity(payload, &outcome);
     return payload.dump();
 }
