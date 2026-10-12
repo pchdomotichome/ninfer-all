@@ -154,8 +154,7 @@ make_stage_runtime(DeviceContext& device, const execution::Parameters& parameter
     const StageLinkOptions residual{.slot_bytes   = columns * hidden * sizeof(std::uint16_t),
                                     .slots        = 2,
                                     .force_staged = force_staged};
-    // Six int32 control tensors of at most `columns` entries, plus alignment.
-    const StageLinkOptions control{.slot_bytes   = (6 * columns + 16) * sizeof(std::int32_t),
+    const StageLinkOptions control{.slot_bytes   = stage_control_bytes(columns),
                                    .slots        = 2,
                                    .force_staged = force_staged};
     for (std::size_t stage = 0; stage + 1 < stages; ++stage) {
@@ -164,6 +163,35 @@ make_stage_runtime(DeviceContext& device, const execution::Parameters& parameter
     runtime->back.emplace(device, stages - 1, 0, residual);
     for (std::size_t stage = 1; stage < stages; ++stage) {
         runtime->control.emplace_back(device, 0, stage, control);
+    }
+    // A masked drafter reads target features from layers that may sit on later stages; such a stage
+    // sends each tapped layer's output to rank 0 as soon as the layer has run, on a stream of its
+    // own, so the transfer overlaps the stage's later layers.
+    const auto& draft = parameters.model.config().draft;
+    if (plan.features.masked_draft() && draft) {
+        runtime->features.reserve(stages - 1);
+        for (std::size_t stage = 1; stage < stages; ++stage) {
+            std::vector<std::uint32_t> taps = text.stage_taps(stage, draft->target_layer_ids);
+            if (taps.empty()) {
+                runtime->features.emplace_back();
+                continue;
+            }
+            const RankContext& rank = device.rank(stage);
+            std::vector<StageLink> links;
+            std::vector<CudaCompletionEvent> ready;
+            links.reserve(taps.size());
+            ready.reserve(taps.size());
+            for (std::size_t tap = 0; tap < taps.size(); ++tap) {
+                links.emplace_back(device, stage, 0, residual);
+                ready.emplace_back(rank);
+            }
+            runtime->features.emplace_back(
+                execution::StageRuntime::FeatureLink{.layers = std::move(taps),
+                                                     .links  = std::move(links),
+                                                     .ready  = std::move(ready),
+                                                     .sent   = CudaCompletionEvent(rank),
+                                                     .stream = execution::SideStream(rank.device)});
+        }
     }
     return runtime;
 }
@@ -539,7 +567,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         structured_round = std::make_unique<qwen3_5::StructuredRound>(
             plan.persistent.grammar_masks->bind(backing),
             parameters.model.resources().public_token_count, widest_verify_window() + 1U,
-            max_concurrency);
+            max_concurrency,
+            speculative_backend == SpeculativeBackend::DFlash ||
+                speculative_backend == SpeculativeBackend::DFlash2);
         io.structured = structured_round.get();
     }
     active_continuations.fill(continuation_capacity);

@@ -183,7 +183,8 @@ private:
 
 void print_generation_summary(const ninfer::GenerationResult& result,
                               const ninfer::ResolvedSamplingParameters& sampling,
-                              const ninfer::MemorySummary& memory) {
+                              const ninfer::MemorySummary& memory,
+                              const ninfer::RuntimeStats& stats) {
     print_stage("prepare", "render/preprocess", result.timings.prepare_seconds);
     print_stage("generate", "vision", result.timings.vision_seconds);
     print_stage("generate", "text prefill", result.timings.prefill_seconds);
@@ -281,6 +282,34 @@ void print_generation_summary(const ninfer::GenerationResult& result,
             print_metric(backend + " accepted by pos", positions.str());
         }
     }
+
+    // Qwen3.8-Flash-Next's n-gram table reads since startup (warm-up included).
+    const ninfer::NgramTableStats& rows = stats.ngram_table;
+    if (rows.rows != 0) {
+        std::ostringstream pass, stall;
+        pass << std::fixed << std::setprecision(1)
+             << 1e6 * rows.read_seconds /
+                    static_cast<double>(std::max<std::uint64_t>(rows.batches, 1))
+             << " us over " << rows.batches << " passes";
+        stall << rows.stalls << " (" << std::fixed << std::setprecision(2)
+              << 1e3 * rows.stall_seconds << " ms)";
+        print_metric("ngram rows read", std::to_string(rows.rows));
+        print_metric("ngram rows from RAM", format_percent(rows.resident_rows, rows.rows));
+        print_metric("ngram read per pass", pass.str());
+        print_metric("ngram stalls", stall.str());
+    }
+    const ninfer::ExpertResidencyStats& experts = stats.experts;
+    if (experts.routes != 0) {
+        std::ostringstream moved;
+        moved << std::fixed << std::setprecision(1) << double(experts.transferred_bytes) / 1048576.0
+              << " MiB, " << experts.admitted << " admitted";
+        print_metric("expert slots", std::to_string(experts.slots));
+        print_metric("expert hits", format_percent(experts.hits, experts.routes));
+        if (experts.cpu_routes != 0) {
+            print_metric("expert CPU routes", format_percent(experts.cpu_routes, experts.routes));
+        }
+        print_metric("expert transfers", moved.str());
+    }
 }
 
 } // namespace
@@ -293,6 +322,10 @@ int main(int argc, char** argv) {
         std::cerr << "error: " << error.what() << '\n';
         std::cerr << ninfer::cli::usage_text(argv[0]);
         return 1;
+    }
+    if (cli.version_requested) {
+        std::cout << "ninfer " << NINFER_VERSION << '+' << NINFER_BUILD_ID << '\n';
+        return 0;
     }
     if (cli.help_requested) {
         std::cout << ninfer::cli::usage_text(argv[0]);
@@ -336,6 +369,7 @@ int main(int argc, char** argv) {
         engine_options.expert_residency              = cli.expert_residency;
         engine_options.ngram_table                   = cli.ngram_table;
         engine_options.expert_cache_bytes            = cli.expert_cache_bytes;
+        engine_options.hybrid_experts                = cli.hybrid_experts;
         engine_options.max_context              = cli.max_context;
         engine_options.kv_capacity              = cli.kv_capacity;
         engine_options.prefill_chunk            = cli.prefill_chunk;
@@ -398,7 +432,7 @@ int main(int argc, char** argv) {
             }
             std::cerr << '\n';
         }
-        print_generation_summary(result, sampling, engine.memory_summary());
+        print_generation_summary(result, sampling, engine.memory_summary(), engine.runtime_stats());
         return 0;
     } catch (const std::exception& error) {
         logger->error("{}", ninfer::product::format_pretty_text(error.what()));

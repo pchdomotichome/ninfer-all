@@ -13,6 +13,7 @@ set(ninfer_op_tests
   moe_route
   moe_experts
   moe_experts_gguf
+  moe_experts_native
   rmsnorm
   rmsnorm_pack_tail
   gated_rmsnorm
@@ -42,6 +43,10 @@ foreach(op IN LISTS ninfer_op_tests)
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_${op}.cpp"
     LIBRARIES ninfer_ops)
 endforeach()
+
+ninfer_add_op_test(ninfer_gguf_moe_geglu_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_gguf_moe_geglu.cpp"
+  LIBRARIES ninfer_ops)
 
 ninfer_add_op_test(ninfer_linear_topk_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_linear_topk.cu"
@@ -139,6 +144,10 @@ ninfer_add_op_test(ninfer_sparse_moe_route_network_test
 # Table decode of the E8 root codec against its arithmetic reference, over every code pair.
 ninfer_add_op_test(ninfer_e8_root_decode_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_e8_root_decode.cu"
+  LIBRARIES ninfer_ops)
+
+ninfer_add_op_test(ninfer_fixed_point_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_fixed_point.cu"
   LIBRARIES ninfer_ops)
 
 ninfer_add_op_test(ninfer_mtp_pack_test
@@ -249,8 +258,9 @@ set_tests_properties(ninfer_gdn_state_fp16_two_stage_test
 
 add_test(NAME ninfer_gdn_replay_fold_wide_test
   COMMAND ninfer_tests ninfer_gdn_replay_fold_test --wide-only)
+# About 300 cases with an FP64 oracle each: 11 minutes on the Tesla V100 host (Xeon E5-2683 v4).
 set_tests_properties(ninfer_gdn_replay_fold_wide_test
-  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600 RUN_SERIAL TRUE)
+  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200 RUN_SERIAL TRUE)
 
 # The fused projections once more with every width on each route table: their own routes, and
 # upstream's over the unified templates that a device profile may take per width.
@@ -294,3 +304,9 @@ foreach(table IN ITEMS legacy unified)
     ninfer_linear_add_bf16_a16_${table}_routes_test
     PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800 ENVIRONMENT NINFER_LINEAR_ROUTES=${table})
 endforeach()
+ninfer_add_test(ninfer_moe_expert_cpu_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_moe_expert_cpu.cpp"
+  LIBRARIES ninfer_ops)
+ninfer_add_test(ninfer_gguf_expert_cpu_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_gguf_expert_cpu.cpp"
+  LIBRARIES ninfer_ops)

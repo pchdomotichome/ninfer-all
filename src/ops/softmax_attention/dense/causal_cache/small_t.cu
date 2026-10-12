@@ -9,6 +9,9 @@
 #include "ops/kv_cache/d256_profile.h"
 #include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t_bf16.cuh"
+#if defined(NINFER_SM70)
+#    include "ops/softmax_attention/dense/causal_cache/small_t_sm70.cuh"
+#endif
 #include "ops/softmax_attention/dense/causal_cache/small_t_i8_launch.h"
 #include "core/device.h" // CUDA_CHECK
 #include "ninfer/ops/softmax_attention.h"
@@ -19,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace ninfer::ops::detail {
 
@@ -90,8 +94,8 @@ std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens
                                         KvCacheStorage storage) {
     // There used to be a SmallTMaximumSplits bump here for Fp8E4M3Row256 at tokens==1 and
     // window>8198, and the device asked for that bump for *every* quantized storage while only
-    // fp8 was granted it. TODO.md section 2c read the asymmetry as the host shortchanging nvfp4
-    // and k8v4 -- 69 splits where their kernels asked for 85 -- and proposed extending the grant.
+    // fp8 was granted it. The asymmetry read as the host shortchanging nvfp4 and k8v4 -- 69 splits
+    // where their kernels asked for 85 -- and extending the grant was proposed.
     //
     // Measured on this 3090, and it is the other way round: more splits at depth is worse.
     // Extending the grant to nvfp4 and k8v4 cost them 2.3-3.1% on the 35B at every depth, against
@@ -173,6 +177,19 @@ std::int32_t causal_small_t_launch_capacity(CausalAttentionExecutionEnvelope env
 // tier when it routes one.
 template <typename Geometry>
 int i8_partial_ctas_per_sm(std::int32_t tokens, std::int32_t window, KvCacheStorage storage) {
+#if defined(NINFER_SM70)
+    // Volta's kernel (small_t_sm70.cuh) holds its own count, from its registers and shared memory.
+    (void)window;
+    (void)storage;
+    int ctas = 1;
+    [&]<int... T>(std::integer_sequence<int, T...>) {
+        ((tokens == T + 1
+              ? (ctas = sm70_attention::i8_resident_ctas<T + 1, (T + 1) * Geometry::GroupSize>())
+              : 0),
+         ...);
+    }(std::make_integer_sequence<int, 8>{});
+    return ctas;
+#endif
     if (const int routed = small_t_i8_routed_ctas_per_sm(Geometry::QHeads, storage, tokens, window);
         routed > 0) {
         return routed;
@@ -213,13 +230,19 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
                             PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
                             std::int32_t logical_capacity, std::int32_t splits, Tensor& partial_acc,
                             Tensor& partial_m, Tensor& partial_l, cudaStream_t stream) {
-    constexpr int kBlock = 32 * WarpsPerCta;
     const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
     Tensor& cache_k = cache.k_pages;
     Tensor& cache_v = cache.v_pages;
+#if defined(NINFER_SM70)
+    // Volta's own kernel (small_t_sm70.cuh): same grid, splits and partial outputs.
+    constexpr int kBlock = 32 * sm70_attention::Shape<TokenTile * Geometry::GroupSize>::kWarps;
+    causal_attention_small_t_sm70_bf16_kernel<Geometry, TokenTile, MultiBatch, Masked, CacheInput>
+#else
+    constexpr int kBlock = 32 * WarpsPerCta;
     // bf16 kernel uses only static smem (no dynamic staging).
     causal_attention_small_t_tc_partial_bf16_kernel<Geometry, TokenTile, WarpsPerCta, MultiBatch,
                                                     Masked, CacheInput>
+#endif
         <<<grid, kBlock, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(q.data), input,
             static_cast<const std::int32_t*>(pos.data), static_cast<__nv_bfloat16*>(cache_k.data),

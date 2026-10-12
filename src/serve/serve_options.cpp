@@ -1,4 +1,6 @@
 #include "serve/serve_options.h"
+#include "product/ngram_table_options.h"
+#include "product/hybrid_expert_options.h"
 #include "product/post_thinking_options.h"
 #include "product/rope_yarn_options.h"
 #include "product/speculative_options.h"
@@ -83,6 +85,7 @@ std::string serve_usage_text(const char* argv0) {
            "\n"
            "Serves the OpenAI Responses/Chat Completions and Anthropic Messages APIs.\n"
            "  --help, -h                    show this help and exit\n"
+           "  --version                     print the build version and exit\n"
            "\n"
            "MODEL & CONTEXT\n"
            "  --max-context N               logical context ceiling of each request (default\n"
@@ -90,6 +93,8 @@ std::string serve_usage_text(const char* argv0) {
            "  --max-concurrency N           requests decoded together, 1..8 (default 1)\n"
            "  --prefill-chunk N             prefill chunk in tokens, a multiple of 128\n"
            "                                (default 1024)\n"
+           "  --decode-rounds-per-prefill N decode rounds after each prefill chunk while\n"
+           "                                others generate (0: chunk / 64; 1 alternates)\n"
            "  --default-max-tokens N        output limit of a request that sets none\n"
            "                                (default: the largest budget that still lets\n"
            "                                every lane be admitted at once, the remaining\n"
@@ -108,15 +113,9 @@ std::string serve_usage_text(const char* argv0) {
            "                                and streamed into the device expert cache\n"
            "  --expert-cache-mib N|auto     with host or disk experts: device memory for the\n"
            "                                most used experts (default auto: what is free;\n"
-           "                                0 turns the host cache off; disk needs one)\n"
-           "  --ngram-table PATH            Qwen3.8-Flash-Next: the n-gram table artifact,\n"
-           "                                for a model published without its table\n"
-           "  --ngram-ram                   Qwen3.8-Flash-Next: load the n-gram table into\n"
-           "                                RAM instead of reading its rows from the file\n"
-           "  --no-ngram-table              Qwen3.8-Flash-Next: run without the n-gram table.\n"
-           "                                Non-standard experimental mode: the model was\n"
-           "                                trained with the table and degrades badly\n"
-           "                                without it (WikiText-2 perplexity 2.66 -> 5.01)\n"
+           "                                0 turns the host cache off; disk needs one)\n" +
+           std::string(ninfer::product::kHybridExpertHelp) +
+           std::string(ninfer::product::kNgramTableHelp) +
            "  --no-cuda-graph               decode without CUDA Graphs (on by default)\n"
            "  --cuda-graph-allowance-mib N  CUDA Graph driver-state allowance taken from the\n"
            "                                KV sizing budget (default 0: computed per\n"
@@ -223,7 +222,16 @@ std::string serve_usage_text(const char* argv0) {
            "                                automatic anchors with the headroom, host KV the\n"
            "                                rest; with --use-alt-prefix-caching the pool KV\n"
            "                                blocks and state snapshots share (default 8192,\n"
-           "                                0 keeps the cache on the device)\n"
+           "                                0 keeps the cache on the device); auto: the\n"
+           "                                host memory free once the model is loaded, less\n"
+           "                                --host-cache-reserve-mib (default 3072), at most\n"
+           "                                --host-cache-max-mib and --host-cache-percent of\n"
+           "                                the machine's memory\n"
+           "  --host-cache-reserve-mib N    with --host-cache-mib auto: host memory left free\n"
+           "                                for what grows after startup (default 3072)\n"
+           "  --host-cache-max-mib N        with --host-cache-mib auto: the largest budget\n"
+           "  --host-cache-percent N        with --host-cache-mib auto: the largest budget as\n"
+           "                                a percentage of the machine's memory\n"
            "  --max-private-continuations N private continuation catalog (default 2x\n"
            "                                max-concurrency)\n"
            "  --max-shared-prefixes N       shared stable-prefix catalog (default\n"
@@ -239,6 +247,10 @@ std::string serve_usage_text(const char* argv0) {
            "                                a retained conversation, when no checkpoint lies\n"
            "                                near that depth, so the next request diverging\n"
            "                                there resumes from it (off)\n"
+           "  --no-endpoint-anchors         do not keep the endpoint a request resumes and\n"
+           "                                extends as a long anchor; a later request that\n"
+           "                                diverges there (another reply, an edited last\n"
+           "                                message) then re-prefills the conversation (kept)\n"
            "  --long-anchor-spacing N       with --auto-long-anchors, minimum tokens between\n"
            "                                anchors, doubling per anchor back from the\n"
            "                                prompt end (default 1024; 0 anchors every\n"
@@ -314,7 +326,11 @@ std::string serve_usage_text(const char* argv0) {
            "SPECULATIVE DECODING (off by default)\n"
            "  --spec mtp|dflash|dflash2     speculative decoding backend\n"
            "  --draft-tokens N              drafts per round, 1..15\n"
-           "  --lm-head-draft               draft with the optimized proposal head\n"
+           "  --draft-min-p P              Flash-Next MTP confidence floor, 0..1 (default 0)\n"
+           "  --lm-head-draft               draft with the optimized proposal head, which\n"
+           "                                the artifact must store (the default when it does)\n"
+           "  --full-draft-head             draft with the full output head even when the\n"
+           "                                artifact stores a proposal head\n"
            "  --adaptive-mtp                each MTP round verifies 3..--draft-tokens\n"
            "                                drafts, the width the drafts' measured survival\n"
            "                                and round cost favor; greedy output is unchanged\n"
@@ -412,6 +428,8 @@ std::string serve_usage_text(const char* argv0) {
            "  --lenient-assistant-history   accept Responses input whose assistant text or\n"
            "                                reasoning follows function_call Items; it joins\n"
            "                                that turn, rendered before its calls\n"
+           "  --lenient-image-detail        read an OpenAI image detail other than auto, low\n"
+           "                                or high as auto instead of refusing the request\n"
            "  --usage-chunk-choice          give the streamed usage chunk a zero-delta\n"
            "                                choice, for strict parsers that reject\n"
            "                                choices:[]\n"
@@ -529,6 +547,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     bool host_state_slots_explicit    = false;
     bool host_kv_mib_explicit         = false;
     bool host_cache_budget_explicit   = false;
+    bool host_cache_reserve_explicit  = false;
     bool long_anchor_spacing_explicit = false;
     bool ngram_width_explicit         = false;
     bool vision_max_merged_explicit   = false;
@@ -537,6 +556,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     const char* legacy_cache_flag  = nullptr;
     const char* hybrid_option_flag = nullptr;
     bool original_cache_selected   = false;
+    if (argc >= 2 && std::string(argv[1]) == "--version") {
+        options.version_requested = true;
+        return options;
+    }
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
@@ -627,6 +650,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         if (arg == "--prefill-chunk") {
             options.prefill_chunk = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--prefill-chunk"), "prefill-chunk"));
+            continue;
+        }
+        if (arg == "--decode-rounds-per-prefill") {
+            options.decode_rounds_per_prefill = static_cast<std::uint32_t>(parse_nonnegative_int(
+                require_value("--decode-rounds-per-prefill"), "decode-rounds-per-prefill"));
+            if (options.decode_rounds_per_prefill > 4096) {
+                throw std::invalid_argument("--decode-rounds-per-prefill must be in [0,4096]");
+            }
             continue;
         }
         if (arg == "--fast-prefill-kernel") {
@@ -787,14 +818,43 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             continue;
         }
         if (arg == "--host-cache-mib") {
-            const std::uint64_t mib =
-                parse_u64(require_value("--host-cache-mib"), "host-cache-mib");
+            const std::string value = require_value("--host-cache-mib");
+            context_capacity_explicit  = true;
+            host_cache_budget_explicit = true;
+            if (value == "auto") {
+                options.context_cache.host_cache_auto = true;
+                options.context_cache.host_cache_budget_bytes.reset();
+                continue;
+            }
+            options.context_cache.host_cache_auto = false;
+            const std::uint64_t mib = parse_u64(value.c_str(), "host-cache-mib");
             if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
                 throw std::invalid_argument("--host-cache-mib is out of range");
             }
             options.context_cache.host_cache_budget_bytes = static_cast<std::size_t>(mib << 20);
-            context_capacity_explicit                     = true;
-            host_cache_budget_explicit                    = true;
+            continue;
+        }
+        if (arg == "--host-cache-reserve-mib" || arg == "--host-cache-max-mib") {
+            const std::uint64_t mib = parse_u64(require_value(arg.c_str()), arg.c_str() + 2);
+            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument(arg + " is out of range");
+            }
+            const auto bytes = static_cast<std::size_t>(mib << 20);
+            if (arg == "--host-cache-reserve-mib") {
+                options.context_cache.host_cache_reserve_bytes = bytes;
+                host_cache_reserve_explicit                    = true;
+            } else {
+                options.context_cache.host_cache_max_bytes = bytes;
+            }
+            continue;
+        }
+        if (arg == "--host-cache-percent") {
+            const std::uint64_t percent =
+                parse_u64(require_value("--host-cache-percent"), "host-cache-percent");
+            if (percent == 0 || percent > 100) {
+                throw std::invalid_argument("--host-cache-percent must be in [1,100]");
+            }
+            options.context_cache.host_cache_percent = static_cast<std::uint32_t>(percent);
             continue;
         }
         if (arg == "--disk-kv-path") {
@@ -903,6 +963,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.context_cache.branch_anchors = true;
             continue;
         }
+        if (arg == "--no-endpoint-anchors") {
+            legacy_cache_flag                      = "--no-endpoint-anchors";
+            options.context_cache.endpoint_anchors = false;
+            continue;
+        }
         if (arg == "--long-anchor-spacing") {
             legacy_cache_flag                                    = "--long-anchor-spacing";
             options.context_cache.long_anchor_min_spacing_tokens = static_cast<std::uint32_t>(
@@ -985,16 +1050,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             }
             continue;
         }
-        if (arg == "--ngram-table") {
-            options.ngram_table.path = require_value("--ngram-table");
+        if (product::parse_hybrid_expert_option(arg, options.hybrid_experts,
+                                               [&] { return require_value(arg.c_str()); })) {
             continue;
         }
-        if (arg == "--ngram-ram") {
-            options.ngram_table.ram = true;
-            continue;
-        }
-        if (arg == "--no-ngram-table") {
-            options.ngram_table.disabled = true;
+        if (product::parse_ngram_table_option(arg, options.ngram_table,
+                                              [&] { return require_value(arg.c_str()); })) {
             continue;
         }
         if (arg == "--stage-layers") {
@@ -1013,6 +1074,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--draft-tokens"), "draft-tokens"));
+            continue;
+        }
+        if (arg == "--draft-min-p") {
+            options.speculative.draft_min_p =
+                parse_float_in(require_value("--draft-min-p"), "draft-min-p", 0.0F, 1.0F);
             continue;
         }
         if (arg == "--ngram-draft-tokens") {
@@ -1137,6 +1203,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.lenient_assistant_history = true;
             continue;
         }
+        if (arg == "--lenient-image-detail") {
+            options.lenient_image_detail = true;
+            continue;
+        }
         if (arg == "--derive-session-keys") {
             legacy_cache_flag           = "--derive-session-keys";
             options.derive_session_keys = true;
@@ -1163,6 +1233,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         }
         if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
+            continue;
+        }
+        if (arg == "--full-draft-head") {
+            options.speculative.proposal_head = ProposalHead::Full;
             continue;
         }
         if (arg == "--adaptive-mtp") {
@@ -1465,7 +1539,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         }
         std::filesystem::path& file = options.context_cache.hybrid.persistent_file;
         if (!file.empty()) {
-            if (host_cache_budget_explicit && options.context_cache.host_cache_budget_bytes == 0) {
+            if (host_cache_budget_explicit && !options.context_cache.host_cache_auto &&
+                options.context_cache.host_cache_budget_bytes == 0) {
                 throw std::invalid_argument(
                     "--prefix-cache-file saves the Host tier, which --host-cache-mib 0 removes");
             }
@@ -1537,6 +1612,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (options.auto_save_evicted && options.slot_save_path.empty()) {
         throw std::invalid_argument("--auto-save-evicted requires --slot-save-path");
+    }
+    if (!options.context_cache.host_cache_auto &&
+        (host_cache_reserve_explicit || options.context_cache.host_cache_max_bytes ||
+         options.context_cache.host_cache_percent)) {
+        throw std::invalid_argument("--host-cache-reserve-mib, --host-cache-max-mib and "
+                                    "--host-cache-percent size --host-cache-mib auto");
     }
     if (host_cache_budget_explicit) {
         // The budget is the one host RAM ceiling; the two component flags would silently

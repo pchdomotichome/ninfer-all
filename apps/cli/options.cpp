@@ -1,4 +1,6 @@
 #include "options.h"
+#include "product/ngram_table_options.h"
+#include "product/hybrid_expert_options.h"
 #include "product/post_thinking_options.h"
 #include "product/rope_yarn_options.h"
 #include "product/speculative_options.h"
@@ -148,6 +150,7 @@ std::string usage_text(const char* argv0) {
            "Runs one generation: the answer streams to stdout, reasoning and diagnostics\n"
            "to stderr.\n"
            "  --help, -h                    show this help and exit\n"
+           "  --version                     print the build version and exit\n"
            "\n"
            "INPUT\n"
            "  --prompt TEXT                 one user message\n"
@@ -176,15 +179,9 @@ std::string usage_text(const char* argv0) {
            "                                and streamed into the device expert cache\n"
            "  --expert-cache-mib N|auto     with host or disk experts: device memory for the\n"
            "                                most used experts (default auto: what is free;\n"
-           "                                0 turns the host cache off; disk needs one)\n"
-           "  --ngram-table PATH            Qwen3.8-Flash-Next: the n-gram table artifact,\n"
-           "                                for a model published without its table\n"
-           "  --ngram-ram                   Qwen3.8-Flash-Next: load the n-gram table into\n"
-           "                                RAM instead of reading its rows from the file\n"
-           "  --no-ngram-table              Qwen3.8-Flash-Next: run without the n-gram table.\n"
-           "                                Non-standard experimental mode: the model was\n"
-           "                                trained with the table and degrades badly\n"
-           "                                without it (WikiText-2 perplexity 2.66 -> 5.01)\n"
+           "                                0 turns the host cache off; disk needs one)\n" +
+           std::string(ninfer::product::kHybridExpertHelp) +
+           std::string(ninfer::product::kNgramTableHelp) +
            "  --no-cuda-graph               decode without CUDA Graphs\n"
            "\n"
            "KV CACHE\n"
@@ -200,7 +197,11 @@ std::string usage_text(const char* argv0) {
            "SPECULATIVE DECODING (off by default)\n"
            "  --spec mtp|dflash|dflash2     speculative decoding backend\n"
            "  --draft-tokens N              drafts per round, 1..15\n"
-           "  --lm-head-draft               draft with the optimized proposal head\n"
+           "  --draft-min-p P              Flash-Next MTP confidence floor, 0..1 (default 0)\n"
+           "  --lm-head-draft               draft with the optimized proposal head, which\n"
+           "                                the artifact must store (the default when it does)\n"
+           "  --full-draft-head             draft with the full output head even when the\n"
+           "                                artifact stores a proposal head\n"
            "  --mtp-attention-window N      the MTP draft head attends to its first 64 keys\n"
            "                                and the newest N before its query, not the\n"
            "                                whole history; verification is unchanged\n"
@@ -311,6 +312,10 @@ std::string usage_text(const char* argv0) {
 
 Options parse_options(int argc, char** argv) {
     Options options;
+    if (argc >= 2 && std::string_view(argv[1]) == "--version") {
+        options.version_requested = true;
+        return options;
+    }
     if (argc >= 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
@@ -378,18 +383,18 @@ Options parse_options(int argc, char** argv) {
                 options.expert_cache_bytes =
                     std::uint64_t(parse_u32(mib.c_str(), "expert-cache-mib", true)) << 20;
             }
-        } else if (arg == "--ngram-table") {
-            options.ngram_table.path = value(arg);
-        } else if (arg == "--ngram-ram") {
-            options.ngram_table.ram = true;
-        } else if (arg == "--no-ngram-table") {
-            options.ngram_table.disabled = true;
+        } else if (product::parse_hybrid_expert_option(arg, options.hybrid_experts,
+                                                      [&] { return value(arg); })) {
+        } else if (product::parse_ngram_table_option(arg, options.ngram_table,
+                                                     [&] { return value(arg); })) {
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value(arg));
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = parse_u32(value(arg), "draft-tokens");
+        } else if (arg == "--draft-min-p") {
+            options.speculative.draft_min_p = parse_float(value(arg), "draft-min-p", 0.0F, 1.0F);
         } else if (arg == "--ngram-draft-tokens") {
             options.speculative.ngram_draft_tokens =
                 parse_u32(value(arg), "ngram-draft-tokens", true);
@@ -398,6 +403,8 @@ Options parse_options(int argc, char** argv) {
             options.speculative.ngram_min_match = parse_u32(value(arg), "ngram-min-match");
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
+        } else if (arg == "--full-draft-head") {
+            options.speculative.proposal_head = ProposalHead::Full;
         } else if (arg == "--lm-head-q4") {
             options.lm_head_q4 = true;
         } else if (arg == "--lm-head-q6") {

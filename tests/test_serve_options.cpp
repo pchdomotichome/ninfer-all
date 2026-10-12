@@ -31,6 +31,37 @@ ServeOptions parse(std::vector<std::string> arguments) {
 
 int main() {
     int failures = 0;
+    failures += check(parse({"ninfer-serve", "model.ninfer"}).speculative.draft_min_p == 0,
+                      "draft confidence must be opt-in");
+    for (const auto* floor : {"0", "0.3", "1"}) {
+        failures += check(parse({"ninfer-serve", "model.ninfer", "--spec", "mtp",
+                                "--draft-tokens", "4", "--draft-min-p", floor})
+                              .speculative.draft_min_p == std::stof(floor),
+                          "server did not preserve draft confidence");
+    }
+    for (const auto& args : std::vector<std::vector<std::string>>{
+             {"--spec", "mtp", "--draft-tokens", "4", "--draft-min-p", "-0.1"},
+             {"--spec", "mtp", "--draft-tokens", "4", "--draft-min-p", "1.1"},
+             {"--spec", "mtp", "--draft-tokens", "4", "--draft-min-p", "nan"},
+             {"--spec", "mtp", "--draft-tokens", "4", "--draft-min-p", "inf"},
+             {"--spec", "mtp", "--draft-tokens", "4", "--draft-min-p", "0.3x"},
+             {"--spec", "dflash", "--draft-tokens", "4", "--draft-min-p", "0.3"},
+             {"--spec", "dflash2", "--draft-tokens", "4", "--draft-min-p", "0.3"},
+             {"--draft-min-p", "0.3"}}) {
+        std::vector<std::string> full{"ninfer-serve", "model.ninfer"};
+        full.insert(full.end(), args.begin(), args.end());
+        bool rejected = false;
+        try { (void)parse(full); } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "server accepted invalid draft confidence");
+    }
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--expert-residency", "host"})
+                              .hybrid_experts.dma_share == 1.0F,
+                      "server must default native host expert misses to GPU execution");
+    for (const auto* share : {"0", "0.5", "1"}) {
+        failures += check(parse({"ninfer-serve", "model.ninfer", "--expert-residency", "host",
+                                 "--expert-dma-share", share}).hybrid_experts.dma_share == std::stof(share),
+                          "server did not preserve an explicit hybrid DMA share");
+    }
     const auto archive = parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens",
                                 "5", "--ngram-draft-tokens", "63", "--ngram-archive-mib", "512",
                                 "--ngram-session-mib", "128", "--ngram-native-sessions"});
@@ -406,6 +437,20 @@ int main() {
         failures += check(options.speculative.backend == ninfer::SpeculativeBackend::Mtp &&
                               options.speculative.draft_tokens == k,
                           "serve options did not accept an MTP window past five");
+        // Without a selection the load picks the artifact's proposal head when it stores one.
+        failures += check(options.speculative.proposal_head == ninfer::ProposalHead::Auto,
+                          "an unselected draft head was not automatic");
+    }
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens",
+                             "3", "--full-draft-head"})
+                              .speculative.proposal_head == ninfer::ProposalHead::Full,
+                      "--full-draft-head did not select the full head");
+    for (const char* head : {"--lm-head-draft", "--full-draft-head"}) {
+        bool refused = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", head});
+        } catch (const std::invalid_argument&) { refused = true; }
+        failures += check(refused, "a draft head without --spec was accepted");
     }
     bool mtp_sixteen_rejected = false;
     try {
@@ -538,6 +583,33 @@ int main() {
             {"ninfer-serve", "model.ninfer", "--host-cache-mib", "64", "--host-kv-mib", "64"});
     } catch (const std::invalid_argument&) { budget_with_host_kv_rejected = true; }
     failures += check(budget_with_host_kv_rejected, "host cache budget accepted --host-kv-mib");
+    const ServeOptions automatic_host_cache =
+        parse({"ninfer-serve", "model.ninfer", "--host-cache-mib", "auto",
+               "--host-cache-reserve-mib", "4096", "--host-cache-max-mib", "16384",
+               "--host-cache-percent", "40"});
+    failures += check(automatic_host_cache.context_cache.host_cache_auto &&
+                          !automatic_host_cache.context_cache.host_cache_budget_bytes &&
+                          automatic_host_cache.context_cache.host_cache_reserve_bytes ==
+                              (4096ULL << 20) &&
+                          automatic_host_cache.context_cache.host_cache_max_bytes ==
+                              (16384ULL << 20) &&
+                          automatic_host_cache.context_cache.host_cache_percent == 40U,
+                      "--host-cache-mib auto and its bounds did not reach serving options");
+    for (const char* bound : {"--host-cache-reserve-mib", "--host-cache-max-mib",
+                              "--host-cache-percent"}) {
+        bool bound_without_auto_rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--host-cache-mib", "8192", bound, "50"});
+        } catch (const std::invalid_argument&) { bound_without_auto_rejected = true; }
+        failures += check(bound_without_auto_rejected,
+                          "a bound of the automatic host cache was accepted without it");
+    }
+    bool percent_out_of_range_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--host-cache-mib", "auto",
+                     "--host-cache-percent", "101"});
+    } catch (const std::invalid_argument&) { percent_out_of_range_rejected = true; }
+    failures += check(percent_out_of_range_rejected, "--host-cache-percent 101 was accepted");
     bool disabled_budget_rejected = false;
     try {
         (void)parse(
@@ -684,6 +756,7 @@ int main() {
                                                {"--long-anchor-spacing", "0"},
                                                {"--auto-long-anchors"},
                                                {"--branch-anchors"},
+                                               {"--no-endpoint-anchors"},
                                                {"--auto-prefix-grid"},
                                                {"--derive-session-keys"},
                                                {"--context-cache-policy", "rolling"},
@@ -969,6 +1042,7 @@ int main() {
                                         "--embedding-q6",
                                         "--fast-prefill-kernel",
                                         "--frequency-penalty",
+                                        "--full-draft-head",
                                         "--gdn-state-fp16",
                                         "--graft",
                                         "--greedy",
@@ -981,6 +1055,7 @@ int main() {
                                         "--kv-headroom-mib",
                                         "--kv-lease-growth",
                                         "--lenient-assistant-history",
+                                        "--lenient-image-detail",
                                         "--lm-head-draft",
                                         "--lm-head-q4",
                                         "--lm-head-q6",
@@ -1012,6 +1087,7 @@ int main() {
                                         "--ngram-native-sessions",
                                         "--ngram-session-mib",
                                         "--no-cuda-graph",
+                                        "--no-endpoint-anchors",
                                         "--no-prefill-a8",
                                         "--no-prefill-cublas-projections",
                                         "--no-prefix-reuse",
@@ -1450,6 +1526,10 @@ int main() {
                               parse({"ninfer-serve", "model.ninfer", "--branch-anchors"})
                                   .context_cache.branch_anchors,
                           "--branch-anchors was not an off-by-default switch");
+        failures += check(parse({"ninfer-serve", "model.ninfer"}).context_cache.endpoint_anchors &&
+                              !parse({"ninfer-serve", "model.ninfer", "--no-endpoint-anchors"})
+                                   .context_cache.endpoint_anchors,
+                          "--no-endpoint-anchors did not turn the default endpoint anchors off");
         bool spacing_without_anchors_rejected = false;
         try {
             (void)parse({"ninfer-serve", "model.ninfer", "--long-anchor-spacing", "512"});

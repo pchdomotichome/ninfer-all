@@ -13,6 +13,7 @@ namespace ninfer::cli {
 
 struct Options {
     bool help_requested = false;
+    bool version_requested = false;
 
     std::filesystem::path artifact_path;
     std::filesystem::path chat_template_path;
@@ -32,6 +33,7 @@ struct Options {
     // Qwen3.8-Flash-Next: where the expert banks live, and where its n-gram table comes from.
     ninfer::ExpertResidency expert_residency = ninfer::ExpertResidency::Device;
     std::optional<std::uint64_t> expert_cache_bytes;
+    ninfer::HybridExpertOptions hybrid_experts;
     ninfer::NgramTableOptions ngram_table;
 
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;

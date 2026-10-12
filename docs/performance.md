@@ -1,22 +1,8 @@
-# Single-GPU serving performance
+# Performance
 
-> **Read the hardware label before the numbers.** This index and the per-model pages it links to
-> carry measurements from two different GPUs, and they must not be read against each other:
->
-> | section | hardware | measured by |
-> |---|---|---|
-> | [Reference measurements, September 2026](performance/reference-2026-09.md): Ternary Bonsai 2 27B and Qwen3.8-27B at full context, the largest context per card, draft lengths 1 to 15 | RTX 3090, RTX 4090, RTX 5090, CUDA 13.1 | this line |
-> | [RTX 3090 (`sm_86`) findings](#rtx-3090-sm_86-findings-this-fork) below | RTX 3090, `sm_86`, CUDA 12.8 | this fork |
-> | [RTX 5090 (`sm_120a`) against upstream](#rtx-5090-sm_120a-against-upstream-this-fork) below | RTX 5090, `sm_120a`, CUDA 12.9 | this fork |
-> | [Vision residency on RTX 3090](performance/qwen3.8-27b.md#vision-residency-on-rtx-3090-groupwise-int-sm_86) | RTX 3090, `sm_86` | this fork |
-> | Every per-model page under `performance/` | **RTX 5090, `sm_120a`, CUDA 13.1** | upstream |
->
-> The upstream campaign is kept because it is the only corpus-scale evidence published for these
-> artifact profiles, and all of its tested revisions are reachable in this fork's history. It is
-> **not** a statement about how this fork performs on an RTX 3090. The two parts answer different
-> questions: upstream's tables characterise the artifact profiles, and this fork's measurements
-> characterise `sm_86` kernel behaviour — where upstream's inherited route boundaries were wrong by
-> 12–41%.
+Where the measurements live, and the measured comparisons that choose a configuration. Every table
+names its card, artifact and settings; numbers from different pages were taken on different hosts
+and builds and are not read against each other.
 
 ## RTX 3090 (`sm_86`) findings — this fork
 
@@ -464,200 +450,84 @@ workspace for its last 4% of prefill, and at this context that is the binding co
 **Why these flags and not others:**
 
 | flag | what it buys | what it costs |
+| Page | What it measures | Hardware |
 |---|---|---|
-| `--kv-dtype rk8v4` | 23% less KV than int8 — 26,112 B/token against 33,792 | +0.083% perplexity, ~1% decode |
-| `--embedding-q4` | +24.3K tokens of context | nothing measurable (−0.062%, inside noise) |
-| `--lm-head-q6` | +12.9K tokens of context | +0.012%; **incompatible with DFlash/DFlash2** |
-| `--gdn-state-fp16` | halves the host state image, modest C8 gain | nothing measurable |
-| `--prefill-cublas` | prefill 1.63x–1.83x | +0.156% perplexity, ~500 MiB workspace |
-| `--lm-head-q4` | +24.3K tokens | **+0.69%** — larger than every KV format; not recommended |
-| `--kv-dtype nvfp4` | 45% less KV than int8 | +0.36% perplexity, 12% slower decode |
+| [Reference measurements, September 2026](performance/reference-2026-09.md) | Ternary Bonsai 2 27B and Qwen3.8-27B at full context: decode and prompt time by depth, drafters, largest context per card, needles, several requests at once, what the device profiles change, and the October re-check | RTX 3090, 4090, 5090, PRO 6000 |
+| [Tesla V100, October 2026](performance/tesla-v100-2026-10.md) | a `70` build on 16 GB: what fits, engine and server rates of Ternary Bonsai 2, the Qwen3.8-27B releases, Flash-Next and Gemma 4, perplexity against other cards, llama.cpp on the same card | Tesla V100-SXM2-16GB |
+| [Qwen3.8-Flash-Next](qwen3-8-flash-next.md#measurements) | every expert placement of the GSQ-RCO releases, MTP, perplexity against llama.cpp, AIME and GPQA | RTX 3090, 4090, 5090, PRO 6000, L40S |
+| [GGUF block formats](gguf.md#measurements) | the Qwen3.8-27B GSQ-RCO IQ3_S release against the official artifact: perplexity, reasoning benchmarks, speed | RTX 3090, 4090, 5090 |
+| [Quality trades](maintainer/quality-trade-experiments.md) | what each precision option costs in perplexity and buys in memory or speed | RTX 3090 |
+| [Configuration calculator](config-calculator.html) | which context, KV format and speculation fit an RTX 3090, from measured sizes | RTX 3090 |
 
-**With vision**, add `--vision --vision-residency overlay`: the overlay residency keeps the tower in
-host memory and borrows device memory per image, which is what preserves the context budget above.
-Note that `--lm-head-q4` was silently skipped under overlay vision before 2026-09-14; `--lm-head-q6`
-and `--embedding-q4` transcode in the materializer and are captured from the final bytes, so they
-compose with it correctly.
+The tools behind them: [`tools/bench/refbench.py`](../tools/bench/README.md#reference-measurements-refbenchpy)
+for the reference tables, the [serving corpus runner](../tools/bench/README.md#serving-corpus-benchmark),
+`ninfer_bench` for the Engine without HTTP and the Op benchmarks for single operations
+([benchmarks](../bench/README.md)), and `ninfer-perplexity` for quality ([perplexity](perplexity.md)).
+An Op benchmark establishes an Op result, not an end-to-end one; a whole request does.
 
-### Choosing a speculative backend by concurrency (RTX 3090, Qwen3.8-27B)
+## KV formats on Qwen3.8-27B
 
-**DFlash2 at K=7 is faster than MTP3 wherever it fits, and it stops fitting at C8.** Aggregate
-decode tok/s through the serving route, thinking off, greedy, decode time taken from the server's
-request log rather than a wall clock:
+One RTX 3090, the official `groupwise-int` artifact, September 2026. Perplexity is
+`ninfer-perplexity --quick` on `ninfer-ppl-1m-v1` (context 4,096, stride 2,048, 261,167 scored
+tokens); decode is 128 steps after a 32,768-token prefill, no speculation, the mean of two runs.
 
-| C | MTP3 | DFlash2 K=7 | change | tokens/round, MTP3 / DFlash2 |
-|---:|---:|---:|---:|---|
-| 1 | 135.0 | **187.1** | +38.6% | 3.51 / 5.57 |
-| 2 | 238.2 | **313.5** | +31.6% | 3.51 / 5.82 |
-| 4 | 387.4 | **406.2** | +4.9% | 3.54 / 5.63 |
-| 8 | **522.8** | does not fit | — | 3.53 / — |
+| KV format | Bytes per token | Perplexity | Change against `bf16` | Decode at 32K, tok/s |
+|---|---:|---:|---:|---:|
+| `bf16` | 65,536 | 4.342517 | — | 31.93 |
+| `int8` | 33,792 | 4.342425 | −0.002% | 33.63 |
+| `fp8` | 33,024 | 4.344724 | +0.051% | 30.34 |
+| `rk8v4` | 26,112 | 4.346413 | +0.090% | 33.17 |
+| `k8v4` | 25,728 | 4.347258 | +0.109% | 28.90 |
+| `nvfp4` | 18,432 | 4.352201 | +0.223% | 29.86 |
+| `rk4v4` | 17,920 | +0.214% against `int8` | | within 1% of `rk8v4` |
 
-The lead shrinks with concurrency because speculation pays by making a multi-column round cost about
-one sweep of the weights, and batching already amortises that sweep across lanes, so the baseline
-catches up. Acceptance itself does not degrade: tokens per round holds flat at every level.
+The `rk4v4` row was measured in a later session (`int8` 4.343155 there) and is stated against that
+session's `int8`. On Ternary Bonsai 2, `rk4v4-e8` moves quick-corpus perplexity from 5.631 to 5.650
+and `rk2v4-e8` to 5.820 against `rk8v4`; a simulation of `rk2v4-e8`'s keys on Qwen3.8-27B cost
++3.08%. [Context and memory](cli.md#context-and-memory) turns these into recommendations.
 
-What stops it at C8 is memory. The DFlash2 artifact carries the draft model — 18.3 GiB of weights
-against 16.7 — and the runtime reservation then needs 4.64 GB where 3.78 GB remains. A 4096-token KV
-still needs 4.24 GB; only 2048 fits, which is too little for eight streams to do useful work.
+## Speculative backend by concurrency
 
-**K is workload-dependent.** Swept on realistic generation, mean of a reasoning, a code and a
-summarisation prompt: K = 3/4/5/6/7/8/9/10/12 gives 128.0/146.0/159.0/169.6/**172.3**/163.7/163.3/
-160.2/159.2 tok/s. The peak is 7, matching the published shape `E = (1 - a^(K+1))/(1 - a)` and the
-5–8 band reported for EAGLE-class drafters. But the mean hides real spread — the reasoning prompt
-keeps improving to K=12 (204.5) while summarisation collapses there (119.6) — so a deployment
-serving one kind of work should sweep its own K. A synthetic corpus is no guide: `bench_corpus.ids`
-picks K=15, which loses on real generation.
+One RTX 3090, Qwen3.8-27B, INT8 KV, thinking off, greedy; aggregate decode tok/s through the server,
+decode time from the request log:
 
-**DFlash2 also forfeits `--lm-head-q4/q6`**, which DFlash's candidate top-k cannot read
-(`src/models/qwen3_5/load/storage_trades.cpp`). Between the extra weights and the lost head trade it
-costs about 65K tokens of context on this card -- 130K against 200K, both verified by loading -- so
-the choice between it and MTP3 is a speed/context trade, not a free upgrade.
+| Requests at once | MTP, 3 drafts | DFlash2, 7 drafts | Tokens per round, MTP / DFlash2 |
+|---:|---:|---:|---|
+| 1 | 135.0 | 187.1 | 3.51 / 5.57 |
+| 2 | 238.2 | 313.5 | 3.51 / 5.82 |
+| 4 | 387.4 | 406.2 | 3.54 / 5.63 |
+| 8 | 522.8 | does not fit | 3.53 / — |
 
-### Choosing the draft count (RTX 3090, Qwen3.8-27B)
+Speculation pays because a multi-column round costs about one sweep of the weights; batching
+amortizes that sweep already, so the lead shrinks as requests are added while acceptance holds.
+DFlash2's draft weights and its refusal of `--lm-head-q6` are what stop it at eight lanes and cost
+it about 65K tokens of context against MTP on a 24 GB card. The best DFlash2 draft count depends on
+the work: over a reasoning, a code and a summarization prompt seven was best on average, but the
+reasoning prompt kept improving to twelve while summarization fell off there.
 
-The MTP draft count is a trade on what the output looks like. Each round verifies K+1 columns and
-runs K draft-head steps whether or not the drafts survive, so a larger K pays only where the head
-keeps guessing right. Measured on the RTX 3090, Qwen3.8-27B, `rk4v4` KV, `--lm-head-draft
---lm-head-q6 --embedding-q4 --gdn-state-fp16`, greedy, 512 generated tokens, one stream (decode
-tok/s; tokens emitted per round in parentheses):
+## MTP draft count by content
+
+One RTX 3090, Qwen3.8-27B, `rk4v4` KV with `--lm-head-q6 --embedding-q4 --gdn-state-fp16`,
+greedy, 512 generated tokens, one stream; decode tok/s with tokens per round in brackets:
 
 | `--draft-tokens` | edit code (copies the prompt) | write new code | explain a concept | short story |
 |---:|---:|---:|---:|---:|
-| (none) | 47.3 | 47.5 | 47.5 | 47.6 |
-| **3** | 141.9 (3.9) | 118.2 (3.3) | 102.1 (2.8) | 77.1 (2.1) |
+| none | 47.3 | 47.5 | 47.5 | 47.6 |
+| 3 | 141.9 (3.9) | 118.2 (3.3) | 102.1 (2.8) | 77.1 (2.1) |
 | 5 | 177.7 (5.7) | 124.8 (4.0) | 95.6 (3.1) | 75.1 (2.4) |
 | 7 | 226.0 (7.4) | 130.6 (4.3) | 103.9 (3.4) | 67.7 (2.2) |
 | 9 | 226.4 (8.8) | 129.9 (5.0) | 91.3 (3.5) | 56.3 (2.2) |
-| 11 | 244.4 (10.4) | | | |
 | 15 | 262.6 (12.5) | 114.7 (5.4) | 75.1 (3.5) | 47.6 (2.2) |
 
-Three stays the default: it is best or within 2% on prose, and larger counts lose up to 38% there.
-When the output mostly reproduces the input -- refactoring, renaming, applying an edit and
-returning the whole file -- the draft head predicts it almost perfectly and every extra position is
-nearly free, so 11 to 15 is up to 1.85x faster than three. For a coding assistant that mostly
-writes new code, seven is about 10% faster than three. `--lookup-ngram` adds nothing on top of MTP
-there: the head already copies (K=15 with and without `--lookup-ngram 8`: 262.4 and 262.6 tok/s,
-the same tokens per round). For comparison, DFlash2 at its default seven is still faster at one
-stream on the same runs (268.5 tok/s editing code, 115.7 explaining); MTP is the backend that fits
-the full context and a second lane. Draft counts of eight and above add a second CUDA Graph
-topology class on the 27B (its wide verify moves between the prompt and chunked attention routes),
-which reserves about 64 MiB more per lane.
+Each round verifies K+1 columns and runs K draft steps whether or not the drafts survive, so a
+larger K pays only where the head keeps guessing right ([choosing a draft
+count](cli.md#choosing-a-draft-count)).
 
-DFlash2 accepts every draft count from 1 through 15. Seven is the checkpoint recommendation and the
-best mean on this card; the sweep behind it is in
-[Choosing a speculative backend by concurrency](#choosing-a-speculative-backend-by-concurrency-rtx-3090-qwen38-27b).
-DFlash2's `--lm-head-draft` is within noise of unset at every count and can be left off.
+## Determinism
 
-### Choosing a KV format (RTX 3090, Qwen3.8-27B)
-
-All seven SM86 KV formats, measured on Qwen3.8-27B.
-
-| KV profile | Bytes/token | KV at 2,048 tokens | Perplexity | vs `bf16` | Decode at 32K depth |
-|---|---:|---:|---:|---:|---:|
-| `bf16` | 65,536 | 128.00 MiB | 4.342517 | — | 31.93 tok/s |
-| `int8` | 33,792 | 66.00 MiB | 4.342425 | −0.0021% | **33.63 tok/s** |
-| `fp8` | 33,024 | 64.50 MiB | 4.344724 | +0.0508% | 30.34 tok/s |
-| `rk8v4` | 26,112 | 51.00 MiB | 4.346413 | +0.0897% | 33.17 tok/s |
-| `k8v4` | 25,728 | 50.25 MiB | 4.347258 | +0.1092% | 28.90 tok/s |
-| `nvfp4` | 18,432 | 36.00 MiB | 4.352201 | +0.2229% | 29.86 tok/s |
-| `rk4v4` | **17,920** | **35.00 MiB** | 4.352432 | +0.214% vs `int8` | ≈ `rk8v4` |
-
-Perplexity is `ninfer-perplexity` on the fixed `ninfer-ppl-1m-v1` corpus, `--quick`, context/stride
-4096/2048, 261,167 scored tokens. Decode is 128 timed steps on top of a 32,768-token prefill, no
-speculation, mean of two independent runs; attention re-reads the whole cache each step, so a
-format's cost only shows at depth. These are the September 2026 re-measurements after the fix for
-a data race in the quantized attention kernels, which had corrupted every prefill output column
-except the last and inflated the perplexity of `fp8`, `nvfp4` and `k8v4` (greedy generation was
-unaffected). An earlier revision of this table carried the pre-fix scores, including `nvfp4` at
-+0.36%.
-The `rk4v4` row comes from a later session and build (2026-09-23), where `int8` measured 4.343155,
-`rk8v4` 4.347943 and `nvfp4` 4.353589, and `rk4v4` decoded within ±1% of `rk8v4` at 4K-32K; its
-figures are stated against those rather than this table's. See the README's
-[`rk4v4` section](../README.md#lloyd-max-4-bit-keys-rk4v4).
-See [the README](../README.md#choosing-a-kv-format) for the fuller writeup and recommendations.
-
-**Not built: `rk2v4-e8` (2-bit E8 root keys).** The sibling RTX 4090 forks ship an `rk2v4-e8` mode:
-keys as one E8 root index, a 4-bit log radius and a 4-bit axis correction per 8 dimensions, about
-216 B per head and token here against `rk4v4`'s 280. Simulated on this build by passing `int8`'s
-rotated keys through that fork's encoder and decoder (`absmax/7` G64 scale) and storing the decoded
-keys as INT8, with values left at INT8, the same quick protocol measured **4.476942 against
-4.343155 (+3.08%)**, with every domain between +2.2% and +3.9% (2026-09-29). That is the keys
-alone, about fourteen times `rk4v4`'s whole +0.214%, and it agrees with the rule `rk4v4` found that
-any 3-bit key coding costs +0.7% or more. `rk4v4` already reaches the model's native 262,144-token
-context on the 27B, so the extra headroom does not pay for the quality.
-
-## RTX 5090 (`sm_120a`) against upstream — this fork
-
-**Context-cache TTFT, 2026-10-05.** One RTX 5090 (575 W, driver 570.195.03), Release `120a` builds
-with CUDA 12.9 of this fork at `3e842a91` and of upstream master at `68c54356f`, the official
-Qwen3.8-27B artifact (15.9 GiB of weights), BF16 KV, `--max-context 32768`, each server otherwise at
-its own defaults. Three conversations open with a system message and a 24,076-token user turn of
-synthetic records; each then sends a second user turn on the first answer, the same second turn
-again, and a sibling branch: a different second user turn on the same first answer. Streaming Chat
-Completions, thinking off, 8 output tokens, medians over the three conversations:
-
-| Case | This fork | Upstream master |
-|---|---:|---:|
-| Cold prompt | 5.43 s | 7.81 s |
-| Continued turn | 80 ms, 24,081 tokens reused | 76 ms, 24,081 reused |
-| The same turn again | 55 ms, 24,099 reused | 56 ms, 24,097-24,099 reused |
-| Sibling branch | 5.52 s, nothing reused | 7.89 s; 0.12 s in one conversation, 24,067 reused |
-
-The cold prompt prefills at 4.47k tok/s here and at 3.16k upstream, and both serve a continued
-conversation from its cached state. A sibling branch reuses nothing here: once the conversation has
-moved on, the cache holds its recurrent state at the newest frontier and at the close of the newest
-user turn, and the branch leaves the conversation before both, so its 24K-token prefix is prefilled
-again. Upstream's context cache, which `b9114396f` replaced on 2026-10-04, reused that prefix from a
-checkpoint in one conversation of the three and in neither of the others.
-
-## Published coverage
-
-Published measurements use one NVIDIA GeForce RTX 5090 through NInfer's public HTTP serving route.
-Choose a model below for its detailed results, run conditions, output limitations, and reproduction
-commands. These are recorded historical measurements; a model/backend being supported does not
-mean every workload or concurrency has a published measurement.
-
-Read the [measurement and publication rules](performance/methodology.md) for workload definitions,
-metric formulas, statistics, comparison requirements, and the standard result-page format.
-
-Each cell links to the relevant result section. "Not published" describes measurement coverage,
-not product support. C is configured request concurrency; K is the number of draft tokens.
-
-| Model / weights | MTP0 context profile | Single-request speculative decode | Corpus makespan | MTP3 decode saturation |
-|---|---|---|---|---|
-| Qwen3.6-27B / `groupwise-int` | [8K–256K](performance/qwen3.6-27b.md#no-speculation-context-profile) | [MTP3](performance/qwen3.6-27b.md#single-request-speculative-decode) | Not published | [C=1, 2, 4, 8](performance/qwen3.6-27b.md#decode-saturation) |
-| Qwen3.6-27B / `nvfp4` | [8K–256K](performance/qwen3.6-27b.md#no-speculation-context-profile) | [MTP3](performance/qwen3.6-27b.md#single-request-speculative-decode) | Not published | [C=1, 2, 4, 8](performance/qwen3.6-27b.md#decode-saturation) |
-| Qwen3.6-35B-A3B / `groupwise-int` | [8K–256K](performance/qwen3.6-35b-a3b.md#no-speculation-context-profile) | [MTP3; DFlash K=7 stochastic/greedy](performance/qwen3.6-35b-a3b.md#single-request-speculative-decode) | [MTP3 C=1, 2, 4, 8; DFlash C=1](performance/qwen3.6-35b-a3b.md#corpus-makespan) | [C=1, 2, 4, 8](performance/qwen3.6-35b-a3b.md#decode-saturation) |
-| Qwen3.8-27B / `groupwise-int` | [8K–256K](performance/qwen3.8-27b.md#no-speculation-context-profile) | [MTP3; DFlash2 K=7](performance/qwen3.8-27b.md#single-request-speculative-decode) | [MTP3 C=1, 2, 4, 8; DFlash2 C=1](performance/qwen3.8-27b.md#corpus-makespan) | Not published |
-| Qwen3.8-27B / `nvfp4` | [8K–256K](performance/qwen3.8-27b.md#no-speculation-context-profile) | [MTP3; DFlash2 K=7](performance/qwen3.8-27b.md#single-request-speculative-decode) | [MTP3 C=1, 2, 4, 8; DFlash2 C=1](performance/qwen3.8-27b.md#corpus-makespan) | [C=1, 2, 4, 8](performance/qwen3.8-27b.md#decode-saturation) |
-
-Qwen3.8 and Qwen3.6-35B-A3B C=1 corpus points also supply their single-request phase tables.
-The Qwen3.6-27B NVFP4 MTP3 phase table comes from a corpus C=1 point whose full makespan is
-not published here. The Qwen3.8 NVFP4 saturation reports retain configuration and
-values but no tested Git revision; the model page records that provenance limitation.
-
-## Reading the results
-
-| Question | Metric to use |
-|---|---|
-| How fast is prompt processing or an individual decode phase? | Prefill phase, Server TTFT, Decode phase |
-| How long does the full fixed request set take? | Corpus makespan, Corpus decode, Requests/s |
-| What aggregate decode rate is sustained at a full batch? | Steady decode |
-
-These rates use different time boundaries. Server TTFT is an internal phase sum; external
-streaming TTFT has its [own benchmark contract](../tools/bench/ttft/README.md). Stochastic runs
-can generate different token totals even with the same prompts and seeds. Output-limit and
-repetition samples remain labeled in the measured corpus; throughput alone does not establish
-successful task completion. See the [35B termination and anomalies](performance/qwen3.6-35b-a3b.md#termination-and-anomalies)
-and [Qwen3.8 DFlash2 outcomes](performance/qwen3.8-27b.md#dflash2-completion-outcomes).
-
-## Related references
-
-- [Serving benchmark runners](../tools/bench/README.md#serving-corpus-benchmark): usage and local report files.
-- [Engine and Op benchmarks](../bench/README.md): their separate measurement scopes and commands.
-- [Capability evaluation](../eval/README.md): evaluation workflow; published scores live in the
-  [model cards](README.md#model-artifacts).
-- [Perplexity](perplexity.md): offline causal-scoring measurement and comparison rules.
-
-Model pages are the detailed result authority. README and model-card performance tables are
-excerpts linked to those pages; update them together when replacing an applicable measurement.
+Every configuration reproduces its own output exactly. Configurations do not reproduce each other:
+a verification evaluates K+1 columns in one pass where plain decode evaluates one, a batch
+evaluates several requests together, and the different reduction orders can flip a near-tied
+argmax. MTP and DFlash2 outputs differ from each other and from plain greedy decoding, and DFlash2's
+output varies with the draft count, without a measurable perplexity cost
+([batch composition](device-profiles.md#batch-composition)).

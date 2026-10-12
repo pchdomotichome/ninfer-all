@@ -8,7 +8,9 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
@@ -158,7 +160,15 @@ const char* kv_capacity_mode_name(ninfer::KvCapacityMode mode) {
 }
 
 const char* proposal_head_name(ninfer::ProposalHead proposal) {
-    return proposal == ninfer::ProposalHead::Optimized ? "optimized" : "full";
+    switch (proposal) {
+    case ninfer::ProposalHead::Auto:
+        return "auto";
+    case ninfer::ProposalHead::Full:
+        return "full";
+    case ninfer::ProposalHead::Optimized:
+        return "optimized";
+    }
+    return "unknown";
 }
 
 const char* prefix_reuse_path_name(ninfer::PrefixReusePath path) {
@@ -711,6 +721,7 @@ std::string format_server_start_json(
             std::string(requested_reasoning_effort_name(*options.default_reasoning_effort));
     }
 
+    record["version"] = options.build_version;
     record["server"] =
         Json{{"host", options.host},
              {"port", options.port},
@@ -721,6 +732,7 @@ std::string format_server_start_json(
              {"assistant_prefill", options.assistant_prefill},
              {"derive_session_keys", options.derive_session_keys},
              {"lenient_assistant_history", options.lenient_assistant_history},
+             {"lenient_image_detail", options.lenient_image_detail},
              {"max_request_bytes", options.max_request_bytes},
              {"media_cache_bytes", options.media_cache_bytes},
              {"media_live_bytes", options.media_live_bytes},
@@ -838,10 +850,12 @@ std::string format_server_start_json(
              {"kv_lease_growth", cache.kv_lease_growth},
              {"automatic_long_anchors", cache.automatic_long_anchors},
              {"branch_anchors", cache.branch_anchors},
+             {"endpoint_anchors", cache.endpoint_anchors},
              {"long_anchor_min_spacing_tokens", cache.long_anchor_min_spacing_tokens},
              {"mode", cache.mode == ContextCacheMode::Hybrid ? "hybrid" : "legacy"},
              {"host_cache_budget_bytes",
               cache.host_cache_budget_bytes ? Json(*cache.host_cache_budget_bytes) : Json(nullptr)},
+             {"host_cache_auto", options.context_cache.host_cache_auto},
              {"hybrid",
               cache.mode == ContextCacheMode::Hybrid
                   ? Json{{"device_snapshot_slots", cache.hybrid.device_snapshot_slots.value_or(0)},
@@ -1194,6 +1208,51 @@ std::string format_throughput_json(const std::string& server_instance_id, std::u
                  {"host_snapshot_evictions", delta(&RuntimeStats::hybrid_host_snapshot_evictions)},
                  {"host_dead_reclaims", delta(&RuntimeStats::hybrid_host_dead_reclaims)},
                  {"unbacked_node_losses", delta(&RuntimeStats::hybrid_unbacked_node_losses)}};
+    }
+    // Qwen3.8-Flash-Next's n-gram table reads: the interval's rows and passes, the latency
+    // quantiles as the upper bound of the histogram bucket that holds them, and the device time the
+    // PLE layer waited for its rows.
+    const NgramTableStats& rows_now  = current.ngram_table;
+    const NgramTableStats& rows_then = previous.ngram_table;
+    if (rows_now.rows != 0) {
+        std::array<std::uint64_t, NgramTableStats::kLatencyBuckets> latency{};
+        std::uint64_t batches = 0;
+        for (std::size_t b = 0; b < latency.size(); ++b) {
+            latency[b] =
+                monotonic_delta(rows_then.latency_histogram[b], rows_now.latency_histogram[b]);
+            batches += latency[b];
+        }
+        const auto quantile = [&](double q) -> Json {
+            const auto rank    = static_cast<std::uint64_t>(std::ceil(q * double(batches)));
+            std::uint64_t seen = 0;
+            for (std::size_t b = 0; b < latency.size() && batches != 0; ++b) {
+                seen += latency[b];
+                if (seen >= rank) { return std::uint64_t{1} << b; }
+            }
+            return nullptr;
+        };
+        record["ngram_table"] = Json{
+            {"rows", monotonic_delta(rows_then.rows, rows_now.rows)},
+            {"resident_rows", monotonic_delta(rows_then.resident_rows, rows_now.resident_rows)},
+            {"batches", batches},
+            {"read_seconds", monotonic_delta(rows_then.read_seconds, rows_now.read_seconds)},
+            {"read_latency_us", Json{{"p50", quantile(0.5)}, {"p99", quantile(0.99)}}},
+            {"stalls", monotonic_delta(rows_then.stalls, rows_now.stalls)},
+            {"stall_seconds", monotonic_delta(rows_then.stall_seconds, rows_now.stall_seconds)}};
+    }
+    // Qwen3.8-Flash-Next's host- or disk-resident experts: the interval's routes, device-slot
+    // hits, CPU-computed pairs and bytes copied to the devices.
+    const ExpertResidencyStats& experts_now  = current.experts;
+    const ExpertResidencyStats& experts_then = previous.experts;
+    if (experts_now.routes != 0) {
+        record["experts"] = Json{
+            {"routes", monotonic_delta(experts_then.routes, experts_now.routes)},
+            {"hits", monotonic_delta(experts_then.hits, experts_now.hits)},
+            {"cpu_routes", monotonic_delta(experts_then.cpu_routes, experts_now.cpu_routes)},
+            {"admitted", monotonic_delta(experts_then.admitted, experts_now.admitted)},
+            {"transferred_bytes",
+             monotonic_delta(experts_then.transferred_bytes, experts_now.transferred_bytes)},
+            {"slots", experts_now.slots}};
     }
     record["engine_recoveries"] =
         monotonic_delta(previous.engine_recoveries, current.engine_recoveries);

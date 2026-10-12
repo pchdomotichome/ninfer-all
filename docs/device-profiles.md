@@ -18,10 +18,10 @@ Up to three layers answer, per route key:
 1. **Your profile file.** `$NINFER_DEVICE_PROFILES`, else `$XDG_CACHE_HOME/ninfer/device-profiles.json`,
    else `~/.cache/ninfer/device-profiles.json` (`%LOCALAPPDATA%\ninfer\device-profiles.json` on
    Windows). `--device-profile-path` names another file.
-2. **The built-in table.** Profiles measured on the RTX 3090, RTX 4090, RTX 5090 and the RTX PRO 6000
-   Blackwell ship inside the binary (`src/runtime/engine/device_profiles.json`). The PRO 6000's
-   Workstation (600 W), Max-Q (300 W) and Server editions report different names, so each has its
-   own entry.
+2. **The built-in table.** Profiles measured on the RTX 3090, RTX 4090, RTX 5090, the RTX PRO 6000
+   Blackwell and the Tesla V100-SXM2-16GB ship inside the binary
+   (`src/runtime/engine/device_profiles.json`). The PRO 6000's Workstation (600 W), Max-Q (300 W)
+   and Server editions report different names, so each has its own entry.
 3. **The compiled route** of each operation, for a key neither names.
 
 For a key both the file and the built-in table name, the file's bands answer up to their last width
@@ -32,7 +32,8 @@ the compiled route best is stored with an empty schedule, which overrides a buil
 
 A GPU with neither a file entry nor a built-in one is calibrated once when the engine starts, before
 the weights are loaded. This takes 20 to 40 seconds, and the result is written to the profile file
-for later starts.
+for later starts. A `70` build runs its own projection and attention routes, which no profile key
+steers, so it calibrates the two-stage GDN switch alone, in about nine seconds on a V100.
 
 An entry applies only to the same hardware class (the GPU name and compute capability) and the same
 SM count, so a laptop part that shares a desktop part's name but not its SM count is calibrated on its
@@ -117,7 +118,7 @@ differently from a step that serves one, so a request's numbers depend slightly 
 steps, and a greedy answer can change where its two most likely tokens are nearly tied. In a check
 on an RTX 5090 (Ternary Bonsai 2, four lanes), one request sent four times at once matched its lone
 answer in one copy of four with the built-in profile, and in all four with `--device-profile off`
-and `NINFER_PREFILL_ALIGN=0` (as on the previous master) or without the profile's ternary small-T
+and `NINFER_PREFILL_ALIGN=0` (the compiled routes and requested chunks) or without the profile's ternary small-T
 routes; four different documents at once matched their lone answers in one or two of four with the
 profile and in three or four without it. The answers that differ part at such a word and stay
 equivalent: four 60,000-token needle documents served at once returned all twelve codes in order,

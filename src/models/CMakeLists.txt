@@ -2,6 +2,9 @@
 add_library(ninfer_model_loading STATIC registry.cpp)
 ninfer_internal_includes(ninfer_model_loading)
 target_link_libraries(ninfer_model_loading PUBLIC ninfer_artifact ninfer_text ninfer_ops)
+if(WIN32)
+  target_link_libraries(ninfer_model_loading PRIVATE onecore) # PrefetchVirtualMemory
+endif()
 
 add_library(ninfer_model_runtime STATIC)
 ninfer_internal_includes(ninfer_model_runtime)
@@ -14,3 +17,4 @@ include(qwen3_5/frontend_sources.cmake)
 include(qwen3_5/execution_sources.cmake)
 include(qwen3_5/program_sources.cmake)
 include(qwen4_exp/loading_sources.cmake)
+include(gemma4/sources.cmake)

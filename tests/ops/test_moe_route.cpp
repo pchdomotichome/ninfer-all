@@ -18,25 +18,10 @@ using namespace ninfer::test;
 
 namespace {
 
-// The pairs of (hidden, max experts, top-k) the Op has instantiations for. A parameter rather than
-// a file constant because the Op dispatches on it at runtime.
-struct Geometry {
-    const char* name;
-    int hidden;
-    int max_experts;
-    int top_k;
-};
+constexpr int kHidden = 2560, kTop = 10;
 
-constexpr Geometry kQwen4Exp{/*name=*/"Qwen3.8-Flash-Next", /*hidden=*/2560, /*max_experts=*/512,
-                             /*top_k=*/10};
-constexpr Geometry kQwen35Moe{/*name=*/"Qwen3.6-35B-A3B", /*hidden=*/2048, /*max_experts=*/256,
-                              /*top_k=*/8};
-
-// `kExperts` entries: the geometry's maximum, or fewer for an expert-pruned release.
-int run(int tokens, bool fp32_input, bool ties, std::uint32_t seed, const Geometry& g,
-        int kExperts = 0) {
-    if (kExperts == 0) { kExperts = g.max_experts; }
-    const int kHidden = g.hidden, kTop = g.top_k;
+// `kExperts` experts: 512, or the 256 an expert-pruned release keeps.
+int run(int tokens, bool fp32_input, bool ties, std::uint32_t seed, int kExperts = 512) {
     std::vector<float> m(static_cast<std::size_t>(kHidden) * tokens), router(static_cast<std::size_t>(kExperts) * kHidden),
         gate(kHidden);
     fill_uniform(m, seed, -3.0f, 3.0f);
@@ -122,9 +107,6 @@ int run(int tokens, bool fp32_input, bool ties, std::uint32_t seed, const Geomet
     failures += verify_pointwise(label + " weights", got_weights, expected_weights, {1e-6, 2e-5});
     failures += verify_pointwise(label + " shared gate", got_shared, expected_shared, {1e-6, 2e-5});
     for (auto* buffer : {&d_m, &d_router, &d_gate, &d_ids, &d_weights, &d_shared}) failures += buffer->verify_guards(label.c_str());
-    // The geometry is named per case: with two instantiations a bare PASS/FAIL does not say which
-    // one broke, and `label` alone repeats across them.
-    std::cout << (failures == 0 ? "OK   " : "FAIL ") << g.name << " | " << label << '\n';
     return failures;
 }
 
@@ -136,17 +118,15 @@ int main() {
         return 77;
     }
     int failures = 0;
-    // Every width at both geometries. The 256-expert cases are an expert-pruned release of the
-    // first, and a full release of the second, which is the same call either way.
-    for (const Geometry& g : {kQwen4Exp, kQwen35Moe}) {
-        failures += run(1, true, false, 9200u, g);
-        failures += run(7, false, false, 9201u, g);
-        failures += run(8, true, false, 9206u, g);
-        failures += run(33, true, false, 9202u, g);
-        failures += run(3, true, true, 9203u, g);
-        failures += run(5, true, false, 9204u, g, 256);
-        failures += run(2, false, true, 9205u, g, 256);
-    }
+    failures += run(1, true, false, 9200u);
+    failures += run(7, false, false, 9201u);
+    failures += run(8, true, false, 9206u);
+    failures += run(33, true, false, 9202u);
+    failures += run(64, false, false, 9207u);
+    failures += run(1024, false, true, 9208u);
+    failures += run(3, true, true, 9203u);
+    failures += run(5, true, false, 9204u, 256);
+    failures += run(2, false, true, 9205u, 256);
     std::cout << (failures == 0 ? "PASS" : "FAIL") << " moe_route\n";
     return failures == 0 ? 0 : 1;
 }

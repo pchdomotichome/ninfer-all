@@ -1,6 +1,7 @@
 #include "artifact/binder.h"
 
 #include "artifact/framing.h"
+#include "artifact/permute_row_split.h"
 #include "artifact/transcode.h"
 
 #include <algorithm>
@@ -59,8 +60,9 @@ ParameterReference Binder::binding(std::string name, const Binding& binding, Sha
             require_device(part.object);
         } else if (residency == Residency::Pinned) {
             require_pinned(part.object);
-        } else if (residency == Residency::Host) {
+        } else if (residency == Residency::Host || residency == Residency::Registered) {
             (void)host_object(part.object);
+            if (residency == Residency::Registered) { demands_[part.object.index].registered = true; }
         }
     }
     return {std::move(name), std::move(shape), binding, residency};
@@ -115,6 +117,18 @@ void Binder::transcode_device(ObjectHandle object, QType target) {
         throw ArtifactError(tensor.id + ": conflicting transcode targets");
     }
     demand.transcode = target;
+}
+
+void Binder::panel_device(ObjectHandle object) {
+    const auto& tensor = reader_.directory().tensor(object);
+    auto& demand       = demands_.at(object.index);
+    if (!demand.device) {
+        throw ArtifactError(tensor.id + ": the panel layout requires a device placement");
+    }
+    if (!row_split_panel_supported(reader_.geometry(object))) {
+        throw ArtifactError(tensor.id + ": object cannot take the panel layout");
+    }
+    demand.panel = true;
 }
 
 void Binder::evict_device(ObjectHandle object, std::uint32_t rank) {
@@ -245,7 +259,7 @@ MaterializationPlan Binder::finish(std::uint64_t evictable_alignment) && {
         auto& capacity      = plan.device_capacity_by_rank[rank];
         const auto offset   = align_up(capacity, demand.alignment, "device offset");
         plan.device_objects.push_back({ObjectHandle{index}, offset, bytes, demand.alignment,
-                                       demand.transcode, rank, demand.tail});
+                                       demand.transcode, rank, demand.tail, demand.panel});
         capacity = checked_add(checked_add(offset, bytes, "device capacity"), demand.tail,
                                "device capacity");
     };
@@ -303,7 +317,7 @@ MaterializationPlan Binder::finish(std::uint64_t evictable_alignment) && {
     }
     for (std::size_t i = 0; i < demands_.size(); ++i) {
         if (demands_[i].host) {
-            plan.host_objects.push_back({ObjectHandle{i}, std::move(demands_[i].host_data)});
+            plan.host_objects.push_back({ObjectHandle{i}, std::move(demands_[i].host_data), demands_[i].registered});
         }
     }
     return plan;

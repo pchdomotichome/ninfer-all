@@ -643,7 +643,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         mtp_full_call(mtp_align, 1, text_envelope, false);
         WorkspaceLayoutBuilder mtp_proposal;
         proposal_scratch(mtp_proposal, 1);
-        const std::size_t accept = ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
+        const std::size_t accept = ops::speculative_accept_coupled_drafts_workspace_capacity_bytes(
             dimension(parameters.model.resources().public_token_count), narrowest_drafts,
             verify_drafts, 1, 1);
         out.mtp_round = std::max({accept, finish(mtp_batch), finish(mtp_ar), finish(mtp_proposal)});
@@ -689,7 +689,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             WorkspaceLayoutBuilder proposal;
             proposal_scratch(proposal, batch);
             const std::size_t batch_accept =
-                ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
+                ops::speculative_accept_coupled_drafts_workspace_capacity_bytes(
                     dimension(parameters.model.resources().public_token_count), narrowest_drafts,
                     verify_drafts, batch, batch);
             const std::size_t gather = ops::logprob_topk_workspace_capacity_bytes(
@@ -870,7 +870,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                         ? ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
                               dimension(parameters.model.resources().public_token_count), {false},
                               narrowest_drafts, verify_drafts, batch, batch)
-                        : ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
+                        : ops::speculative_accept_coupled_drafts_workspace_capacity_bytes(
                               dimension(parameters.model.resources().public_token_count),
                               narrowest_drafts, verify_drafts, batch, batch);
                 // A copy round above batch one also runs the drafter at its own window, and a
@@ -895,10 +895,26 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         const std::uint64_t columns = stage_boundary_columns(plan);
         const std::size_t residual =
             static_cast<std::size_t>(columns) * static_cast<std::size_t>(config.hidden_size) * 2U;
-        const std::size_t control = (6U * static_cast<std::size_t>(columns) + 16U) * 4U;
+        const auto control = static_cast<std::size_t>(stage_control_bytes(columns));
         out.general_capacity =
             checked_add(out.general_capacity, checked_add(residual, control, "stage boundary") + 1024U,
                         "stage boundary workspace");
+        // With a masked drafter a later stage also keeps a copy of each tapped layer's output until
+        // it has crossed, and rank 0 receives them one at a time into one residual's room; the
+        // stage with the most taps sets the size.
+        const auto& draft = parameters.model.config().draft;
+        if (plan.features.masked_draft() && draft) {
+            std::size_t widest = 0;
+            for (std::size_t stage = 1; stage < parameters.text.rank_count; ++stage) {
+                widest = std::max(
+                    widest, parameters.text.stage_taps(stage, draft->target_layer_ids).size());
+            }
+            if (widest != 0) {
+                const std::size_t features = checked_mul(residual, widest, "stage feature taps");
+                out.general_capacity       = checked_add(out.general_capacity, features + 256U,
+                                                         "stage feature tap workspace");
+            }
+        }
     }
     out.capacity = out.general_capacity;
     if (plan.features.vision) {
@@ -963,20 +979,6 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
                                     " pipeline stages but " + std::to_string(device.size()) +
                                     " devices are attached");
     }
-    if (parameters.text.split_execution()) {
-        // The stage loop carries a plain forward pass and decode round. Everything below reads or
-        // writes state on the primary device only, and is refused until it is taught the stages.
-        const auto unsupported = [](const char* feature) {
-            throw std::invalid_argument(
-                std::string(feature) +
-                " is not yet supported with a multi-device --devices split");
-        };
-        if (options.speculative.backend == SpeculativeBackend::DFlash ||
-            options.speculative.backend == SpeculativeBackend::DFlash2) {
-            unsupported("DFlash speculative decoding");
-        }
-        if (options.enable_vision) { unsupported("vision"); }
-    }
     const std::uint32_t logical_pages = page_count(options.max_context);
     const std::uint32_t minimum_pages = std::max(logical_pages, options.max_concurrency);
     const std::uint64_t maximum_pages64 =
@@ -1005,7 +1007,8 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
     switch (options.speculative.backend) {
     case SpeculativeBackend::None:
         if (options.speculative.draft_tokens != 0 ||
-            options.speculative.proposal_head != ProposalHead::Full) {
+            models::planned_proposal_head(options.speculative.proposal_head) !=
+                ProposalHead::Full) {
             throw std::invalid_argument(
                 "disabled speculative decoding requires draft_tokens=0 and the full proposal head");
         }
@@ -1036,11 +1039,13 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
     // 12.0 is admitted alongside the qualified capabilities: consumer Blackwell runs the same
     // warp-level mma.sync schedules this family is written against, with the same 100 KiB of shared
     // memory per SM. The occupancy and split-k choices are still the sm_86 ones, so the card is
-    // supported here in the sense of running correctly, not of being tuned for.
-    if (device.compute_capability() != 80 && device.compute_capability() != 86 &&
-        device.compute_capability() != 89 && device.compute_capability() != 120) {
+    // supported here in the sense of running correctly, not of being tuned for. 7.0 (Tesla V100)
+    // runs only a build for it, whose kernels emulate the Ampere warp primitives.
+    if (device.compute_capability() != 70 && device.compute_capability() != 80 &&
+        device.compute_capability() != 86 && device.compute_capability() != 89 &&
+        device.compute_capability() != 120) {
         throw std::invalid_argument(
-            "Qwen3.5 family runtime requires compute capability 8.0, 8.6, 8.9 or 12.0");
+            "Qwen3.5 family runtime requires compute capability 7.0, 8.0, 8.6, 8.9 or 12.0");
     }
     if (options.speculative.ngram_draft_tokens != 0 &&
         ((options.speculative.backend != SpeculativeBackend::DFlash2 &&
@@ -1365,7 +1370,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .ngram_min_match            = options.speculative.ngram_min_match,
         .speculative_backend        = options.speculative.backend,
         .kv_storage                 = options.kv_cache,
-        .proposal_head              = options.speculative.proposal_head,
+        .proposal_head = models::planned_proposal_head(options.speculative.proposal_head),
         .rope_yarn                  = planned_rope_yarn(parameters, options),
         .mtp_attention_window       = options.speculative.mtp_attention_window,
         .features                   = models::load_options(options),

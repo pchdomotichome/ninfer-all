@@ -21,6 +21,15 @@
 // NINFER_TEST_GRAFT=<container.bin> also loads that prompt graft and compares a grafted chat request
 // across the rows. A direct_kv graft's K/V and Gated DeltaNet state are written at startup onto the
 // rank that owns each layer, so a wrong shard, local layer index or block-table replica shows here.
+//
+// Speculative rows run for each backend the artifact carries: MTP, and the DFlash or DFlash2
+// drafter, whose feature taps sit on several stages and cross to rank 0 after each pass. The uneven
+// split is NINFER_TEST_STAGE_LAYERS (20,44 by default, for a 64-layer model; 8,32 suits the
+// 40-layer 35B-A3B).
+//
+// With a Vision artifact, the Vision rows (plain and MTP) also generate from an image prompt whose
+// merged tokens span two prefill chunks: the tower and the embedding scatter run on the first device
+// and each stage's attention reads the three-row multimodal RoPE positions it received.
 
 #include "guarded_main.h"
 #include "ninfer/engine.h"
@@ -28,8 +37,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
-#include <optional>
+#include <map>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -42,11 +52,38 @@ struct Configuration {
     std::vector<std::uint32_t> stage_layers;
     bool cuda_graph   = true;
     bool force_staged = false;
-    // Speculative decoding by MTP. Its output is not the same as ordinary decoding's (verification
-    // evaluates several columns at once), so it is compared with MTP on one device, not with the
-    // plain reference.
-    bool mtp = false;
+    // Speculative decoding. Its output is not the same as ordinary decoding's (verification
+    // evaluates several columns at once), so it is compared with the same backend on one device,
+    // not with the plain reference.
+    ninfer::SpeculativeBackend speculative = ninfer::SpeculativeBackend::None;
+    // Vision on: an image prompt runs too, its tower on the first device and its multimodal RoPE
+    // positions crossing every stage boundary.
+    bool vision = false;
 };
+
+const char* backend_name(ninfer::SpeculativeBackend backend) {
+    switch (backend) {
+    case ninfer::SpeculativeBackend::None:
+        return "plain";
+    case ninfer::SpeculativeBackend::Mtp:
+        return "MTP";
+    case ninfer::SpeculativeBackend::DFlash:
+        return "DFlash";
+    case ninfer::SpeculativeBackend::DFlash2:
+        return "DFlash2";
+    }
+    return "unknown";
+}
+
+// A comma-separated list of integers.
+std::vector<std::uint32_t> parse_list(const std::string& text) {
+    std::vector<std::uint32_t> out;
+    std::istringstream list{text};
+    for (std::string item; std::getline(list, item, ',');) {
+        out.push_back(static_cast<std::uint32_t>(std::stoul(item)));
+    }
+    return out;
+}
 
 // Stage i of a configuration sits on the i-th id of NINFER_TEST_DEVICE_IDS, wrapping around; without
 // the variable every stage is on device 0.
@@ -54,8 +91,7 @@ std::vector<int> stage_devices(const std::vector<int>& requested) {
     const char* ids = std::getenv("NINFER_TEST_DEVICE_IDS");
     if (ids == nullptr || *ids == '\0' || requested.empty()) { return requested; }
     std::vector<int> available;
-    std::istringstream list{std::string(ids)};
-    for (std::string item; std::getline(list, item, ',');) { available.push_back(std::stoi(item)); }
+    for (const std::uint32_t id : parse_list(ids)) { available.push_back(static_cast<int>(id)); }
     if (available.empty()) { return requested; }
     std::vector<int> out;
     for (std::size_t stage = 0; stage < requested.size(); ++stage) {
@@ -77,11 +113,14 @@ ninfer::EngineOptions engine_options(const char* artifact, const Configuration& 
     options.prefill_chunk = 512;
     options.kv_cache      = ninfer::KvCacheStorage::Int8Group64;
     options.use_cuda_graph = configuration.cuda_graph;
-    if (configuration.mtp) {
-        options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
+    options.speculative.backend = configuration.speculative;
+    if (configuration.speculative == ninfer::SpeculativeBackend::Mtp) {
         options.speculative.draft_tokens = 3;
+    } else if (configuration.speculative != ninfer::SpeculativeBackend::None) {
+        options.speculative.draft_tokens = 7;
     }
     options.devices               = stage_devices(configuration.devices);
+    options.enable_vision         = configuration.vision;
     options.stage_layers          = configuration.stage_layers;
     if (const char* graft = std::getenv("NINFER_TEST_GRAFT"); graft != nullptr && *graft != '\0') {
         options.grafts.push_back(ninfer::GraftSource{.name = "g", .path = graft});
@@ -111,6 +150,41 @@ std::vector<ninfer::TokenId> long_prompt() {
 
 std::vector<ninfer::TokenId> short_prompt() { return {248045, 846, 198, 5834, 248046, 198}; }
 
+// A 768 x 768 gradient: its merged Vision tokens outnumber a 512-column prefill chunk, so the image
+// spans a chunk boundary.
+std::vector<std::uint8_t> gradient_ppm() {
+    constexpr int kSide = 768;
+    std::vector<std::uint8_t> ppm;
+    const std::string header = "P6\n768 768\n255\n";
+    ppm.insert(ppm.end(), header.begin(), header.end());
+    for (int y = 0; y < kSide; ++y) {
+        for (int x = 0; x < kSide; ++x) {
+            ppm.push_back(static_cast<std::uint8_t>(x / 3));
+            ppm.push_back(static_cast<std::uint8_t>(y / 3));
+            ppm.push_back(static_cast<std::uint8_t>((x + y) / 6));
+        }
+    }
+    return ppm;
+}
+
+ninfer::PromptInput image_prompt() {
+    ninfer::MessagePart image;
+    image.kind              = ninfer::MessagePartKind::Media;
+    image.media.kind        = ninfer::MediaKind::Image;
+    image.media.bytes       = gradient_ppm();
+    image.media.media_type  = "image/x-portable-pixmap";
+    image.media.source_name = "gradient.ppm";
+    ninfer::ChatMessage message;
+    message.role = ninfer::ChatRole::User;
+    message.parts.push_back(std::move(image));
+    message.parts.push_back(ninfer::MessagePart{
+        .kind = ninfer::MessagePartKind::Text, .text = "Describe the image.", .media = {}});
+    ninfer::PromptInput input;
+    input.messages.push_back(std::move(message));
+    input.options.enable_thinking = false;
+    return input;
+}
+
 struct Outputs {
     std::vector<ninfer::TokenId> short_run;
     std::vector<ninfer::TokenId> long_run;
@@ -120,6 +194,9 @@ struct Outputs {
     std::uint32_t reused_tokens = 0;
     // A chat request selecting NINFER_TEST_GRAFT; empty without it.
     std::vector<ninfer::TokenId> graft_run;
+    // The image prompt's tokens, with Vision on; empty otherwise.
+    std::vector<ninfer::TokenId> vision_run;
+    std::uint32_t vision_prompt_tokens = 0;
 };
 
 Outputs generate(const char* artifact, const Configuration& configuration) {
@@ -141,6 +218,16 @@ Outputs generate(const char* artifact, const Configuration& configuration) {
         engine.generate(engine.prepare_tokens(std::move(continuation)), greedy(8, true));
     out.continued_run = continued.generated_token_ids;
     out.reused_tokens = continued.reused_prompt_tokens;
+
+    if (configuration.vision) {
+        const ninfer::GenerationResult image =
+            engine.generate(engine.prepare(image_prompt()), greedy(24));
+        if (!image.prompt.has_media) {
+            throw std::runtime_error("the image prompt carried no media");
+        }
+        out.vision_run           = image.generated_token_ids;
+        out.vision_prompt_tokens = image.prompt.prompt_tokens;
+    }
 
     const char* graft = std::getenv("NINFER_TEST_GRAFT");
     if (graft != nullptr && *graft != '\0') {
@@ -181,48 +268,129 @@ int run() {
         std::cerr << "the reference did not generate the grafted request's tokens\n";
         return 1;
     }
-    // MTP needs a model that carries MTP weights; when it does not, the MTP rows are skipped.
-    std::optional<Outputs> mtp_reference;
-    bool mtp_available = true;
-    try {
-        mtp_reference = generate(
-            artifact, split_invariance
-                          ? Configuration{.label = "two stages, MTP", .devices = {0, 0}, .mtp = true}
-                          : Configuration{.label = "single device, MTP", .devices = {}, .mtp = true});
-    } catch (const std::exception& error) {
-        std::cout << "MTP rows skipped: " << error.what() << '\n';
-        mtp_available = false;
+    // A speculative backend needs a model that carries its weights; the rows of a backend the
+    // artifact lacks are skipped.
+    using ninfer::SpeculativeBackend;
+    std::map<std::pair<SpeculativeBackend, bool>, Outputs> references;
+    references.emplace(std::pair{SpeculativeBackend::None, false}, reference);
+    // A row of a backend the artifact lacks, or of Vision without a tower, is skipped.
+    const auto add_reference = [&](SpeculativeBackend backend, bool vision) {
+        const std::string name =
+            std::string(backend_name(backend)) + (vision ? ", Vision" : "");
+        try {
+            references.emplace(
+                std::pair{backend, vision},
+                generate(artifact, split_invariance
+                                       ? Configuration{.label       = "two stages, " + name,
+                                                       .devices     = {0, 0},
+                                                       .speculative = backend,
+                                                       .vision      = vision}
+                                       : Configuration{.label       = "single device, " + name,
+                                                       .devices     = {},
+                                                       .speculative = backend,
+                                                       .vision      = vision}));
+        } catch (const std::exception& error) {
+            std::cout << name << " rows skipped: " << error.what() << '\n';
+        }
+    };
+    for (const SpeculativeBackend backend :
+         {SpeculativeBackend::Mtp, SpeculativeBackend::DFlash, SpeculativeBackend::DFlash2}) {
+        add_reference(backend, false);
     }
+    add_reference(SpeculativeBackend::None, true);
+    add_reference(SpeculativeBackend::Mtp, true);
 
-    const std::vector<Configuration> configurations = {
+    const char* uneven_text = std::getenv("NINFER_TEST_STAGE_LAYERS");
+    const std::vector<std::uint32_t> uneven =
+        parse_list(uneven_text != nullptr && *uneven_text != '\0' ? uneven_text : "20,44");
+    std::vector<Configuration> configurations = {
         {.label = "two stages, graphs", .devices = {0, 0}},
         {.label = "two stages, eager", .devices = {0, 0}, .cuda_graph = false},
         {.label = "two stages, staged transport", .devices = {0, 0}, .force_staged = true},
         {.label = "three stages", .devices = {0, 0, 0}},
         // Uneven counts: the split must not change what the model computes.
-        {.label = "two stages, uneven layers", .devices = {0, 0}, .stage_layers = {20, 44}},
-        {.label = "two stages, MTP", .devices = {0, 0}, .mtp = true},
-        {.label = "three stages, MTP, eager", .devices = {0, 0, 0}, .cuda_graph = false, .mtp = true},
+        {.label = "two stages, uneven layers", .devices = {0, 0}, .stage_layers = uneven},
+        {.label = "two stages, MTP", .devices = {0, 0}, .speculative = SpeculativeBackend::Mtp},
+        {.label       = "three stages, MTP, eager",
+         .devices     = {0, 0, 0},
+         .cuda_graph  = false,
+         .speculative = SpeculativeBackend::Mtp},
     };
+    // The drafter's taps fall on more than one stage of these splits, so a pass sends features from
+    // the later stages while stage 0's are captured on rank 0 directly.
+    for (const SpeculativeBackend backend :
+         {SpeculativeBackend::DFlash, SpeculativeBackend::DFlash2}) {
+        const std::string name = backend_name(backend);
+        configurations.push_back(
+            {.label = "two stages, " + name, .devices = {0, 0}, .speculative = backend});
+        configurations.push_back({.label        = "two stages, " + name + ", staged transport",
+                                  .devices      = {0, 0},
+                                  .force_staged = true,
+                                  .speculative  = backend});
+        configurations.push_back({.label       = "three stages, " + name + ", eager",
+                                  .devices     = {0, 0, 0},
+                                  .cuda_graph  = false,
+                                  .speculative = backend});
+        configurations.push_back({.label        = "two stages, " + name + ", uneven layers",
+                                  .devices      = {0, 0},
+                                  .stage_layers = uneven,
+                                  .speculative  = backend});
+    }
+    // Vision: the tower and the image's embedding scatter stay on the first device; every stage's
+    // attention reads the three-row multimodal RoPE positions from the control block.
+    configurations.push_back({.label = "two stages, Vision", .devices = {0, 0}, .vision = true});
+    configurations.push_back({.label        = "two stages, Vision, staged transport",
+                              .devices      = {0, 0},
+                              .force_staged = true,
+                              .vision       = true});
+    configurations.push_back({.label      = "three stages, Vision, eager",
+                              .devices    = {0, 0, 0},
+                              .cuda_graph = false,
+                              .vision     = true});
+    configurations.push_back({.label        = "two stages, Vision, uneven layers",
+                              .devices      = {0, 0},
+                              .stage_layers = uneven,
+                              .vision       = true});
+    configurations.push_back({.label       = "two stages, Vision, MTP",
+                              .devices     = {0, 0},
+                              .speculative = SpeculativeBackend::Mtp,
+                              .vision      = true});
 
     int failures = 0;
     for (const Configuration& configuration : configurations) {
-        if (configuration.mtp && !mtp_available) { continue; }
+        const auto found = references.find({configuration.speculative, configuration.vision});
+        if (found == references.end()) { continue; }
         if (configuration.devices.size() > max_stages) { continue; }
-        const Outputs& expected = configuration.mtp ? *mtp_reference : reference;
+        const Outputs& expected = found->second;
         const Outputs outputs   = generate(artifact, configuration);
         const bool short_ok     = outputs.short_run == expected.short_run;
         const bool long_ok      = outputs.long_run == expected.long_run;
         const bool cache_ok     = outputs.continued_run == expected.continued_run &&
                               outputs.reused_tokens == expected.reused_tokens;
         const bool graft_ok     = outputs.graft_run == expected.graft_run;
+        const bool vision_ok    = outputs.vision_run == expected.vision_run &&
+                               outputs.vision_prompt_tokens == expected.vision_prompt_tokens;
         std::cout << configuration.label << ": short " << (short_ok ? "identical" : "DIFFERS")
                   << ", long " << (long_ok ? "identical" : "DIFFERS") << ", prefix reuse ("
                   << outputs.reused_tokens << " tokens) " << (cache_ok ? "identical" : "DIFFERS");
         if (!expected.graft_run.empty()) {
             std::cout << ", graft " << (graft_ok ? "identical" : "DIFFERS");
         }
+        if (!expected.vision_run.empty()) {
+            std::cout << ", image (" << outputs.vision_prompt_tokens << " prompt tokens) "
+                      << (vision_ok ? "identical" : "DIFFERS");
+        }
         std::cout << '\n';
+        if (!vision_ok) {
+            ++failures;
+            std::size_t first = 0;
+            while (first < expected.vision_run.size() && first < outputs.vision_run.size() &&
+                   expected.vision_run[first] == outputs.vision_run[first]) {
+                ++first;
+            }
+            std::cerr << "  image: first difference at token " << first << '\n';
+            continue;
+        }
         if (!graft_ok && short_ok && long_ok && cache_ok) {
             ++failures;
             std::size_t first = 0;

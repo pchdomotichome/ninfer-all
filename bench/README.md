@@ -66,7 +66,7 @@ ninfer_bench --weights <artifact.ninfer>
           [-r, --repetitions <n>] [--warmup <n>]
           [--max-ctx <tokens>] [--prefill-chunk <tokens>]
           [--kv-dtype <bf16|int8|fp8|nvfp4|k8v4>] [--fast-prefill-kernel]
-          [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--lm-head-draft]
+          [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--lm-head-draft|--full-draft-head]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
           [-o, --output <table|json|csv>] [--output-file <path>]
 ```
@@ -81,9 +81,9 @@ Example:
   -p 512,2048 -n 128 -pg '2048,128' -r 5 --warmup 1
 ```
 
-Select a backend with `--spec mtp|dflash|dflash2 --draft-tokens K` (K=1..15 for every backend);
-`--lm-head-draft` selects the optimized proposal head. CUDA Graph decode is
-enabled by default.
+Select a backend with `--spec mtp|dflash|dflash2 --draft-tokens K` (K=1..15 for every backend).
+Drafts use the optimized proposal head when the artifact stores one; `--lm-head-draft` requires it
+and `--full-draft-head` keeps the full output head. CUDA Graph decode is enabled by default.
 
 `--profile-measured` is a benchmark-only profiler boundary. It requires exactly one selected test
 and `-r 1`, synchronizes after warmup, and brackets only the measured repetition with
@@ -315,10 +315,17 @@ cmake --build build --parallel --target ninfer_benches
   --qtype fp8 --policy a8 --n 16384 --k 5120 --t 1024
 ```
 
-Linear tuning measures every valid T through 128 and the two bulk anchors, 512 and 1024.
-[Linear tuning and performance reports](../docs/maintainer/linear-tuning.md) defines workload
-priorities, dispatch tradeoffs, and the final curve and metric tables. Respect each Op's extent
-alignment; these measurement targets do not limit supported T.
+Linear tuning measures every valid T through 128 and the two bulk anchors, 512 and 1024
+([Op development](../docs/maintainer/op-development.md)). Respect each Op's extent alignment; these
+measurement targets do not limit supported T. Where a boundary between schedules should sit is a
+separate question that `ninfer_linear_schedule_bench` answers: it times every candidate launch of a
+shape at the same column count, including candidates the shape table never selects, and names the
+one the table routes to:
+
+```bash
+./build/bench/ninfer_benches ninfer_linear_schedule_bench q4:131072x5120 --repeat 11 --spread
+./build/bench/ninfer_benches ninfer_linear_schedule_bench q8:2048x16384 --tokens 24,32,40,48 --only k32,mma
+```
 
 A continuous small-T sweep reuses one packed weight and one maximum-T activation/output
 allocation:
@@ -541,11 +548,9 @@ larger extents. The chunked route prepares 16-token packets and combines recurre
 its final packet is padded inside the kernels. `--batch-update` measures the public selected-slot
 update at `T=1`, with `B=1..8`; `--qk-norm composed` retains the B=1 two-L2Norm comparison.
 
-`--force-chunked` and `--recurrent-only` call the selected production launchers with fused Q/K
-normalization at matching prefill extents to measure their crossover. `--chunked-only` forces
-the chunked route with pre-normalized BF16 Q/K. These prefill comparisons are independent of
-decode and ReplaySSM. Adding `--breakdown` to a chunked measurement reports isolated
-`chunked.prepare` and `chunked.recurrence` timings using the same production launchers and
+`--chunked-only` measures the chunked route with pre-normalized BF16 Q/K, independently of decode
+and ReplaySSM. Adding `--breakdown` to it reports isolated `chunked.prepare_wy_wu`,
+`chunked.state_passing` and `chunked.output` timings using the same production launchers and
 workspace layout.
 
 `stage_share_pct` partitions the sum of isolated-stage medians. Each isolated stage receives its own
@@ -1129,8 +1134,8 @@ cmake --build build --parallel --target ninfer_benches
 ```
 
 The G2/G3/G4 benchmark uses physical rows 248320 and valid token domain 248077. G2 covers optional
-occurrence counts and batched sampling at `B=1,2,4,8`; G3 covers one-hot MTP windows (`K=1..5` in
-the default matrix; `--mtp-k` accepts up to 15).
+occurrence counts and batched sampling at `B=1,2,4,8`; G3 covers MTP windows under coupled
+verification (`K=1..5` in the default matrix; `--mtp-k` accepts up to 15).
 With no arguments it runs the G2/G3 greedy/stochastic matrix. G4 covers DFlash2 sparse-q acceptance
 with `K=1..15`, 16 proposal candidates, `P=0..K`, and `B=1..8`. `--drafts` defaults to the
 checkpoint recommendation of seven; the default extent is the selected K.
@@ -1180,6 +1185,19 @@ private route controls, so it is not retained as a public Op benchmark. Complete
 effects are measured through the public Engine benchmark or the target round benchmarks.
 
 ## Pointwise Op benchmarks
+
+`ninfer_benches ninfer_hyper_connection_bench` compares the public HC write/read composition
+with `hyper_connection_write_read` at 4 streams, hidden 2560, lowrank 320 and
+T=1/4/8/9/16/128/512. It covers BF16 and FP32 block outputs, reused operands and a 64 MiB L2
+eviction. Each result reports 61 alternating baseline/candidate CUDA Graph samples, median,
+p95 and graph node counts; restoring identical input stacks and inject weights is outside timing.
+This measures the complete Op composition, not whole-model throughput.
+
+`ninfer_benches ninfer_qsa_indexer_bench` measures the public indexer at T=1/4/8/16/127/128/129/512
+and capacities 700/8192/32768. It records 33 CUDA Graph samples, median and p95 with reused
+inputs and a 64 MiB L2 eviction, including query preparation and top-512 selection. The wider
+route uses TF32 high/residual MMA and preserves FP32 pooled keys. This is an Op measurement;
+the selection oracle is `ninfer_qsa_indexer_test`.
 
 The Section 5 benchmarks cover the complete Qwen3.6-35B pointwise matrix. Default invocation runs
 all registered small, established, maximum-video, and maximum-image shapes. `--control` preserves
