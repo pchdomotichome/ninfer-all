@@ -204,7 +204,8 @@ int run_case(const Case& c, std::uint32_t seed) {
     }
     for (const auto& [tokens, device_resident] : calls) {
         const ops::GgufMoeWeights banks{gate.view(),  up.view(),  down.view(), sgate.view(),
-                                        sup.view(),   sdown.view(), kExperts,  device_resident};
+                                        sup.view(),   sdown.view(), kExperts,  kWidth,
+                                        device_resident};
         std::normal_distribution<float> normal(0.0f, 1.0f);
         std::uniform_real_distribution<float> unit(0.05f, 1.0f);
         std::vector<__nv_bfloat16> m(std::size_t(kHidden) * tokens);
