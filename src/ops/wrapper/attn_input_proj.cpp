@@ -46,7 +46,8 @@ void require_matrix(const Tensor& tensor, std::int32_t rows, std::int32_t cols, 
     }
 }
 
-void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, const char* label) {
+void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, std::int32_t columns,
+                      const char* label) {
     const bool no_high   = weight.qhigh == nullptr && weight.high_plane_bytes == 0;
     const bool q4_planes = qtype != QType::Q4_G64_FP16 || no_high;
     const bool t2_planes = qtype != QType::T2_G128_FP16 || no_high;
@@ -57,9 +58,9 @@ void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, cons
     if (weight.qtype != qtype || !is_row_split(weight.layout) ||
         weight.scale_dtype != DType::FP16 ||
         weight.group_size != static_cast<std::uint32_t>(group) || weight.group != group ||
-        !t2_planes || weight.ndim != 2 || weight.n != rows || weight.k != 5120 ||
-        weight.shape[0] != rows || weight.shape[1] != 5120 || weight.padded_shape[0] != rows ||
-        weight.padded_shape[1] != 5120 || !q4_planes || !q5_planes ||
+        !t2_planes || weight.ndim != 2 || weight.n != rows || weight.k != columns ||
+        weight.shape[0] != rows || weight.shape[1] != columns || weight.padded_shape[0] != rows ||
+        weight.padded_shape[1] != columns || !q4_planes || !q5_planes ||
         !aligned_to(weight.qdata, 16) || !aligned_to(weight.scales, 4) ||
         (qtype == QType::Q5_G64_FP16 && !aligned_to(weight.qhigh, 16))) {
         throw std::invalid_argument(std::string("attn_input_proj: invalid ") + label);
@@ -230,18 +231,19 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& q, Te
         return;
     }
 
-    constexpr std::int32_t kHidden = 2048;
+    // The 2048-hidden model's head counts; the hidden width itself is x's row extent
+    // (2048 for the 35B-A3B, 4096 for Qwen3.5-9B).
     constexpr std::int32_t kQRows  = 4096;
     constexpr std::int32_t kKvRows = 512;
     constexpr std::int32_t kRows   = 9216;
     const std::int32_t cols        = x.ne[1];
     if (cols <= 0) { throw std::invalid_argument("attn_input_proj: T must be positive"); }
-    require_matrix(x, kHidden, cols, "x");
+    require_matrix(x, x.ne[0], cols, "x");
     require_matrix(q, kQRows, cols, "q");
     require_matrix(gate, kQRows, cols, "gate");
     require_matrix(k, kKvRows, cols, "k");
     require_matrix(v, kKvRows, cols, "v");
-    require_q8_rowsplit(weight, kRows, kHidden, "query/key/gate/value weight");
+    require_q8_rowsplit(weight, kRows, x.ne[0], "query/key/gate/value weight");
     if (sm70_direct_split(x, weight, {&q, &k, &gate, &v}, stream)) { return; }
     detail::q8_attn_input_dispatch(x, weight, q, gate, k, v, stream);
 }
@@ -316,17 +318,20 @@ namespace {
 void require_split_profile(const Tensor& x, const Weight& query_key_weight,
                            const Weight& gate_value_weight, Tensor& q, Tensor& gate, Tensor& k,
                            Tensor& v) {
-    constexpr std::int32_t kHidden = 5120;
-    constexpr std::int32_t kQRows  = 6144;
-    constexpr std::int32_t kKvRows = 1024;
-    const std::int32_t cols        = x.ne[1];
-    require_matrix(x, kHidden, cols, "x");
+    // The model's own three widths, read from the output tensors rather than named,
+    // so a hidden size outside the registered ones is admitted by construction.
+    const std::int32_t kQRows  = q.ne[0];
+    const std::int32_t kKvRows = k.ne[0];
+    const std::int32_t cols    = x.ne[1];
+    require_matrix(x, x.ne[0], cols, "x");
     require_matrix(q, kQRows, cols, "q");
     require_matrix(gate, kQRows, cols, "gate");
     require_matrix(k, kKvRows, cols, "k");
     require_matrix(v, kKvRows, cols, "v");
-    require_rowsplit(query_key_weight, QType::Q4_G64_FP16, kQRows + kKvRows, "query/key weight");
-    require_rowsplit(gate_value_weight, QType::Q5_G64_FP16, kQRows + kKvRows, "gate/value weight");
+    require_rowsplit(query_key_weight, QType::Q4_G64_FP16, kQRows + kKvRows, x.ne[0],
+                     "query/key weight");
+    require_rowsplit(gate_value_weight, QType::Q5_G64_FP16, kQRows + kKvRows, x.ne[0],
+                     "gate/value weight");
 }
 
 // Ternary pair: both parents are T2 (q/k rows [0,6144)/[6144,7168), gate/v likewise). The integer
@@ -348,8 +353,10 @@ bool t2_pair_project(const Tensor& x, const Weight& query_key_weight,
     require_matrix(gate, kQRows, cols, "gate");
     require_matrix(k, kKvRows, cols, "k");
     require_matrix(v, kKvRows, cols, "v");
-    require_rowsplit(query_key_weight, QType::T2_G128_FP16, kQRows + kKvRows, "query/key weight");
-    require_rowsplit(gate_value_weight, QType::T2_G128_FP16, kQRows + kKvRows, "gate/value weight");
+    require_rowsplit(query_key_weight, QType::T2_G128_FP16, kQRows + kKvRows, x.ne[0],
+                     "query/key weight");
+    require_rowsplit(gate_value_weight, QType::T2_G128_FP16, kQRows + kKvRows, x.ne[0],
+                     "gate/value weight");
     if (workspace != nullptr && detail::sm70::covers(query_key_weight, cols) &&
         detail::sm70::covers(gate_value_weight, cols)) {
         sm70_split(x, query_key_weight, {&q, &k}, &gate_value_weight, {&gate, &v}, policy,
@@ -488,17 +495,20 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_weight,
                         LinearPolicy::A16Only, nullptr, stream)) {
         return;
     }
-    constexpr std::int32_t kHidden = 5120;
-    constexpr std::int32_t kQRows  = 6144;
-    constexpr std::int32_t kKvRows = 1024;
-    const std::int32_t cols        = x.ne[1];
-    require_matrix(x, kHidden, cols, "x");
+    // The model's own three widths, read from the output tensors rather than named,
+    // so a hidden size outside the registered ones is admitted by construction.
+    const std::int32_t kQRows  = q.ne[0];
+    const std::int32_t kKvRows = k.ne[0];
+    const std::int32_t cols    = x.ne[1];
+    require_matrix(x, x.ne[0], cols, "x");
     require_matrix(q, kQRows, cols, "q");
     require_matrix(gate, kQRows, cols, "gate");
     require_matrix(k, kKvRows, cols, "k");
     require_matrix(v, kKvRows, cols, "v");
-    require_rowsplit(query_key_weight, QType::Q4_G64_FP16, kQRows + kKvRows, "query/key weight");
-    require_rowsplit(gate_value_weight, QType::Q5_G64_FP16, kQRows + kKvRows, "gate/value weight");
+    require_rowsplit(query_key_weight, QType::Q4_G64_FP16, kQRows + kKvRows, x.ne[0],
+                     "query/key weight");
+    require_rowsplit(gate_value_weight, QType::Q5_G64_FP16, kQRows + kKvRows, x.ne[0],
+                     "gate/value weight");
 
     detail::q4_q5_attn_input_dispatch(x, query_key_weight, gate_value_weight, q, gate, k, v,
                                       stream);
