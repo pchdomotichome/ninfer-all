@@ -99,8 +99,11 @@ public:
 
     [[nodiscard]] GenerationService& service() override { return *service_; }
 
+    // The Engine has to support suspend for the model to be able to sleep: --model-suspend does
+    // not make a core that cannot suspend (Gemma 4) able to, and a refusal repeated for the whole
+    // room timeout would keep the router from ever making room.
     [[nodiscard]] bool suspendable() const override {
-        return service_->engine_options().suspend.enabled;
+        return service_->engine_options().suspend.enabled && service_->residency().enabled;
     }
 
     void suspend() override { (void)service_->suspend(true); }

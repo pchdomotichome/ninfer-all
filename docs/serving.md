@@ -187,7 +187,9 @@ To make room, the least recently used model without requests in flight goes to s
 started with [`--model-suspend`](#model-suspend), and is unloaded otherwise. A sleeping model keeps
 its Engine, host caches and retained conversations and gives back its device memory; it wakes in
 about two seconds where a cold load takes over ten (27B, RTX 3090: 1.8 s against 11.6 s), and its
-retained conversations reuse their prefixes as before. A model with requests in flight is never put
+retained conversations reuse their prefixes as before. `--model-suspend` needs a Generation Engine:
+a model whose Engine has no suspend (Gemma 4) is unloaded to make room, like one started without
+the option. A model with requests in flight is never put
 to sleep or unloaded under them: the request that needs the room waits for them to finish (up to
 ten minutes, then 503). `--sleep-idle-seconds N` puts a model idle for N seconds to sleep (it needs
 `--model-suspend`) and `--unload-idle-seconds N` unloads one; both apply to a single-model server

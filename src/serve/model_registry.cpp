@@ -1,3 +1,4 @@
+#include "serve/console_log.h"
 #include "serve/model_registry.h"
 
 #include <algorithm>
@@ -179,6 +180,16 @@ bool ModelRegistry::make_room_locked(std::unique_lock<std::mutex>& lock, std::si
             if (models_[*victim].service->suspendable()) {
                 try {
                     put_to_sleep_locked(lock, *victim);
+                } catch (const std::invalid_argument& error) {
+                    // A refusal that will not change: this Engine cannot suspend at all, the same
+                    // way it would refuse every retry. Make room by unloading the victim, as the
+                    // router does for a model that cannot sleep.
+                    write_console_log(ConsoleLogLevel::Warning,
+                                      "model '" + models_[*victim].definition.id +
+                                          "' cannot suspend (" + error.what() +
+                                          "); it is unloaded to make room");
+                    unload_locked(lock, *victim);
+                    continue;
                 } catch (...) {
                     // Its Engine is still settling the request that just let go of it; look again
                     // shortly rather than spin.
