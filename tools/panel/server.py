@@ -53,6 +53,196 @@ class Jobs:
             return [dict(v) for v in self._runs.values()]
 
 
+class Baselines:
+    """Velocidad normal de decode por modelo, y las alertas que se derivan.
+
+    La referencia se aprende de los contadores acumulados de /v1/load — el
+    AGREGADO del servidor — y no del tiempo de pared de cada request. Con
+    --max-concurrency N los requests comparten el batch de decode, así que el
+    tok/s de un request individual depende de cuántos corren juntos: usarlo como
+    referencia daría falsos positivos en cuanto el servidor se usa en paralelo.
+    El agregado no depende de cómo se reparta.
+
+    Es la falla que el dashboard existe para ver: si la GPU se cae, el motor
+    sigue respondiendo 200 y genera diez o veinte veces más lento.
+    """
+
+    WINDOW = 300          # muestras retenidas por modelo (mediana robusta)
+    MIN_SAMPLES = 12      # antes de esto no se alerta contra la referencia
+    RATIO = 0.25          # bajo el 25% de la mediana -> sospechoso
+    STREAK = 3            # seguidos, porque uno lento no significa nada
+    ABSOLUTE = 5.0        # tok/s: regla para cuando todavía no hay referencia
+    SAMPLE_EVERY = 2.0    # segundos entre muestras
+    SAVE_EVERY = 30.0
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.rates: dict = {}          # modelo -> [tok/s]
+        self.last: tuple | None = None  # (tokens, t) del muestreo anterior
+        self.streak = 0
+        self.slow_streak = 0
+        self.alerts: list[dict] = []
+        self.down_polls = 0
+        self._last_save = 0.0
+        self._stop = threading.Event()
+        self._load()
+
+    # ------------------------------------------------------------ persistencia
+    def _load(self):
+        try:
+            saved = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return
+        with self.lock:
+            for mid, entry in (saved.get("models") or {}).items():
+                rates = [float(x) for x in (entry or []) if isinstance(x, (int, float))]
+                if rates:
+                    self.rates[mid] = rates[-self.WINDOW:]
+
+    def _save(self, force: bool = False):
+        now = time.time()
+        if not force and now - self._last_save < self.SAVE_EVERY:
+            return
+        self._last_save = now
+        with self.lock:
+            payload = {"version": 1,
+                       "saved_unix_ms": int(now * 1000),
+                       "models": {k: v[-self.WINDOW:] for k, v in self.rates.items()}}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(payload))
+        except OSError:
+            pass
+
+    # ---------------------------------------------------------------- muestreo
+    @staticmethod
+    def _median(xs: list) -> float:
+        s = sorted(xs)
+        n = len(s)
+        if not n:
+            return 0.0
+        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+    def start(self, url: str):
+        """Arranca el muestreo. Corre aunque nadie tenga el panel abierto: una
+        alerta que sólo existe mientras miro la página no es una alerta.
+
+        Lee sólo /v1/load, no el lector completo de la página: son cuatro
+        endpoints más la residency de cada modelo, y esto corre cada 2 s
+        para siempre."""
+        def once() -> dict:
+            try:
+                with urllib.request.urlopen(url.rstrip("/") + "/v1/load", timeout=4) as fh:
+                    return {"reachable": True, "load": json.loads(fh.read())}
+            except urllib.error.HTTPError:
+                # El router responde: no hay modelo cargado, que es reposo.
+                return {"reachable": True, "load": {"error": "no model loaded"}}
+            except (OSError, ValueError):
+                return {"reachable": False, "load": None}
+
+        def loop():
+            while not self._stop.wait(self.SAMPLE_EVERY):
+                try:
+                    self.feed(once())
+                except Exception:
+                    continue
+            self._save(force=True)
+
+        threading.Thread(target=loop, daemon=True, name="baselines").start()
+
+    def stop(self):
+        self._stop.set()
+
+    def feed(self, snap: dict, now: float | None = None):
+        """Un muestreo. `snap` es {"reachable": bool, "load": dict|None}.
+
+        `now` es inyectable para que las reglas se puedan ejercitar sin esperar
+        el reloj: ver test_baselines.py."""
+        now = time.time() if now is None else now
+        # "Caído" es que no conteste NADA. Un 404 en /v1/load es el router en
+        # reposo, no una falla: confundirlas daría una alerta falsa con el
+        # servidor andando bien.
+        reachable = bool(snap.get("reachable"))
+        load = snap.get("load") or {}
+        counters = load.get("counters") or {}
+        model = load.get("model") or ""
+        tokens = counters.get("committed_decode_tokens")
+
+        self.down_polls = 0 if reachable else self.down_polls + 1
+        self._raise("server_unreachable", "el servidor no responde",
+                    "sin respuesta desde hace %ds" % round(self.down_polls * self.SAMPLE_EVERY),
+                    "ok" if reachable else ("critical" if self.down_polls >= 4 else "warning"))
+        if not reachable or not model or tokens is None:
+            with self.lock:
+                self.last = None
+            return
+
+        prev = self.last
+        self.last = (tokens, now)
+        if not prev:
+            return
+        dtok, dt = tokens - prev[0], now - prev[1]
+        # Sólo cuando hay requests en vuelo: en reposo la tasa es 0 por
+        # definición y no dice nada sobre la velocidad del modelo.
+        if dt <= 0 or dtok <= 0 or not (load.get("requests") or {}).get("running"):
+            return
+        rate = dtok / dt
+        if rate <= 0 or rate > 100000:
+            return
+
+        with self.lock:
+            series = self.rates.setdefault(model, [])
+            series.append(rate)
+            if len(series) > self.WINDOW:
+                del series[:-self.WINDOW]
+            n, median = len(series), self._median(series)
+
+        # Antes de tener referencia, la única regla posible es "esto no es
+        # velocidad de inferencia": 5 tok/s es el piso de una GPU saludable.
+        self.slow_streak = self.slow_streak + 1 if rate < self.ABSOLUTE else 0
+        self._raise("decode_suspiciously_slow", "decode sospechosamente lento",
+                    "%.1f tok/s" % rate, "serious" if self.slow_streak >= self.STREAK else "ok")
+
+        if n < self.MIN_SAMPLES:
+            return
+        threshold = median * self.RATIO
+        self.streak = self.streak + 1 if rate < threshold else 0
+        self._raise("decode_below_baseline", "decode muy por debajo de su norma",
+                    "%.1f tok/s · referencia %.1f (mediana de %d muestras, %s)"
+                    % (rate, median, n, model),
+                    "critical" if self.streak >= self.STREAK else "ok")
+        self._save()
+
+    # ---------------------------------------------------------------- alertas
+    def _raise(self, key: str, title: str, detail: str, level: str):
+        with self.lock:
+            prev = next((a for a in self.alerts if a["key"] == key), None)
+            # "ok" es un estado interno: si la regla no dispara, se cierra.
+            if level == "ok":
+                if prev:
+                    self.alerts.remove(prev)
+                return
+            if prev:
+                prev.update(level=level, detail=detail)
+                return
+            self.alerts.append({"key": key, "level": level,
+                                "title": title, "detail": detail,
+                                "since_unix_ms": int(time.time() * 1000)})
+
+    def view(self) -> dict:
+        with self.lock:
+            return {"ok": True,
+                    "alerts": sorted(self.alerts, key=lambda a: a["level"]),
+                    "models": {mid: {"median_tok_s": round(self._median(series), 1),
+                                     "samples": len(series)}
+                               for mid, series in self.rates.items()},
+                    "learning": {"min_samples": self.MIN_SAMPLES,
+                                 "streak": self.streak,
+                                 "needed": self.STREAK},
+                    "server_down_polls": self.down_polls}
+
+
 class API:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -61,6 +251,9 @@ class API:
         self.hub_lock = threading.Lock()
         self._gpu_ts = 0.0
         self._gpu_cache: dict = {"online": False}
+        self.baselines = Baselines(Path(cfg["panel"].get("state_file") or
+                                        (HERE / "panel-state.json")))
+        self.baselines.start(cfg["ninfer"]["url"])
 
     # ---------------------------------------------------------------- avisos
     def publish(self, event: dict):
@@ -867,11 +1060,12 @@ class API:
         return {"ok": True, "path": str(path), "lines": len(lines),
                 "requests": rows[:max(n, 1)]}
 
-    def live(self) -> dict:
-        """Estado del servidor: /v1/load, /stats, /models, /slots.
+    def _live_once(self) -> dict:
+        """Un muestreo del estado del motor, sin cache de GPU ni trabajo extra.
 
-        /v1/load y /stats son la verdad para el panel: no se parsea el log
-        para saber qué está pasando.
+        Lo usan tanto el endpoint /api/live como el hilo de baselines: que
+        compartan el lector evita que las referencias se aprendan con una forma
+        del payload distinta a la que ve la página.
         """
         url = self.cfg["ninfer"]["url"].rstrip("/")
         out: dict = {"url": url, "online": False}
@@ -893,6 +1087,13 @@ class API:
                     model["residency"] = json.loads(fh.read())
             except (OSError, ValueError, urllib.error.URLError):
                 pass
+        return out
+
+    def live(self) -> dict:
+        """Estado del servidor para la página: /v1/load, /stats, /models, /slots
+        y las GPUs, con cache para no pegarle a nvidia-smi en cada poll."""
+        out = self._live_once()
+        out["gpu"] = self.gpu()
         return out
 
     def control(self, body: dict) -> tuple[int, dict]:
@@ -1125,6 +1326,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(payload, code)
         if path == "/api/live":
             return self._json(self.api.live())
+        if path == "/api/alerts":
+            return self._json(self.api.baselines.view())
         if path == "/api/requests":
             return self._json(self.api.requests(query))
         if path == "/api/history":

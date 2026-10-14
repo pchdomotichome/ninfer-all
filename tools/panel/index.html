@@ -255,6 +255,21 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .sechead.verdict.idle h2{color:var(--text-muted)}
 .sechead.verdict .dot{margin-right:8px;position:relative}
 
+/* ── Alertas ─────────────────────────────────────────────────────────────── */
+.alerts-row{display:flex;flex-direction:column;gap:6px;padding:0 18px 14px}
+.alert{display:flex;align-items:flex-start;gap:9px;padding:8px 12px;border-radius:var(--radius-sm);
+  font:12px var(--sans);line-height:1.5;border:1px solid var(--line);background:var(--panel2)}
+.alert .ico{flex:none;margin-top:1px}
+.alert .txt{flex:1;min-width:0}
+.alert .t{font-weight:600;color:var(--text)}
+.alert .d{color:var(--text-muted);font-family:var(--mono);font-size:11px;margin-left:8px}
+.alert .lvl{flex:none;font:700 9.5px var(--mono);text-transform:uppercase;letter-spacing:.7px;
+  padding:2px 7px;border-radius:10px;border:1px solid currentColor;opacity:.9}
+.alert.critical{color:var(--red);border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.08)}
+.alert.serious{color:var(--amber);border-color:rgba(251,191,36,0.4);background:rgba(251,191,36,0.08)}
+.alert.warning{color:var(--amber);border-color:rgba(251,191,36,0.25);background:rgba(251,191,36,0.05)}
+.alert.critical .t,.alert.serious .t,.alert.warning .t{color:inherit}
+
 /* ── Aceptación por posición (spec-decode) ──────────────────────────────── */
 .subnote{font:10.5px var(--mono);color:var(--dim);margin:-4px 0 10px;letter-spacing:0}
 .specpos-wrap{height:180px;display:flex;flex-direction:column}
@@ -385,6 +400,7 @@ section.tight{margin:0}
         <span class="spacer"></span>
         <span class="note" id="liveupd"></span>
       </div>
+      <div id="alerts" hidden></div>
       <div class="now-metrics" id="now-metrics"></div>
       <div id="livebody"></div>
     </section>
@@ -630,7 +646,8 @@ section.tight{margin:0}
 const $ = s => document.querySelector(s);
 const state = { cfg:null, runs:[], open:new Set(), selected:new Set(), more:false, live:false, job:null,
                  page:1, size:10, total:0, convert:null, download:null, probe:null, win:'5m', hist:[],
-                 histLoaded:false, series:{counters:{}, up:{}}, charts:{}, reqs:[], ctlLive:null};
+                 histLoaded:false, series:{counters:{}, up:{}}, charts:{}, reqs:[], ctlLive:null,
+                 alerts:null, alertsSig:''};
 const COLS = [
   // Las que hacen falta para decidir, siempre visibles.
   {k:'model',      t:'modelo',       l:true,  f:r => r.model},
@@ -1134,12 +1151,36 @@ function renderRail(d, gpu, loadOk){
 // El veredicto: una frase que conteste "¿está bien?". El nivel tiñe sólo la
 // línea, y el detalle va al lado en vez de competir con ella.
 const VERDICT_DOT = {good:'ok pulse', warn:'warn', bad:'bad', idle:'off'};
+const ALERT_RANK = {critical:3, serious:2, warning:1};
+const ALERT_ICON = {
+  critical:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+  serious:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  warning:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>',
+};
+
 function renderVerdict(lvl, txt, detail){
   const head = $('#now').querySelector('.sechead');
   head.className = 'sechead verdict ' + lvl;
   $('#vd-dot').className = 'dot ' + VERDICT_DOT[lvl];
   $('#verdict').textContent = txt;
   $('#vd-detail').textContent = detail || '';
+}
+
+// La alerta manda sobre el estado: si algo está mal, el veredicto lo dice
+// primero, no "en reposo".
+function renderAlerts(d){
+  const box = $('#alerts');
+  const list = (d.alerts||[]).slice().sort(
+    (a,b) => (ALERT_RANK[b.level]||0) - (ALERT_RANK[a.level]||0));
+  if (!list.length){ box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  box.innerHTML = `<div class="alerts-row">` + list.map(a=>`
+    <div class="alert ${esc(a.level)}" role="alert">
+      <span class="ico">${ALERT_ICON[a.level] || ALERT_ICON.warning}</span>
+      <span class="txt"><span class="t">${esc(a.title)}</span>
+        <span class="d">${esc(a.detail||'')}</span></span>
+      <span class="lvl">${esc(a.level)}</span>
+    </div>`).join('') + `</div>`;
 }
 
 function renderNow(d, load, cap, occ, req, loadOk){
@@ -1149,8 +1190,16 @@ function renderNow(d, load, cap, occ, req, loadOk){
   const maxc = cap.max_concurrency ?? 0;
   const pct = maxc ? Math.min(100, running/maxc*100) : 0;
   const ids = live.map(m=>m.id).join(' · ');
-  if (has('loading'))        renderVerdict('warn', 'cargando modelo', ids);
-  else if (running>0)        renderVerdict('good', 'decodificando', `${running} en vuelo · ${ids}`);
+  const alerts = (state.alerts && state.alerts.alerts) || [];
+  const worst = alerts.reduce((w,a)=> (ALERT_RANK[a.level]||0) > (ALERT_RANK[w]||0) ? a.level : w, null);
+  if (worst){
+    const n = alerts.length;
+    renderVerdict(worst==='critical'?'bad':'warn',
+      n===1 ? (alerts[0].title) : `${n} alertas`,
+      n===1 ? '' : alerts.map(a=>a.title).join(' · '));
+  }
+  else if (has('loading')) renderVerdict('warn', 'cargando modelo', ids);
+  else if (running>0)     renderVerdict('good', 'decodificando', `${running} en vuelo · ${ids}`);
   else if (has('suspended')) renderVerdict('idle', 'suspendido · vive en el host', ids);
   else if (has('sleeping'))  renderVerdict('idle', 'dormido · despierta al próximo request', ids);
   else if (live.length)      renderVerdict('good', 'en reposo', ids);
@@ -1160,6 +1209,15 @@ function renderNow(d, load, cap, occ, req, loadOk){
   const tpTail = (state.charts.tp?.data.datasets[0].data)||[];
   const liveTps = running>0 ? (tpTail[tpTail.length-1] || null) : null;
   const tps = liveTps ?? (last ? last.completion_tokens/last.decode_s : null);
+  // La referencia aprendida del modelo cargado: mediana del agregado del
+  // servidor. Sirve para leer "está raro" aunque no haya alerta todavía.
+  // Se busca por el modelo CARGADO, no por la lista de ids: con dos modelos
+  // en memoria el nombre compuesto no existe en el índice.
+  const refId = (live.find(m=>m.status?.value==='loaded') || live[0] || {}).id;
+  const bl = refId ? (((state.alerts && state.alerts.models) || {})[refId]) : null;
+  const blTxt = bl
+    ? (bl.samples >= 12 ? bl.median_tok_s.toFixed(0) : `aprendiendo ${bl.samples}/12`)
+    : '—';
   const kv = occ.device_main_kv_tokens, kvcap = cap.kv_capacity_tokens;
   const kvPct2 = (kv!=null && kvcap) ? kv/kvcap*100 : null;
   const kvCol2 = kvPct2==null ? '#fff' : kvPct2>=95?'var(--red)':kvPct2>=85?'var(--amber)':'var(--teal)';
@@ -1169,6 +1227,7 @@ function renderNow(d, load, cap, occ, req, loadOk){
     <div class="now-m"><span class="k">en vuelo</span><b style="color:${(req.running||0)>0?'var(--teal)':'#fff'}">${req.running??0}</b></div>
     <div class="now-m"><span class="k">en cola</span><b style="color:${(req.waiting||0)>0?'var(--amber)':'#fff'}">${req.waiting??occ.waiting??0}</b></div>
     <div class="now-m"><span class="k">${liveTps!=null?'gen ahora':'último gen'}</span><b style="color:${liveTps!=null?'var(--teal)':'#fff'}">${tps!=null?tps.toFixed(1):'—'} <small>tok/s</small></b></div>
+    <div class="now-m" title="mediana de la velocidad del servidor para este modelo, aprendida de sus últimas muestras"><span class="k">referencia</span><b style="color:${bl?'var(--muted)':'#fff'}">${blTxt} <small>${bl&&bl.samples>=12?'tok/s':''}</small></b></div>
     <div class="now-m"><span class="k">KV device</span><b style="color:${kvCol2}">${kv!=null?kv.toLocaleString():'—'} <small>tok</small></b>
       ${kvcap?`<div class="progress"><i style="width:${Math.min(100,kv/kvcap*100).toFixed(0)}%"></i></div>`:''}</div>`;
 }
@@ -1358,6 +1417,22 @@ function openModelCfg(m){
   $('#modal-cfg').style.display = 'flex';
 }
 
+// Alertas y referencias aprendidas. El backend corre su propio muestreo cada
+// 2 s aunque nadie mire la página; esto sólo lee el resultado.
+async function loadAlerts(){
+  let d;
+  try{ d = await api('/api/alerts'); }
+  catch(e){ return; }
+  if (!d || !d.ok) return;
+  // Las alertas y la referencia cambian mucho más lento que el estado: no
+  // hay que re-renderizar si el contenido es el mismo.
+  const sig = JSON.stringify([d.alerts, d.models]);
+  if (sig === state.alertsSig) return;
+  state.alertsSig = sig;
+  state.alerts = d;
+  renderAlerts(d);
+}
+
 async function loadLive(){
   const errhost = $('#livebody');
   let d;
@@ -1409,6 +1484,7 @@ async function loadLive(){
   try{ gpu = await api('/api/gpu'); }catch(e){}
 
   renderRail(d, gpu, loadOk);
+  loadAlerts();
   renderNow(d, load, cap, occ, req, loadOk);
 
   // Tiles: ratio acotado -> barra; tasa -> sparkline. El tono dice si hay que

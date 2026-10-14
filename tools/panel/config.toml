@@ -6,6 +6,9 @@
 [panel]
 host = "0.0.0.0"
 port = 9080
+# Referencia de velocidad por modelo y alertas. Es estado, no configuración:
+# el panel lo crea y lo actualiza solo, así que no hay que tocarlo a mano.
+state_file = "/root/ninfer-lab/panel-state.json"
 # Detrás de NPM: cambiar host a "127.0.0.1" y dejar que el proxy exponga.
 
 [ninfer]
