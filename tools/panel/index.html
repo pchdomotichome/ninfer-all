@@ -97,7 +97,7 @@ form.run{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;padding:16px 
 form.run .grow{flex:1;min-width:160px}
 form.run label.f input,form.run label.f select{width:100%}
 .two{display:grid;grid-template-columns:1.6fr 1fr;gap:16px}
-.two>div{min-width:0}
+.two>div,.two>section{min-width:0}
 @media(max-width:1100px){.two{grid-template-columns:1fr}}
 
 /* Tablas avanzadas */
@@ -156,10 +156,6 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .empty b{display:block;color:var(--text);font-size:14.5px;margin-bottom:6px}
 .empty .hint{font-size:12px;margin-top:10px;color:var(--dim)}
 .empty .hint code{background:var(--panel2);padding:2px 7px;border-radius:4px;font:11.5px var(--mono);color:var(--teal)}
-
-/* En vivo: Dashboard */
-#pg-dash .live-sec{background:linear-gradient(180deg,rgba(16,28,24,0.6) 0%,var(--panel) 260px);border-color:rgba(52,211,153,0.25)}
-#pg-dash .live-sec .sechead{background:linear-gradient(180deg,rgba(20,38,30,0.8) 0%,var(--panel2) 100%);border-color:rgba(52,211,153,0.2)}
 
 /* KPI Metric Tiles */
 .tiles{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}
@@ -244,6 +240,59 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .code-tab{background:transparent;border:none;color:var(--dim);font:600 11px var(--mono);padding:4px 10px;border-radius:4px;cursor:pointer}
 .code-tab.active{background:var(--panel3);color:var(--teal)}
 
+/* ── Rail fijo: header + rail comparten el sticky ─────────────────────── */
+.topwrap{position:sticky;top:0;z-index:20}
+.topwrap header{position:static}
+.rail{display:flex;align-items:center;gap:18px;padding:0 24px;height:40px;
+  background:rgba(16,22,34,0.92);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--line-subtle);font:12px var(--mono);white-space:nowrap;overflow-x:auto}
+.rail .item{display:flex;align-items:center;gap:7px;flex:none}
+.rail .lbl{color:var(--text-muted);font-weight:700;font-size:10px;text-transform:uppercase;letter-spacing:.7px}
+.rail .val{color:#fff;font-variant-numeric:tabular-nums}
+.rail .val .dim{color:var(--dim)}
+.rail .push{flex:1}
+.gauge{width:100px;height:6px;border-radius:3px;background:rgba(255,255,255,0.07);overflow:hidden;flex:none}
+.gauge i{display:block;height:100%;background:var(--teal);transition:width .4s}
+.gauge.warn i{background:var(--amber)}
+.gauge.bad i{background:var(--red)}
+.dot.off{background:var(--dimmer);box-shadow:none}
+.dot.blue{background:var(--blue);box-shadow:0 0 8px var(--blue)}
+.sechead h2 .dot{margin-right:3px}
+
+/* ── Banda "Ahora" ────────────────────────────────────────────────────── */
+.now-metrics{display:flex;flex-wrap:wrap;gap:12px 28px;padding:14px 18px}
+.now-m{min-width:104px}
+.now-m .k{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)}
+.now-m b{display:block;font:700 20px var(--mono);color:#fff;letter-spacing:-.5px;margin-top:3px}
+.now-m b small{font-size:11px;font-weight:500;color:var(--dim)}
+.now-m .progress{height:4px;background:rgba(255,255,255,0.06);border-radius:2px;margin-top:8px;overflow:hidden}
+.now-m .progress i{display:block;height:100%;background:linear-gradient(90deg,var(--teal-dark),var(--teal));transition:width .5s}
+#now-state{color:#fff}
+
+/* ── Tiles: tono + sparkline ──────────────────────────────────────────── */
+.tile.info .v{color:var(--blue)}
+.tile.warn .v{color:var(--amber)}
+.tile.bad .v{color:var(--red)}
+.tile .v small{font-size:11px;font-weight:500;color:var(--dim);letter-spacing:0}
+.tile .spark{display:block;width:100%;height:26px;margin-top:6px;color:var(--teal)}
+.tile .spark .area{opacity:.12}
+.tile .spark .line{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linejoin:round;
+  stroke-linecap:round;vector-effect:non-scaling-stroke}
+.tile.info .spark{color:var(--blue)}
+
+/* ── Filas de modelos (reemplazan las cards) ──────────────────────────── */
+.model-rows{display:flex;flex-direction:column}
+.model-row{display:grid;grid-template-columns:9px minmax(0,1fr) auto auto;gap:12px;align-items:center;
+  padding:9px 18px;border-bottom:1px solid var(--line-subtle);font:12px var(--mono);transition:background .12s}
+.model-row:hover{background:rgba(56,189,248,0.05)}
+.model-row.live{background:rgba(52,211,153,0.045)}
+.model-row .nm{color:#fff;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-row .mt{color:var(--dim);font-size:11px;white-space:nowrap}
+.model-row .acts{display:flex;gap:6px}
+.model-row .acts button{padding:3px 9px;font-size:11px}
+.slots-host:empty{display:none}
+section.tight{margin:0}
+
 :focus-visible{outline:2px solid var(--teal);outline-offset:2px;border-radius:4px}
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{transition:none !important;animation:none !important}
@@ -251,6 +300,7 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 </style>
 </head>
 <body>
+<div class="topwrap">
 <header>
   <div class="brand">
     <div class="brand-logo">
@@ -268,58 +318,70 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
     <button data-pg="convert"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Convert</button>
   </nav>
 </header>
+<div class="rail" id="rail"></div>
+</div>
 <main>
   <div id="banner"></div>
 
   <!-- ═══════════════ DASHBOARD ═══════════════ -->
   <div class="pg active" id="pg-dash">
-    <div class="strip" id="strip"></div>
-
-    <section class="live-sec" id="live">
+    <!-- Banda 1: Ahora — qué está haciendo el motor ahora mismo -->
+    <section id="now">
       <div class="sechead">
-        <h2>En vivo</h2>
-        <span class="note" id="livenote"></span>
+        <h2><span class="dot off" id="now-dot"></span><span id="now-state">sin modelo</span></h2>
+        <span class="note" id="now-note"></span>
         <span class="spacer"></span>
         <span class="note" id="liveupd"></span>
       </div>
-      <div id="livebody" style="padding:15px"></div>
+      <div class="now-metrics" id="now-metrics"></div>
+      <div id="livebody"></div>
+    </section>
 
-      <div class="charts">
-        <div class="chartbox"><div class="k">Throughput (tok/s)</div>
-          <div class="wins" id="w-tp"></div>
-          <div class="canvas-wrap"><canvas id="c-tp"></canvas></div></div>
-        <div class="chartbox"><div class="k">Prefill (tok/s)</div>
-          <div class="wins" id="w-decode"></div>
-          <div class="canvas-wrap"><canvas id="c-decode"></canvas></div></div>
-        <div class="chartbox"><div class="k">VRAM (GiB)</div>
-          <div class="wins" id="w-vram"></div>
-          <div class="canvas-wrap"><canvas id="c-vram"></canvas></div></div>
-        <div class="chartbox"><div class="k">GPU util %</div>
-          <div class="wins" id="w-gpu"></div>
-          <div class="canvas-wrap"><canvas id="c-gpu"></canvas></div></div>
+    <!-- Banda 2: métricas + gráficas de tasas -->
+    <section id="metrics">
+      <div class="sechead"><h2>Métricas</h2><span class="note" id="livenote"></span></div>
+      <div style="padding:15px">
+        <div class="tiles" id="tiles"></div>
+        <div class="slots-host" id="slots-host"></div>
+        <div class="charts">
+          <div class="chartbox"><div class="k">Throughput (tok/s)</div>
+            <div class="wins" id="w-tp"></div>
+            <div class="canvas-wrap"><canvas id="c-tp"></canvas></div></div>
+          <div class="chartbox"><div class="k">Prefill (tok/s)</div>
+            <div class="wins" id="w-decode"></div>
+            <div class="canvas-wrap"><canvas id="c-decode"></canvas></div></div>
+        </div>
       </div>
     </section>
 
-    <!-- Requests recientes: la tabla del 8090 que te gustó, con spec-decode. -->
-    <section id="reqs">
-      <div class="sechead">
-        <h2>Requests recientes</h2>
-        <span class="note" id="reqs-note"></span>
-        <span class="spacer"></span>
-        <button id="q-reqmore" style="white-space:nowrap">Más columnas</button>
-      </div>
-      <div style="overflow-x:auto">
-      <table id="tbl-req">
-        <thead><tr id="thead-req"></tr></thead>
-        <tbody id="tbody-req"></tbody>
-      </table>
-      </div>
-      <div class="empty" id="empty-req" hidden>Sin requests todavía — corré algo o esperá a que el servidor procese.</div>
-    </section>
+    <!-- Banda 3: requests | modelos (filas, no cards) -->
+    <div class="two">
+      <section id="reqs" class="tight">
+        <div class="sechead">
+          <h2>Requests recientes</h2>
+          <span class="note" id="reqs-note"></span>
+          <span class="spacer"></span>
+          <button id="q-reqmore" style="white-space:nowrap">Más columnas</button>
+        </div>
+        <div style="overflow-x:auto">
+        <table id="tbl-req">
+          <thead><tr id="thead-req"></tr></thead>
+          <tbody id="tbody-req"></tbody>
+        </table>
+        </div>
+        <div class="empty" id="empty-req" hidden>Sin requests todavía — corré algo o esperá a que el servidor procese.</div>
+      </section>
+
+      <section id="modelsec" class="tight">
+        <div class="sechead"><h2>Modelos</h2><span class="note" id="modelnote"></span></div>
+        <div class="model-rows" id="modelrows"></div>
+      </section>
+    </div>
   </div>
 
   <!-- ═══════════════ BENCHMARK ═══════════════ -->
   <div class="pg" id="pg-bench">
+    <div class="strip" id="strip"></div>
     <section id="bench">
       <div class="sechead">
         <h2>Benchmarks / AIPerf</h2>
@@ -883,7 +945,6 @@ const LIVE_TILES = [
   {k:'admitted', label:'admitidos', max:'max_admitted_requests'},
   {k:'waiting', label:'en cola', max:null},
   {k:'device_main_kv_tokens', label:'KV device', max:'kv_capacity_tokens', unit:'tok'},
-  {k:'device_state_slots', label:'slots device', max:'device_state_slots'},
 ];
 
 function initCharts(){
@@ -900,7 +961,6 @@ function initCharts(){
     options:def});
   state.charts = {
     tp: mk('c-tp','#38bdf8','decode tok/s'), decode: mk('c-decode','#60a5fa','prefill tok/s'),
-    vram: mk('c-vram','#34d399','VRAM GiB'), gpu: mk('c-gpu','#fbbf24','GPU util %'),
   };
   for (const [k,c] of Object.entries(state.charts)){
     const wins = document.getElementById('w-'+k);
@@ -936,16 +996,190 @@ function chartPush(ch, label, v, t){
   ch.update('none');
 }
 
+// El router en reposo responde 404 model_not_found a /v1/load, /stats y /slots:
+// no es un error, es "ningún modelo cargado". Sin modelo no hay ocupación ni KV.
+
+function sparkSvg(vals){
+  const v = (vals||[]).map(x=>x==null?0:x);
+  if (v.length < 2) return '<svg class="spark" viewBox="0 0 100 26" preserveAspectRatio="none"></svg>';
+  const top = Math.max(...v, 1e-9);
+  const pts = v.map((x,i)=>[(i/(v.length-1))*100, 24-(x/top)*20]);
+  const line = pts.map((p,i)=>`${i?'L':'M'}${p[0].toFixed(2)},${p[1].toFixed(2)}`).join('');
+  return `<svg class="spark" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+    <path class="area" d="${line}L100,26L0,26Z"/><path class="line" d="${line}"/></svg>`;
+}
+
+function liveModels(d){
+  return ((d.models?.data)||[]).filter(m=>
+    ['loaded','sleeping','suspended','loading'].includes(m.status?.value));
+}
+
+function renderRail(d, gpu, loadOk){
+  const live = liveModels(d);
+  const load = loadOk ? (d.load||{}) : {};
+  const cap = load.capacity||{}, occ = load.occupancy||{}, req = load.requests||{};
+  // El modelo corre en un device puntual (--device N del preset): el gauge debe
+  // mostrar ESA GPU, no la primera del host.
+  const loadedModel = live.find(m=>m.status?.value==='loaded') || live[0];
+  const dev = loadedModel ? Number(modelArgs(loadedModel).device) : NaN;
+  const g = gpu && gpu.online && gpu.gpus.length
+    ? (gpu.gpus.find(x=>x.index===dev) || gpu.gpus[0]) : null;
+  const vramPct = g ? g.mem_used_mib/g.mem_total_mib*100 : null;
+  const vramCls = vramPct==null ? '' : vramPct>=95 ? 'bad' : vramPct>=85 ? 'warn' : '';
+  const kvPct = (occ.device_main_kv_tokens!=null && cap.kv_capacity_tokens)
+    ? occ.device_main_kv_tokens/cap.kv_capacity_tokens*100 : null;
+  const tempCol = g ? (g.temp_c>=85?'var(--red)':g.temp_c>=75?'var(--amber)':'#fff') : '';
+  $('#rail').innerHTML = `
+    <span class="item"><span class="dot ${live.length?'ok':'off'}"></span>
+      <span class="val">${live.length?esc(live.map(m=>m.id).join(', ')):'sin modelo'}</span></span>
+    <span class="item"><span class="lbl">VRAM</span>
+      <span class="gauge ${vramCls}"><i style="width:${(vramPct??0).toFixed(0)}%"></i></span>
+      <span class="val">${g?(g.mem_used_mib/1024).toFixed(1):'—'}<span class="dim">/${g?(g.mem_total_mib/1024).toFixed(0):'—'}G</span></span></span>
+    <span class="item"><span class="lbl">KV</span>
+      <span class="gauge ${kvPct!=null&&kvPct>90?'warn':''}"><i style="width:${(kvPct??0).toFixed(0)}%"></i></span>
+      <span class="val">${occ.device_main_kv_tokens!=null?occ.device_main_kv_tokens.toLocaleString():'—'}<span class="dim">/${cap.kv_capacity_tokens!=null?cap.kv_capacity_tokens.toLocaleString():'—'}</span></span></span>
+    ${g?`<span class="item"><span class="lbl">GPU ${g.index}</span>
+      <span class="val">${g.util.toFixed(0)}%</span>
+      <span class="val" style="color:${tempCol}">${g.temp_c.toFixed(0)}°C</span>
+      <span class="val">${g.power_w.toFixed(0)}W</span></span>`:''}
+    <span class="item"><span class="lbl">en vuelo</span>
+      <span class="val" style="color:${(req.running||0)>0?'var(--teal)':'var(--dim)'}">${req.running??0}</span></span>
+    <span class="push"></span>
+    ${live.length?`<button id="rail-unload" style="padding:3px 10px;font-size:11px">Descargar todo</button>`:''}`;
+  const ub = $('#rail-unload');
+  if (ub) ub.onclick = async () => {
+    ub.disabled = true; ub.textContent = 'descargando…';
+    for (const m of live){
+      try{ await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({action:'unload',model:m.id})}); }catch(e){}
+    }
+    loadLive();
+  };
+}
+
+function renderNow(d, load, cap, occ, req, loadOk){
+  const live = liveModels(d);
+  const loading = live.some(m=>m.status?.value==='loading');
+  const running = occ.running ?? req.running ?? 0;
+  const maxc = cap.max_concurrency ?? 0;
+  const pct = maxc ? Math.min(100, running/maxc*100) : 0;
+  let txt, cls;
+  if (loading){ txt='cargando'; cls='warn'; }
+  else if (running>0){ txt='decodificando'; cls='ok pulse'; }
+  else if (live.length){ txt='cargado, en reposo'; cls='ok'; }
+  else { txt='sin modelo'; cls='off'; }
+  $('#now-dot').className = 'dot ' + cls;
+  $('#now-state').textContent = txt;
+  $('#now-note').textContent = live.length
+    ? live.map(m=>m.id).join(' · ') : 'ningún modelo cargado — VRAM libre';
+
+  const last = (state.reqs||[]).find(r=>r.decode_s>0 && r.completion_tokens);
+  const tpTail = (state.charts.tp?.data.datasets[0].data)||[];
+  const liveTps = running>0 ? (tpTail[tpTail.length-1] || null) : null;
+  const tps = liveTps ?? (last ? last.completion_tokens/last.decode_s : null);
+  const kv = occ.device_main_kv_tokens, kvcap = cap.kv_capacity_tokens;
+  $('#now-metrics').innerHTML = `
+    <div class="now-m"><span class="k">carriles</span><b>${maxc?`${running}/${maxc}`:'—'}</b>
+      ${maxc?`<div class="progress"><i style="width:${pct}%"></i></div>`:''}</div>
+    <div class="now-m"><span class="k">en vuelo</span><b>${req.running??0}</b></div>
+    <div class="now-m"><span class="k">en cola</span><b>${req.waiting??occ.waiting??0}</b></div>
+    <div class="now-m"><span class="k">${liveTps!=null?'gen ahora':'último gen'}</span><b>${tps!=null?tps.toFixed(1):'—'} <small>tok/s</small></b></div>
+    <div class="now-m"><span class="k">KV device</span><b>${kv!=null?kv.toLocaleString():'—'} <small>tok</small></b>
+      ${kvcap?`<div class="progress"><i style="width:${Math.min(100,kv/kvcap*100).toFixed(0)}%"></i></div>`:''}</div>`;
+}
+
+function slotsHtml(d, occ){
+  const slots = d.slots || [];
+  if (!slots.length) return '';
+  return `<div class="slots-strip">
+      <div class="slots-strip-head">
+        <b><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg> Paged KV Cache — Slots de Ejecución (${slots.length} carriles)</b>
+        <span style="color:var(--dim)">${occ.device_main_kv_tokens != null ? occ.device_main_kv_tokens.toLocaleString() + ' tok activos' : ''}</span>
+      </div>
+      <div class="slots-grid">
+        ${slots.map(sl => {
+          const isBusy = sl.is_processing, isRetained = sl.retained;
+          const stateCls = isBusy ? 'busy' : isRetained ? 'retained' : '';
+          const statusTxt = isBusy ? 'decodificando' : isRetained ? 'en caché' : 'libre';
+          const statusCls = isBusy ? 'active' : isRetained ? 'cached' : 'free';
+          const tok = sl.n_prompt_tokens || sl.n_prompt_tokens_cache || 0;
+          return `<div class="slot-cell ${stateCls}">
+            <div class="slot-num">Slot ${sl.id}</div>
+            <div class="slot-status ${statusCls}">● ${statusTxt}</div>
+            <div class="slot-meta" title="${tok} tok prompt">${tok ? tok + ' tok' : '—'}</div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+function modelArgs(m){
+  const a = (m.status?.args)||[];
+  const get = k => { const i=a.indexOf(k); return i>=0 ? a[i+1] : null; };
+  const has = k => a.includes(k);
+  const spec = get('--spec'), draft = get('--draft-tokens');
+  return { ctx: get('--max-context'), device: get('--device'),
+           spec: spec ? spec + (draft?'/'+draft:'') : (has('--no-spec')?'off':null),
+           vision: has('--vision') };
+}
+
+// Una fila por modelo, no una card. El cargado primero; el resto es catálogo.
+function modelRows(d, req){
+  const models = (d.models?.data)||[];
+  if (!models.length) return '<div class="empty" style="padding:18px">El servidor no declara modelos.</div>';
+  const order = {loaded:0, loading:1, sleeping:2, suspended:3, unloaded:4};
+  const rows = [...models].sort((a,b)=>
+    (order[a.status?.value]??9)-(order[b.status?.value]??9) || a.id.localeCompare(b.id));
+  return rows.map(m=>{
+    const st = m.status?.value || 'unloaded';
+    const ar = modelArgs(m);
+    const dotCls = st==='loaded'?'ok':st==='loading'?'warn':st==='sleeping'?'warn':st==='suspended'?'blue':'off';
+    const busy = (req.running||0) > 0 && st === 'loaded';
+    const act = st==='loaded'
+      ? `<button data-act="sleep" data-model="${esc(m.id)}" ${busy?'disabled':''} title="${busy?'Hay requests en vuelo':''}">Dormir</button>
+         <button data-act="unload" data-model="${esc(m.id)}" class="danger">Descargar</button>`
+      : st==='sleeping' ? `<button data-act="load" data-model="${esc(m.id)}">Despertar</button>`
+      : st==='suspended' ? `<button data-act="resume" data-model="${esc(m.id)}">Reanudar</button>`
+      : st==='loading' ? `<button disabled>cargando…</button>`
+      : `<button data-act="load" data-model="${esc(m.id)}">Cargar</button>`;
+    const meta = `ctx ${ar.ctx??'—'}${ar.spec?` · ${ar.spec}`:''}${ar.vision?' · vision':''}`;
+    return `<div class="model-row ${st!=='unloaded'?'live':''}">
+      <span class="dot ${dotCls}"></span>
+      <span class="nm" title="${esc(m.id)}">${esc(m.id)}</span>
+      <span class="mt">${meta}</span>
+      <span class="acts">${act}</span>
+    </div>`;
+  }).join('');
+}
+
+function wireModelActions(){
+  $('#modelrows').querySelectorAll('button[data-act]').forEach(b=>{
+    b.onclick = async () => {
+      b.disabled = true;
+      try{
+        const r = await api('/api/control', {method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({action:b.dataset.act, model:b.dataset.model})});
+        if (r.error) flash(r.error.startsWith('{') ? r.error : 'model_busy', true);
+      }catch(e){ flash(e.message, true); }
+      loadLive();
+    };
+  });
+}
+
 async function loadLive(){
-  const body = $('#livebody');
+  const errhost = $('#livebody');
   let d;
   try{ d = await api('/api/live'); }
-  catch(e){ body.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  catch(e){ errhost.innerHTML = `<div class="err" style="margin:15px">${esc(e.message)}</div>`; return; }
   if (!d.online){
-    body.innerHTML = `<div class="err">El servidor <code>${esc(d.url)}</code> no responde.</div>`;
-    $('#liveupd').textContent = 'sin conexión';
+    errhost.innerHTML = `<div class="err" style="margin:15px">El servidor <code>${esc(d.url)}</code> no responde.</div>`;
+    $('#now-state').textContent = 'sin conexión';
+    $('#now-dot').className = 'dot bad';
     return;
   }
+  errhost.innerHTML = '';
+
   // Backfill: las gráficas arrancan con la historia del jsonl, no vacías.
   if (!state.histLoaded){
     state.histLoaded = true;
@@ -960,117 +1194,71 @@ async function loadLive(){
       }
     }catch(e){}
   }
-  const load = d.load||{}, cap = load.capacity||{}, occ = load.occupancy||{};
-  const req = load.requests||{};
-  const gib = b => b==null ? '—' : (b/1073741824).toFixed(1)+' GiB';
+  const loadOk = !!d.load && !d.load.error;
+  const load = loadOk ? d.load : {};
+  const cap = load.capacity||{}, occ = load.occupancy||{}, req = load.requests||{};
   const t = Date.now()/1000;
   const lbl = new Date().toLocaleTimeString('es-AR',{hour12:false});
 
-  // series desde /v1/load counters + gpu
-  const c = load.counters||{};
-  if(state.series.counters.last){
-    const dt = t - state.series.counters.lastT || 1;
-    const dtok = (c.committed_decode_tokens||0) - state.series.counters.lastDT;
-    chartPush(state.charts.tp, lbl, dtok<=0?0:dtok/dt, t);
-    const ptok = (c.computed_prefill_tokens||0) - state.series.counters.lastPT;
-    chartPush(state.charts.decode, lbl, ptok<=0?0:ptok/dt, t);
+  // series desde /v1/load counters. `lastDT !== undefined` es el "hay muestra
+  // previa": el objeto se reemplaza entero, así que no existe una clave `last`.
+  if (loadOk){
+    const c = load.counters||{};
+    if(state.series.counters.lastDT !== undefined){
+      const dt = t - state.series.counters.lastT || 1;
+      const dtok = (c.committed_decode_tokens||0) - state.series.counters.lastDT;
+      chartPush(state.charts.tp, lbl, dtok<=0?0:dtok/dt, t);
+      const ptok = (c.computed_prefill_tokens||0) - state.series.counters.lastPT;
+      chartPush(state.charts.decode, lbl, ptok<=0?0:ptok/dt, t);
+    }
+    state.series.counters = {lastDT: c.committed_decode_tokens||0,
+                             lastPT: c.computed_prefill_tokens||0, lastT: t};
   }
-  state.series.counters = {lastDT: c.committed_decode_tokens||0,
-                           lastPT: c.computed_prefill_tokens||0, lastT: t};
   let gpu=null;
   try{ gpu = await api('/api/gpu'); }catch(e){}
-  if(gpu && gpu.online && gpu.gpus.length){
-    const g0 = gpu.gpus[0];
-    chartPush(state.charts.vram, lbl, g0.mem_used_mib/1024, t);
-    chartPush(state.charts.gpu, lbl, g0.util, t);
-  }
 
+  renderRail(d, gpu, loadOk);
+  renderNow(d, load, cap, occ, req, loadOk);
+
+  // Tiles: ratio acotado -> barra; tasa -> sparkline. El tono dice si hay que
+  // mirarlo (normal, ámbar >75%, rojo >90%).
   const tiles = LIVE_TILES.map(ti => {
     const v = occ[ti.k] ?? req[ti.k];
     const max = cap[ti.max] ?? occ[ti.max];
     const pct = (v!=null && max) ? Math.min(100, v/max*100) : null;
-    const hot = pct!=null && pct>90 ? 'warn' : '';
-    return `<div class="tile ${hot}">
+    const tone = pct==null ? '' : pct>90 ? 'bad' : pct>75 ? 'warn' : '';
+    return `<div class="tile ${tone}">
       <div class="k">${ti.label}</div>
-      <div class="v">${v??'—'}</div>
+      <div class="v">${v??'—'}${ti.unit?` <small>${ti.unit}</small>`:''}</div>
       <div class="s">${max!=null ? `de ${max}` : ''}</div>
       ${pct!=null?`<div class="bar"><i style="width:${pct.toFixed(0)}%"></i></div>`:''}
     </div>`;
   }).join('');
 
-  const gpuTiles = gpu && gpu.online && gpu.gpus.length ? gpu.gpus.map(g=>
-    `<div class="tile"><div class="k">GPU ${g.index}</div>
-      <div class="v">${g.util.toFixed(0)}%</div>
+  const gpuTiles = gpu && gpu.online && gpu.gpus.length ? gpu.gpus.map(g=>{
+    const tone = g.temp_c>=85?'bad':g.temp_c>=75?'warn':'';
+    return `<div class="tile ${tone}"><div class="k">GPU ${g.index}</div>
+      <div class="v">${g.util.toFixed(0)}<small>%</small></div>
       <div class="s">${(g.mem_used_mib/1024).toFixed(1)}/${(g.mem_total_mib/1024).toFixed(0)} GiB ·
-        ${g.temp_c.toFixed(0)}°C · ${g.power_w.toFixed(0)}W</div></div>`).join('') : '';
+        ${g.temp_c.toFixed(0)}°C · ${g.power_w.toFixed(0)}W</div>
+      <div class="bar"><i style="width:${g.util.toFixed(0)}%"></i></div></div>`;
+  }).join('') : '';
 
-  const modelCards = ((d.models?.data)||[]).map(m=>{
-    const st = (m.status?.value) || 'unloaded';
-    const badge = ({loaded:'loaded',sleeping:'sleeping',suspended:'suspended',
-                    unloaded:'unloaded',loading:'loading'}[st]) || 'unloaded';
-    const busy = (req.running||0) > 0 && st === 'loaded';
-    return `<div class="model">
-      <div class="top"><b>${esc(m.id)}</b>
-        <span class="badge ${badge}">${st}</span></div>
-      <div class="meta">
-        <span>contexto</span><span>${m.max_model_len??'—'}</span>
-      </div>
-      <div class="acts">
-        ${st==='loaded' ? `<button data-act="sleep" data-model="${esc(m.id)}"
-            ${busy?'disabled':''} title="${busy?'Hay requests en vuelo':''}">Dormir</button>
-           <button data-act="unload" data-model="${esc(m.id)}"
-            style="color:var(--red);border-color:#4a2424">Descargar</button>`
-        : st==='sleeping' ? `<button data-act="load" data-model="${esc(m.id)}">Despertar</button>`
-        : st==='suspended' ? `<button data-act="resume" data-model="${esc(m.id)}">Reanudar</button>`
-        : `<button data-act="load" data-model="${esc(m.id)}">Cargar</button>`}
-      </div>
-    </div>`;
-  }).join('') || '<div class="empty" style="padding:18px">El servidor no declara modelos.</div>';
+  const tpData = (state.charts.tp?.data.datasets[0].data)||[];
+  const sparkTile = `<div class="tile info"><div class="k">Throughput</div>
+    <div class="v">${tpData.length?(tpData[tpData.length-1]||0).toFixed(0):'—'} <small>tok/s</small></div>
+    <div class="s">${state.win==='retained'?'retenido':state.win}</div>
+    ${sparkSvg(tpData.slice(-40))}</div>`;
 
-  // Slots strip visualization
-  const slots = d.slots || [];
-  const slotsHtml = slots.length ? `
-    <div class="slots-strip">
-      <div class="slots-strip-head">
-        <b><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg> Paged KV Cache — Slots de Ejecución (${slots.length} carriles)</b>
-        <span style="color:var(--dim)">${occ.device_main_kv_tokens != null ? occ.device_main_kv_tokens.toLocaleString() + ' tok activos' : ''}</span>
-      </div>
-      <div class="slots-grid">
-        ${slots.map(sl => {
-          const isBusy = sl.is_processing;
-          const isRetained = sl.retained;
-          const stateCls = isBusy ? 'busy' : isRetained ? 'retained' : '';
-          const statusTxt = isBusy ? 'decodificando' : isRetained ? 'en caché' : 'libre';
-          const statusCls = isBusy ? 'active' : isRetained ? 'cached' : 'free';
-          const tok = sl.n_prompt_tokens || sl.n_prompt_tokens_cache || 0;
-          return `<div class="slot-cell ${stateCls}">
-            <div class="slot-num">Slot ${sl.id}</div>
-            <div class="slot-status ${statusCls}">● ${statusTxt}</div>
-            <div class="slot-meta" title="${tok} tok prompt">${tok ? tok + ' tok' : '—'}</div>
-          </div>`;
-        }).join('')}
-      </div>
-    </div>` : '';
-
-  body.innerHTML = `
-    <div class="tiles">${tiles}${gpuTiles}</div>
-    ${slotsHtml}
-    <div class="models">${modelCards}</div>`;
+  // Sin modelo no hay ocupación ni KV que mostrar: esos tiles serían cuatro
+  // guiones. Quedan sólo los de GPU, que siempre tienen dato.
+  $('#tiles').innerHTML = sparkTile + (loadOk ? tiles : '') + gpuTiles;
+  $('#livenote').textContent = loadOk ? '' : 'sin modelo cargado — cargá uno para ver ocupación y KV';
+  $('#slots-host').innerHTML = slotsHtml(d, occ);
+  $('#modelrows').innerHTML = modelRows(d, req);
+  $('#modelnote').textContent = `${(d.models?.data||[]).length} en el catálogo`;
   $('#liveupd').textContent = 'actualizado ' + new Date().toLocaleTimeString('es-AR',{hour12:false});
-  $('#livenote').textContent = `${(d.models?.data||[]).length} modelo(s)`;
-
-  body.querySelectorAll('button[data-act]').forEach(b=>{
-    b.onclick = async () => {
-      b.disabled = true;
-      try{
-        const r = await api('/api/control', {method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({action:b.dataset.act, model:b.dataset.model})});
-        if (r.error) flash(r.error.startsWith('{') ? r.error : 'model_busy', true);
-      }catch(e){ flash(e.message, true); }
-      loadLive();
-    };
-  });
+  wireModelActions();
 }
 function flash(msg, bad){
   $('#banner').innerHTML = `<div class="${bad?'err':'ok-msg'}">${esc(msg)}</div>`;
