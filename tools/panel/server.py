@@ -1338,6 +1338,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html")
         if path == "/vendor-chart.umd.js":
             return self._static("vendor-chart.umd.js")
+        if path.startswith(("/js/", "/css/")):
+            return self._static(path.lstrip("/"))
         if path == "/api/config":
             return self._json(self.api.config())
         if path == "/api/engine":
@@ -1404,7 +1406,13 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"error": "ruta desconocida"}, 404)
 
     def _static(self, name: str):
-        path = HERE / name
+        # The name arrives from the URL now that /js and /css are served from a
+        # directory, so it can carry ../ or an absolute path. Resolve and refuse
+        # anything outside the panel's own directory.
+        root = HERE.resolve()
+        path = (root / name).resolve()
+        if path != root and root not in path.parents:
+            return self._json({"error": "ruta fuera del panel"}, 404)
         if not path.is_file():
             return self._json({"error": "falta " + name}, 404)
         body = path.read_bytes()
