@@ -113,7 +113,7 @@ def test_ingesta_prefiere_el_pooled_del_resumen():
 
 
 def test_ingesta_guarda_el_comando():
-    """Sin el argv exacto, una corrida no es reproducible ni comparable."""
+    """Without the exact argv a run is not reproducible nor comparable."""
     cfg = bench.load_config()
     spec = bench.RunSpec("spec", "spec_al_gsm8k", 1, "m")
     with tempfile.TemporaryDirectory() as tmp:
@@ -181,7 +181,7 @@ def test_ingesta_trae_el_retrato_del_servidor():
 
 
 def test_reingest_conserva_identidad():
-    """run_id y ts son identidad de la corrida, no medidas: no se recalculan.
+    """run_id and ts are run identity, not measurements: they are not recomputed.
 
     Works on a copy of the registry: real reingest is an operation
     destructiva (reescribe el append-only) y un check no puede tocar el real.

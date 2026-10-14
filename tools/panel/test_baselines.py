@@ -99,7 +99,7 @@ def main() -> int:
     b4.feed(sample(1100, running=0), now=2.0)
     check("m1" not in b4.rates, "en reposo no debe tomar muestras")
 
-    # --- 6. servidor caido: escala por muestras, no por una sola ------------
+    # --- 6. server down: scales by samples, not just one ------------
     b5 = Baselines(tmp())
     down = {"reachable": False, "load": None}
     b5.feed(down, now=1.0)

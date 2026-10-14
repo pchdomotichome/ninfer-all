@@ -14,13 +14,13 @@ state_file = "/root/ninfer-lab/panel-state.json"
 [ninfer]
 # Binary built from this checkout. `git describe` gives the version.
 binary = "/root/ninfer-all/build-sm86/apps/ninfer-serve"
-# Repo que compila ese binario: se guarda el rev en cada corrida del registro,
-# para poder comparar un baseline contra un fix.
+# Repo compiled into that binary: the rev is stored with each registry run,
+# to compare a baseline against a fix.
 repo = "/root/ninfer-all"
 url = "http://127.0.0.1:9081"
 api_key = ""
-# jsonl de requests del servidor (--request-log-jsonl): fuente de la tabla
-# de requests recientes del Dashboard.
+# Server requests jsonl (--request-log-jsonl): source of the table
+# of recent dashboard requests.
 log = "/root/ninfer-lab/logs/server.requests.jsonl"
 # Lab artifact catalog (artifact, size_gib, recipe, trust, formats).
 catalog = "/root/ninfer-lab/models.json"
@@ -38,7 +38,7 @@ datasets_dir = "/root/AIPerf/datasets"
 # Download of public HuggingFace datasets (AIPerf's cache).
 hf_cache = "/root/AIPerf/hf"
 # Per-model tokenizer from the router. Without an entry here the above default
-# que solo es correcto si el modelo es de esa familia (bug 2026-10-11).
+# which is only correct if the model belongs to that family (bug 2026-10-11).
 [aiperf.tokenizers]
 qwen35-9b = "/mnt/models_local/ninfer/checkpoints/qwen35-9b"
 apex35b-mtp = "/mnt/models_local/ninfer/checkpoints/qwen36-35b-config"

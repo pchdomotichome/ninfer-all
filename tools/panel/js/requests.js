@@ -63,7 +63,7 @@ function renderSpecPos(){
   }
   const groups = new Map();
   for (const r of rs){
-    const k = (r.spec_backend||'?')+' · ventana '+(r.draft_window??'?');
+    const k = (r.spec_backend||'?')+' · window '+(r.draft_window??'?');
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(r);
   }
@@ -96,7 +96,7 @@ function renderSpecPos(){
       <div class="spi">pos ${i}</div></div>`;
   }).join('') + `</div>`;
   const perStep = rounds ? accepted/rounds : 0;
-  note.textContent = `${key} · ${use.length} req · ${perStep.toFixed(2)} tok/ronda`
+  note.textContent = `${key} · ${use.length} req · ${perStep.toFixed(2)} tok/round`
     + (drafted ? ` · ${(accepted/drafted*100).toFixed(0)}% de los drafts` : '');
 }
 

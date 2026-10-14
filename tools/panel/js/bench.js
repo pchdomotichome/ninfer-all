@@ -3,7 +3,7 @@ import { loadConvertFiles, syncDelCtl } from './convert.js';
 
 const COLS = [
   // The ones needed to decide, always on screen.
-  {k:'model',      t:'modelo',       l:true,  f:r => r.model},
+  {k:'model',      t:'model',       l:true,  f:r => r.model},
   {k:'engine',     t:'motor',        l:true,  f:r => (r.server?.binary)||'—'},
   {k:'spec',       t:'spec',         l:true,  f:r => r.server?.spec_backend
       ? r.server.spec_backend + (r.server.draft_depth ? '/'+r.server.draft_depth : '') : 'none'},
@@ -259,7 +259,7 @@ function detailRow(r){
   return `<tr class="detail"><td colspan="99"><div class="detailbox">
     <div class="dgroup"><h4>Server</h4><dl class="kv">
       <dt>motor</dt><dd>${esc(s.binary||'—')}</dd>
-      <dt>modelo</dt><dd>${esc(s.model||'—')}</dd>
+      <dt>model</dt><dd>${esc(s.model||'—')}</dd>
       <dt>carriles</dt><dd>${s.slots??'—'}</dd>
       <dt>contexto</dt><dd>${s.max_context??'—'}</dd>
       <dt>spec</dt><dd>${!s.binary ? '<span class="muted">—</span>'

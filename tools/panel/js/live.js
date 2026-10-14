@@ -2,7 +2,7 @@ import { $, state, esc, num, api, flash, refresh } from './core.js';
 import { modelArgs, modelRows, renderQuickLoad, wireModelRows, SVG_GEAR } from './models.js';
 
 const LIVE_TILES = [
-  {k:'running', label:'corriendo', max:'max_concurrency'},
+  {k:'running', label:'running', max:'max_concurrency'},
   {k:'admitted', label:'admitidos', max:'max_admitted_requests'},
   {k:'waiting', label:'en cola', max:null},
   {k:'device_main_kv_tokens', label:'KV device', max:'kv_capacity_tokens', unit:'tok'},

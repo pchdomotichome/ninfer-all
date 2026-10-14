@@ -189,7 +189,7 @@ async function hfDl(el){
     state.download = {run_id:r.run_id, model, quant: atob(row.dataset.quant)};
     const badge = row.querySelector('.hfbadge');
     badge.innerHTML = '⬇ 0%';
-    flash(`Descargando ${files.length} archivo(s) (${fmtSize(total)})…`);
+    flash(`Downloading ${files.length} file(s) (${fmtSize(total)})…`);
     pollDownload();
   }catch(e){ flash('no se pudo lanzar la descarga: ' + e.message, true); }
 }

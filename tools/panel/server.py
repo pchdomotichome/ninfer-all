@@ -72,7 +72,7 @@ class Baselines:
     still answers 200 and generates ten or twenty times slower.
     """
 
-    WINDOW = 300          # muestras retenidas por modelo (mediana robusta)
+    WINDOW = 300          # samples retained per model (robust median)
     MIN_SAMPLES = 12      # antes de esto no se alerta contra la referencia
     RATIO = 0.25          # bajo el 25% de la mediana -> sospechoso
     STREAK = 3            # seguidos, porque uno lento no significa nada
@@ -83,7 +83,7 @@ class Baselines:
     def __init__(self, path: Path):
         self.path = path
         self.lock = threading.Lock()
-        self.rates: dict = {}          # modelo -> [tok/s]
+        self.rates: dict = {}          # model -> [tok/s]
         self.last: tuple | None = None  # (tokens, t) del muestreo anterior
         self.streak = 0
         self.slow_streak = 0
