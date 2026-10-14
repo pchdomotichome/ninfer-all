@@ -13,7 +13,7 @@ export async function loadConvertFiles(){
     ]);
   }catch(e){ $('#convnote').textContent = 'no se pudo escanear: '+e.message; return; }
   const sa = $('#c-artifacts'), ss = $('#c-sources');
-  sa.innerHTML = '<option value="">— elegir artifact —</option>' +
+  sa.innerHTML = '<option value="">— pick an artifact —</option>' +
     d.artifacts.map(a=>`<option value="${esc(a.path)}">
       ${esc(a.path.split('/').pop())} (${fmtSize(a.size)})</option>`).join('');
   const srcOpts = [];
@@ -21,7 +21,7 @@ export async function loadConvertFiles(){
     ${esc(s.path.split('/').pop())} (${fmtSize(s.size)})</option>`);
   for (const c of d.checkpoints) srcOpts.push(`<option value="${esc(c.path)}">
     ${esc(c.path.split('/').pop())}</option>`);
-  ss.innerHTML = '<option value="">— elegir fuente —</option>' + srcOpts.join('');
+  ss.innerHTML = '<option value="">— pick a source —</option>' + srcOpts.join('');
   ss.onchange = syncDelCtl; syncDelCtl();
   // Real recipes from tools/convert, not hardcoded: MoE/35B/Flash-Next included.
   if (recs && recs.ok){
@@ -86,7 +86,7 @@ async function hfPick(encModel){
   $('#hf-results').innerHTML = `
     <div style="margin-bottom:10px;font:12px var(--mono);color:var(--dim)">
       <b style="color:var(--teal)">${esc(model)}</b> — pick a quantisation (✓ = already local, ⬇ = download):
-      <span style="float:right;cursor:pointer;color:var(--amber)" onclick="hfSearch(document.getElementById('hf-q').value)">← volver</span>
+      <span style="float:right;cursor:pointer;color:var(--amber)" onclick="hfSearch(document.getElementById('hf-q').value)">← back</span>
     </div>
     ${[...groups.entries()].map(([q, fs]) => {
       const total = fs.reduce((a,x)=>a+(x.size||0),0);
@@ -103,7 +103,7 @@ async function hfPick(encModel){
           <span style="font:10.5px var(--mono);color:var(--dim)">${fs.length>1?fs.length+' archivos · ':''}${fmtSize(total)}</span></span>
         <span style="display:flex;gap:8px;align-items:center;font:11px var(--mono)">
           <span class="hfbadge" style="color:${allLocal?'var(--green)':'var(--dim)'}">${allLocal?'✓ local':'🔗 HF'}</span>
-          ${allLocal?'':'<button data-act="dl" onclick="event.stopPropagation(); hfDl(this)" style="padding:3px 8px" title="Descargar al inbox">⬇</button>'}
+          ${allLocal?'':'<button data-act="dl" onclick="event.stopPropagation(); hfDl(this)" style="padding:3px 8px" title="Download to inbox">⬇</button>'}
         </span>
       </div>`;}).join('')}`;
 }
@@ -148,7 +148,7 @@ async function probeSource(src){
   const box = $('#c-flagsum');
   if (!src || src.startsWith('hf://')){ box.innerHTML = ''; state.probe = null; return; }
   state.probe = null;
-  box.innerHTML = '<span style="color:var(--dim)">analizando fuente…</span>';
+  box.innerHTML = '<span style="color:var(--dim)">analyzing source…</span>';
   let pr;
   if (probeCache[src]){ pr = probeCache[src]; }
   else{
@@ -233,7 +233,7 @@ export async function inspectArtifact(){
   const path = $('#c-artifacts').value.trim();
   const box = $('#convresult');
   if (!path) return;
-  box.innerHTML = '<div class="empty" style="padding:14px">Leyendo artifact…</div>';
+  box.innerHTML = '<div class="empty" style="padding:14px">Reading artifact…</div>';
   try{
     const r = await api('/api/convert/inspect?path=' + encodeURIComponent(path));
     if (r.error){ box.innerHTML = `<div class="err">${esc(r.error)}</div>`; return; }
@@ -285,7 +285,7 @@ export async function runConvert(){
       $('#c-run').disabled = false; return; }
     state.convert = {run_id:r.run_id, log:[]};
     $('#convlog').innerHTML = `<div class="live" style="border-radius:8px;padding:12px 14px">
-      <b style="color:var(--green)">● convirtiendo</b>
+      <b style="color:var(--green)">● converting</b>
       <span style="font:12px var(--mono);color:var(--dim)">${esc(r.run_id)}</span>
       <pre id="convlogpre" style="margin-top:8px;max-height:280px;overflow-y:auto"></pre>
     </div>`;

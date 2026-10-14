@@ -141,7 +141,7 @@ function renderRailModels(d, rates){
       <span class="sep">|</span>
       <span style="color:${memCol}">${bytes?(bytes/2**30).toFixed(1)+' GiB':'—'}</span>
       <span class="dim2">${on?'VRAM':'size'}</span>
-      ${!on && hostMiB>1 ? `<span class="dim2">· ${hostMiB.toFixed(0)} MiB en host</span>` : ''}
+      ${!on && hostMiB>1 ? `<span class="dim2">· ${hostMiB.toFixed(0)} MiB in host</span>` : ''}
       <span class="sep">|</span>
       <span style="color:${ctxPct>85?'var(--amber)':'var(--text-muted)'}">ctx ${(occ.device_main_kv_tokens||0).toLocaleString()}<span class="dim2">/${(cap.max_context||0).toLocaleString()}</span></span>
       <span class="sep">|</span>
@@ -149,7 +149,7 @@ function renderRailModels(d, rates){
       <span class="sep">|</span>
       <span title="tok/s de prefill${r.pg>0.5?' (en vivo)':''}">PG ${fmtRate(r.pg, r.lastPrefill, 'tok/s')}</span>
       <span class="sep">|</span>
-      <span style="color:${r.busy?'var(--teal)':'var(--dimmer)'}">${r.busy||0} en vuelo</span>
+      <span style="color:${r.busy?'var(--teal)':'var(--dimmer)'}">${r.busy||0} in flight</span>
       ${on ? `<button data-act="sleep" data-model="${esc(mid)}">Dormir</button>`
            : `<button data-act="load" data-model="${esc(mid)}">Despertar</button>`}
     </div>`;
@@ -188,7 +188,7 @@ function renderRail(d, gpu, loadOk, rates){
       <span class="val" style="color:${uCol}">${g.util.toFixed(0)}%</span>
       <span class="val" style="color:${tempCol}">${g.temp_c.toFixed(0)}°C</span>
       <span class="val" style="color:var(--purple)">${g.power_w.toFixed(0)}W</span></span>`:''}
-    <span class="item"><span class="lbl">en vuelo</span>
+    <span class="item"><span class="lbl">in flight</span>
       <span class="val" style="color:${(req.running||0)>0?'var(--teal)':'var(--dim)'}">${req.running??0}</span></span>
     <span class="push"></span>
     ${live.length?`<button id="rail-unload" style="padding:3px 10px;font-size:11px">Descargar todo</button>`:''}`;
@@ -260,8 +260,8 @@ function renderNow(d, load, cap, occ, req, loadOk, rates){
       n===1 ? (alerts[0].title) : `${n} alertas`,
       n===1 ? '' : alerts.map(a=>a.title).join(' · '));
   }
-  else if (ids.some(id=>st(id)==='loading')) renderVerdict('warn', 'cargando modelo', detail);
-  else if (running>0)                          renderVerdict('good', 'decodificando', `${running} en vuelo · ${detail}`);
+  else if (ids.some(id=>st(id)==='loading')) renderVerdict('warn', 'loading model', detail);
+  else if (running>0)                          renderVerdict('good', 'decodificando', `${running} in flight · ${detail}`);
   else if (ids.some(id=>st(id)==='loaded'))    renderVerdict('good', 'idle', detail);
   else if (ids.some(id=>st(id)==='suspended')) renderVerdict('idle', 'suspendido · vive en el host', detail);
   else if (ids.some(id=>st(id)==='sleeping'))  renderVerdict('idle', 'sleeping · wakes on the next request', detail);
@@ -278,9 +278,9 @@ function renderEngineCards(d, rates){
   const ids = Object.keys(d.engines || {});
   if (!ids.length){
     return `<div class="now-metrics">
-      <div class="now-m"><span class="k">carriles</span><b>—</b></div>
-      <div class="now-m"><span class="k">en vuelo</span><b>0</b></div>
-      <div class="now-m"><span class="k">ctx usado</span><b>—</b></div></div>`;
+      <div class="now-m"><span class="k">lanes</span><b>—</b></div>
+      <div class="now-m"><span class="k">in flight</span><b>0</b></div>
+      <div class="now-m"><span class="k">ctx used</span><b>—</b></div></div>`;
   }
   return `<div class="engine-cards">` + ids.map(mid=>{
     const e = d.engines[mid], l = e.load || {}, res = e.residency || {};
@@ -305,11 +305,11 @@ function renderEngineCards(d, rates){
       <div class="ec-metrics">
         <div class="now-m"><span class="k">${on?'VRAM':'size'}</span>
           <b style="color:${on?'#fff':'var(--dim)'}">${bytes?(bytes/2**30).toFixed(1):'—'} <small>GiB</small></b>
-          ${!on&&hostMiB>1?`<small class="sub">${hostMiB.toFixed(0)} MiB en host</small>`:''}</div>
-        <div class="now-m"><span class="k">ctx usado</span>
+          ${!on&&hostMiB>1?`<small class="sub">${hostMiB.toFixed(0)} MiB in host</small>`:''}</div>
+        <div class="now-m"><span class="k">ctx used</span>
           <b style="color:${ctxPct>85?'var(--amber)':'#fff'}">${(occ.device_main_kv_tokens||0).toLocaleString()} <small>/ ${ctxCap.toLocaleString()}</small></b>
           ${ctxCap?`<div class="progress"><i style="width:${ctxPct.toFixed(0)}%"></i></div>`:''}</div>
-        <div class="now-m"><span class="k">carriles</span><b>${req.running??0}/${cap.max_concurrency??'—'}</b>
+        <div class="now-m"><span class="k">lanes</span><b>${req.running??0}/${cap.max_concurrency??'—'}</b>
           ${cap.max_concurrency?`<div class="progress"><i style="width:${Math.min(100,(req.running||0)/cap.max_concurrency*100).toFixed(0)}%"></i></div>`:''}</div>
         <div class="now-m"><span class="k">en cola</span><b style="color:${(req.waiting||0)>0?'var(--amber)':'#fff'}">${req.waiting??0}</b></div>
         <div class="now-m"><span class="k">${r.tg>0.5?'generating':'last gen'}</span>
@@ -317,7 +317,7 @@ function renderEngineCards(d, rates){
         <div class="now-m"><span class="k">${r.pg>0.5?'prefilling':'last prefill'}</span>
           <b style="color:${r.pg>0.5?'var(--teal)':'#fff'}">${fmtRate(r.pg, r.lastPrefill, '').trim()} <small>tok/s</small></b></div>
         <div class="now-m" title="learned median of the server speed for this model"><span class="k">baseline</span>
-          <b style="color:var(--muted)">${bl? (bl.samples>=12?bl.median_tok_s.toFixed(0):`aprendiendo ${bl.samples}/12`) : '—'} <small>${bl&&bl.samples>=12?'tok/s':''}</small></b></div>
+          <b style="color:var(--muted)">${bl? (bl.samples>=12?bl.median_tok_s.toFixed(0):`learning ${bl.samples}/12`) : '—'} <small>${bl&&bl.samples>=12?'tok/s':''}</small></b></div>
       </div>
     </div>`;
   }).join('') + `</div>`;
@@ -329,7 +329,7 @@ function slotsHtml(d, occ){
   return `<div class="slots-strip">
       <div class="slots-strip-head">
         <b><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg> Paged KV Cache — Execution Slots (${slots.length} lanes)</b>
-        <span style="color:var(--dim)">${occ.device_main_kv_tokens != null ? occ.device_main_kv_tokens.toLocaleString() + ' tok activos' : ''}</span>
+        <span style="color:var(--dim)">${occ.device_main_kv_tokens != null ? occ.device_main_kv_tokens.toLocaleString() + ' tokens active' : ''}</span>
       </div>
       <div class="slots-grid">
         ${slots.map(sl => {
@@ -371,8 +371,8 @@ export async function loadLive(){
   try{ d = await api('/api/live'); }
   catch(e){ errhost.innerHTML = `<div class="err" style="margin:15px">${esc(e.message)}</div>`; return; }
   if (!d.online){
-    errhost.innerHTML = `<div class="err" style="margin:15px">El servidor <code>${esc(d.url)}</code> no responde.</div>`;
-    renderVerdict('bad', 'el servidor no responde', d.url || '');
+    errhost.innerHTML = `<div class="err" style="margin:15px">The server <code>${esc(d.url)}</code> is not responding.</div>`;
+    renderVerdict('bad', 'the server is not responding', d.url || '');
     $('#now-metrics').innerHTML = '';
     return;
   }
@@ -385,7 +385,7 @@ export async function loadLive(){
       const h = await api('/api/history');
       if (h.ok){
         for (const p of h.points.slice(-300)){
-          const lbl = new Date(p.ts).toLocaleTimeString('es-AR',{hour12:false});
+          const lbl = new Date(p.ts).toLocaleTimeString('en-US',{hour12:false});
           chartPush(state.charts.tp, lbl, p.decode ?? 0, p.ts/1000);
           chartPush(state.charts.decode, lbl, p.prefill ?? 0, p.ts/1000);
         }
@@ -396,7 +396,7 @@ export async function loadLive(){
   const load = loadOk ? d.load : {};
   const cap = load.capacity||{}, occ = load.occupancy||{}, req = load.requests||{};
   const t = Date.now()/1000;
-  const lbl = new Date().toLocaleTimeString('es-AR',{hour12:false});
+  const lbl = new Date().toLocaleTimeString('en-US',{hour12:false});
 
   // series from the /v1/load counters. `lastDT !== undefined` means "there is a
   // previous sample": the object is replaced whole, so no `last` key exists.
@@ -453,7 +453,7 @@ export async function loadLive(){
   const tpData = (state.charts.tp?.data.datasets[0].data)||[];
   const sparkTile = `<div class="tile info"><div class="k">Throughput</div>
     <div class="v">${tpData.length?(tpData[tpData.length-1]||0).toFixed(0):'—'} <small>tok/s</small></div>
-    <div class="s">${state.win==='retained'?'retenido':state.win}</div>
+    <div class="s">${state.win==='retained'?'retained':state.win}</div>
     ${sparkSvg(tpData.slice(-40))}</div>`;
 
   // With no model there is no occupancy or KV to show: those tiles would be
@@ -464,7 +464,7 @@ export async function loadLive(){
   $('#modelrows').innerHTML = modelRows(d, req, false);
   $('#modelnote').textContent = `${(d.models?.data||[]).length} in the catalog`;
   renderQuickLoad(d);
-  $('#liveupd').textContent = 'actualizado ' + new Date().toLocaleTimeString('es-AR',{hour12:false});
+  $('#liveupd').textContent = 'updated ' + new Date().toLocaleTimeString('en-US',{hour12:false});
   wireModelRows($('#modelrows'), d);
   wireModelRows($('#quickload'), d);
 }

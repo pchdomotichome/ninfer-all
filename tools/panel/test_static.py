@@ -1,4 +1,4 @@
-"""Self-check del servidor estático del panel.
+"""Self-check of the panel's static server.
 
 Serving /js and /css turned _static() from "one known filename" into "a path
 from the URL", which is a trust boundary: ../../etc/passwd and an absolute path

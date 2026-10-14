@@ -140,12 +140,12 @@ function renderStrip(){
   $('#strip').innerHTML = `
     <span><span class="dot ${a?.ready?'ok':'bad'}"></span><b>AIPerf</b>
       <span class="k">${a?.ready ? esc(a.why) : esc(a?.why||'?')}</span></span>
-    <span><b>${runs.length}</b> <span class="k">corridas</span></span>
+    <span><b>${runs.length}</b> <span class="k">runs</span></span>
     <span><b>${best ? best.out_tps_avg.toFixed(0)+' tok/s' : '—'}</b>
-      <span class="k">mejor</span></span>
+      <span class="k">best</span></span>
     <span><b>${spec.length}</b> <span class="k">with spec-decode</span></span>
-    ${eng.length?`<span><span class="k">motores</span> <b>${esc(eng.join(' · '))}</b></span>`:''}
-    <span><span class="k">actualizado</span> <b id="upd">ahora</b></span>`;
+    ${eng.length?`<span><span class="k">engines</span> <b>${esc(eng.join(' · '))}</b></span>`:''}
+    <span><span class="k">updated</span> <b id="upd">now</b></span>`;
 }
 
 function renderHead(){
@@ -178,7 +178,7 @@ function renderRows(){
          <code>Correr</code>.</span>`
       : `<b>No runs match these filters</b>
          <span class="hint">Try dropping a filter, or
-         <a href="#" id="limpiar" style="color:var(--teal)">limpiar todos</a>.</span>`;
+         <a href="#" id="limpiar" style="color:var(--teal)">clear all</a>.</span>`;
     $('#limpiar')?.addEventListener('click', e => {
       e.preventDefault();
       ['#q-profile','#q-engine','#q-spec','#q-dataset'].forEach(s => { $(s).value=''; });
@@ -200,7 +200,7 @@ function renderRows(){
       let cell;
       if (c.k==='engine'){
         cell = !raw.server || !raw.server.binary
-          ? '<span class="muted" title="run from before the server snapshot existed">sin dato</span>'
+          ? '<span class="muted" title="run from before the server snapshot existed">no data</span>'
           : `<span class="pill ${eng}">${esc(v)}</span>`;
       }
       else if (c.k==='spec'){
@@ -257,7 +257,7 @@ function detailRow(r){
   }
   const flags = pairs.filter(p=>!p.startsWith('--model')).join('  ');
   return `<tr class="detail"><td colspan="99"><div class="detailbox">
-    <div class="dgroup"><h4>Servidor</h4><dl class="kv">
+    <div class="dgroup"><h4>Server</h4><dl class="kv">
       <dt>motor</dt><dd>${esc(s.binary||'—')}</dd>
       <dt>modelo</dt><dd>${esc(s.model||'—')}</dd>
       <dt>carriles</dt><dd>${s.slots??'—'}</dd>
@@ -266,7 +266,7 @@ function detailRow(r){
         : esc(specKey(s)||'off')}</dd>
       <dt>cuant</dt><dd>${esc(s.quant||'—')}</dd>
     </dl></div>
-    <div class="dgroup"><h4>Flags de capacidad y spec</h4>
+    <div class="dgroup"><h4>Capacity & spec flags</h4>
       <pre>${esc(flags || '(ninguna)')}</pre></div>
     <div class="dgroup"><h4>Spec-decode</h4><dl class="kv">
       <dt>acceptance length</dt><dd>${num(r.spec_decode_acceptance_length,3)}</dd>
@@ -281,7 +281,7 @@ function detailRow(r){
       </div><div style="font:10px var(--mono);color:var(--dimmer);margin-top:20px">
       pooled histogram by position</div>`:''}
     </div>
-    <div class="dgroup"><h4>Carga</h4><dl class="kv">
+    <div class="dgroup"><h4>Load</h4><dl class="kv">
       <dt>dataset</dt><dd>${esc(r.dataset)}</dd>
       <dt>concurrencia</dt><dd>${r.concurrency}</dd>
       <dt>requests</dt><dd>${num(r.request_count_target,0)}</dd>
@@ -292,7 +292,7 @@ function detailRow(r){
       <dt>aiperf</dt><dd>${esc(r.aiperf_version||'—')}</dd>
       <dt>ninfer git</dt><dd>${esc(r.ninfer_git||'—')}</dd>
     </dl></div>
-    <div class="dgroup" style="grid-column:1/-1"><h4>Comando AIPerf</h4>
+    <div class="dgroup" style="grid-column:1/-1"><h4>AIPerf command</h4>
       <pre>${esc(r.aiperf_cmd||'(no guardado)')}</pre></div>
   </div></td></tr>`;
 }
@@ -313,7 +313,7 @@ function renderPager(d){
     <span>per page</span>
     <select id="pg-size">
       ${[10,25,50,100,0].map(n=>
-        `<option value="${n}" ${n===d.size?'selected':''}>${n||'todas'}</option>`).join('')}
+        `<option value="${n}" ${n===d.size?'selected':''}>${n||'all'}</option>`).join('')}
     </select>`;
   el.querySelectorAll('button[data-p]').forEach(b=>b.onclick=()=>{
     state.page = +b.dataset.p; load();
@@ -334,7 +334,7 @@ export async function load(){
   fillFilter('#q-spec','spec', r=>r.spec);
   fillFilter('#q-dataset','dataset', r=>r.dataset);
   $('#resnote').textContent = d.total===d.runs.length
-    ? `${d.total} corridas` : `${d.runs.length} de ${d.total}`;
+    ? `${d.total} runs` : `${d.runs.length} de ${d.total}`;
   renderHead(); renderRows(); renderPager(d);
 }
 function fillFilter(sel, key, get){
@@ -398,7 +398,7 @@ export function connect(){
           flash(`Corrida <code>${m.run_id}</code> registrada — ${num(m.run.out_tps_avg,1)} tok/s,
             ${num(m.run.spec_decode_acceptance_length,2)} acceptance.`);
         } else {
-          $('#banner').innerHTML = `<div class="err"><b>La corrida
+          $('#banner').innerHTML = `<div class="err"><b>La run
             <code>${esc(m.run_id)}</code> registered no results</b>
             (exit ${m.exit}).<pre style="margin-top:9px">${esc((m.log_tail||[]).join('\n'))}</pre></div>`;
         }

@@ -64,7 +64,7 @@ def main() -> int:
           f"la mediana debe ser 100, es {b._median(b.rates.get('m1', []))}")
     check(not keys(b), f"no debe alertar en velocidad normal: {keys(b)}")
 
-    # --- 2. caída sostenida: 3 muestras bajo el 25% de la mediana -----------
+    # --- 2. sustained drop: 3 samples below 25% of the median ----------
     t = feed_rates(b, [10.0, 11.0, 9.0], t0=2000.0)
     check("decode_below_baseline" in keys(b),
           f"debio alertar decode_below_baseline: {keys(b)}")

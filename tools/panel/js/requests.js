@@ -2,8 +2,8 @@ import { $, state, esc, num, api } from './core.js';
 
 // ---------------------------------------------------------------- requests
 const REQ_COLS = [
-  {k:'ts', t:'hora', l:true, d:0, f:r=>r.ts_ms},
-  {k:'model', t:'modelo', l:true, f:r=>r.model},
+  {k:'ts', t:'time', l:true, d:0, f:r=>r.ts_ms},
+  {k:'model', t:'model', l:true, f:r=>r.model},
   {k:'spec_backend', t:'spec', l:true, f:r=>r.spec_backend},
   {k:'ttft_ms', t:'ttft ms', d:0},
   {k:'decode_s', t:'decode s', d:2},
@@ -129,7 +129,7 @@ function renderRequests(){
     const open = state.reqOpen.has(r.ts_ms);
     const cells = cols.map(c=>{
       let v = r[c.k];
-      if (c.k==='ts') v = new Date(r.ts_ms).toLocaleTimeString('es-AR',{hour12:false});
+      if (c.k==='ts') v = new Date(r.ts_ms).toLocaleTimeString('en-US',{hour12:false});
       if (c.k==='spec_backend') v = v ? v+(r.draft_window!=null?'/'+r.draft_window:'') : 'off';
       if (c.k==='cache_hit') v = r.cache_hit!=null ? r.cache_hit+' tok' : v;
       if (c.k==='model') v = String(v||'').slice(0,30);
@@ -153,8 +153,8 @@ function detailReq(r){
   return `<tr class="detail"><td colspan="99">
     <div class="detailbox">
       <div class="dgroup"><h4>Request</h4><dl class="kv">
-        <dt>hora</dt><dd>${esc(new Date(r.ts_ms).toLocaleTimeString('es-AR',{hour12:false}))}</dd>
-        <dt>modelo</dt><dd>${esc(r.model||'—')}</dd>
+        <dt>time</dt><dd>${esc(new Date(r.ts_ms).toLocaleTimeString('en-US',{hour12:false}))}</dd>
+        <dt>model</dt><dd>${esc(r.model||'—')}</dd>
         <dt>protocolo</dt><dd>${esc(r.protocol||'—')}</dd>
         <dt>finish</dt><dd>${esc(r.finish||'—')}</dd>
       </dl></div>

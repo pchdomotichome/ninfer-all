@@ -2,8 +2,8 @@
 """Check del motor de benchmarks. Sin framework: `python3 test_bench.py`.
 
 Cubre lo que se rompe en silencio: el perfil de comparabilidad, la ingesta de
-una línea a medias, el pool de spec-decode ausente, y que argv no pierda el
---streaming (sin él desaparece TTFT y el ranking queda con un hueco).
+a half-written line, a missing spec-decode pool, and that argv keeps
+--streaming (without it TTFT disappears and the ranking has a hole).
 """
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def test_ingesta_tolera_spec_ausente():
         (d / "profile_export.jsonl").write_text(
             # forma real de un registro por request: dict con value+unit
             json.dumps({"metrics": {"request_latency": {"value": 500.0, "unit": "ms"}}}) + "\n"
-            + '{"metrics": {"request_lat'          # línea a medias, como al tail-ear
+            + '{"metrics": {"request_lat'          # half-written, as when tailing
         )
         entry = bench.ingest(d, spec, cfg)
     assert entry is not None
@@ -81,7 +81,7 @@ def test_ingesta_tolera_spec_ausente():
 
 
 def test_ingesta_promedia_spec_presente():
-    """Sin las métricas en el resumen, se caen a los registros por request."""
+    """When the summary lacks the metrics, fall back to per-request records."""
     cfg = bench.load_config()
     spec = bench.RunSpec("spec", "spec_al_gsm8k", 1, "m")
     with tempfile.TemporaryDirectory() as tmp:
@@ -95,7 +95,7 @@ def test_ingesta_promedia_spec_presente():
 
 
 def test_ingesta_prefiere_el_pooled_del_resumen():
-    """AIPerf ya poola con la ponderación correcta; no se re-promedia a mano."""
+    """AIPerf already pools with the right weighting; do not re-average by hand."""
     cfg = bench.load_config()
     spec = bench.RunSpec("spec", "spec_al_gsm8k", 1, "m")
     with tempfile.TemporaryDirectory() as tmp:
@@ -104,7 +104,7 @@ def test_ingesta_prefiere_el_pooled_del_resumen():
             "spec_decode_acceptance_length": {"avg": 2.79},
             "pooled_spec_decode_acceptance_histogram": {"0": 260, "1": 200, "2": 169, "3": 459},
         }))
-        # Los per-request dirían otra cosa: el resumen gana.
+        # The per-request ones would say otherwise: the summary wins.
         (d / "profile_export.jsonl").write_text(
             json.dumps({"metrics": {"spec_decode_acceptance_length": {"value": 9.9}}}) + "\n")
         entry = bench.ingest(d, spec, cfg)
@@ -126,8 +126,8 @@ def test_ingesta_guarda_el_comando():
 
 
 def test_progress_muestra_fase_y_log():
-    """Antes del primer request no hay jsonl: la UI debe decir qué está pasando,
-    no mostrar '0 requests' en silencio (que es como se escondió un --model vacío)."""
+    """Before the first request there is no jsonl: the UI must say what is going on,
+    not show '0 requests' silently (that is how an empty --model was hidden)."""
     cfg = bench.load_config()
     spec = bench.RunSpec("spec", "spec_al_gsm8k", 1, "m")
     with tempfile.TemporaryDirectory() as tmp:
@@ -163,7 +163,7 @@ def test_spec_config_normaliza_los_dos_motores():
 
 
 def test_ingesta_trae_el_retrato_del_servidor():
-    """Sin server.json la línea queda sin config: la UI no puede explicarla."""
+    """With no server.json the row is config-less: the UI cannot explain it."""
     cfg = bench.load_config()
     spec = bench.RunSpec("spec", "spec_al_gsm8k", 1, "m")
     with tempfile.TemporaryDirectory() as tmp:
@@ -177,18 +177,18 @@ def test_ingesta_trae_el_retrato_del_servidor():
 
         (d / "server.json").unlink()
         sin = bench.ingest(d, spec, cfg)
-    assert sin["server"] == {}, "sin retrato la línea lo registra vacío, no lo inventa"
+    assert sin["server"] == {}, "without a snapshot the row records emptiness, not invention"
 
 
 def test_reingest_conserva_identidad():
     """run_id y ts son identidad de la corrida, no medidas: no se recalculan.
 
-    Trabaja sobre una copia del registro: reingerir de verdad es una operación
+    Works on a copy of the registry: real reingest is an operation
     destructiva (reescribe el append-only) y un check no puede tocar el real.
     """
     real = Path(bench.load_config()["aiperf"]["registry"])
     if not real.exists() or not real.read_text().strip():
-        return  # sin corridas reales que reconstruir; nada que verificar aquí
+        return  # no real runs to rebuild; nothing to check here
     cfg = dict(bench.load_config())
     with tempfile.TemporaryDirectory() as tmp:
         cfg["aiperf"] = dict(cfg["aiperf"], registry=str(Path(tmp) / "registry.jsonl"))

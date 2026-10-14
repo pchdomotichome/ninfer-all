@@ -20,13 +20,13 @@ export async function loadControl(){
     if (!live.online){
       host.className = 'empty';
       host.style.maxHeight = 'none';
-      host.textContent = `El servidor ${live.url || ''} no responde.`;
+      host.textContent = `The server ${live.url || ''} is not responding.`;
       $('#ctl-note').textContent = 'no connection';
     } else {
       host.innerHTML = modelRows(live, null, true);
       const nFav = ((live.models?.data)||[]).filter(m=>favs.has(m.id)).length;
-      $('#ctl-note').textContent = `${n} modelos` + (nFav ? ` · ${nFav} favoritos` : '');
-      $('#ctl-upd').textContent = 'actualizado ' + new Date().toLocaleTimeString('es-AR',{hour12:false});
+      $('#ctl-note').textContent = `${n} models` + (nFav ? ` · ${nFav} favorites` : '');
+      $('#ctl-upd').textContent = 'updated ' + new Date().toLocaleTimeString('en-US',{hour12:false});
       wireModelRows(host, live);
     }
     // recipe form: artifact dropdown + flags
@@ -34,7 +34,7 @@ export async function loadControl(){
       $('#rec-note').textContent = `${h.flags.length} flags read from ${h.binary}`;
       let files = {artifacts:[]};
       try{ files = await api('/api/convert/files'); }catch(err){}
-      $('#r-artifact').innerHTML = '<option value="">— elegir artifact —</option>' +
+      $('#r-artifact').innerHTML = '<option value="">— pick an artifact —</option>' +
         files.artifacts.map(a=>`<option value="${esc(a.path)}">
           ${esc(a.path.split('/').pop())} (${fmtSize(a.size)})</option>`).join('');
       renderRecipeFlags(h.flags);
@@ -58,18 +58,18 @@ export async function loadControl(){
               `curl ${base}/chat/completions \\\n` +
               `  -H 'Content-Type: application/json' \\\n` +
               (state.cfg.endpoint.api_key ? `  -H 'Authorization: Bearer ${state.cfg.endpoint.api_key}' \\\n` : '') +
-              `  -d '{"model":"${activeModel}","messages":[{"role":"user","content":"hola"}],"max_tokens":128}'`,
+              `  -d '{"model":"${activeModel}","messages":[{"role":"user","content":"hello"}],"max_tokens":128}'`,
         python: `# Python (openai SDK)\nfrom openai import OpenAI\n\n` +
                 `client = OpenAI(base_url="${base}", api_key="${state.cfg.endpoint.api_key || 'dummy'}")\n\n` +
                 `resp = client.chat.completions.create(\n` +
                 `    model="${activeModel}",\n` +
-                `    messages=[{"role": "user", "content": "Hola ninfer!"}],\n` +
+                `    messages=[{"role": "user", "content": "Hello ninfer!"}],\n` +
                 `    max_tokens=128\n)\nprint(resp.choices[0].message.content)`,
         js: `// TypeScript / Node (openai SDK)\nimport OpenAI from "openai";\n\n` +
             `const client = new OpenAI({ baseURL: "${base}", apiKey: "${state.cfg.endpoint.api_key || 'dummy'}" });\n\n` +
             `const res = await client.chat.completions.create({\n` +
             `  model: "${activeModel}",\n` +
-            `  messages: [{ role: "user", content: "Hola ninfer!" }],\n` +
+            `  messages: [{ role: "user", content: "Hello ninfer!" }],\n` +
             `  max_tokens: 128\n});\nconsole.log(res.choices[0].message.content);`
       };
 
@@ -105,7 +105,7 @@ function renderRecipeFlags(flags){
   // They are grouped by category from the flag's prefix (model, context,
   // spec-decode, etc.) so the form stays navigable.
   const GROUPS = [
-    {name:'modelo', re:/^--(model-id|models|chat-template|mmproj|vision|expert)/},
+    {name:'model', re:/^--(model-id|models|chat-template|mmproj|vision|expert)/},
     {name:'contexto y kv', re:/^--(max-context|kv-|host-|device-|prefill|context-)/},
     {name:'spec-decode', re:/^--(spec|draft|lm-head|adaptive|ngram|verbose|mtp)/},
     {name:'execution', re:/^--(max-concurrency|max-pending|sleep-idle|unload-idle|model-suspend|no-models)/},
@@ -121,7 +121,7 @@ function renderRecipeFlags(flags){
   for(const g of GROUPS){
     const inGroup = flags.filter(f=>g.re.test(f.flag));
     if (!inGroup.length) continue;
-    html += `<details ${g.name==='modelo'?'open':''}>
+    html += `<details ${g.name==='model'?'open':''}>
       <summary style="cursor:pointer;color:var(--teal);font:600 11px system-ui;
         text-transform:uppercase;letter-spacing:.6px;margin:8px 0 5px">${g.name}
         (${inGroup.length})</summary>

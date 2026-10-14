@@ -1,18 +1,18 @@
-# Panel ninfer — configuración
+# The ninfer panel — configuration
 #
 # Se lee con tomllib (stdlib, Python 3.11+). Editar y reiniciar el panel.
-# Si una sección falta, el panel arranca igual y avisa por consola.
+# If a section is missing the panel still starts and warns on the console.
 
 [panel]
 host = "0.0.0.0"
 port = 9080
-# Referencia de velocidad por modelo y alertas. Es estado, no configuración:
-# el panel lo crea y lo actualiza solo, así que no hay que tocarlo a mano.
+# Speed baseline per model and alerts. This is state, not configuration:
+# the panel creates and refreshes it on its own, so do not edit by hand.
 state_file = "/root/ninfer-lab/panel-state.json"
-# Detrás de NPM: cambiar host a "127.0.0.1" y dejar que el proxy exponga.
+# Behind an NPM proxy: set host to "127.0.0.1" and let the proxy expose it.
 
 [ninfer]
-# Binario que compila este checkout. `git describe` da la versión.
+# Binary built from this checkout. `git describe` gives the version.
 binary = "/root/ninfer-all/build-sm86/apps/ninfer-serve"
 # Repo que compila ese binario: se guarda el rev en cada corrida del registro,
 # para poder comparar un baseline contra un fix.
@@ -22,22 +22,22 @@ api_key = ""
 # jsonl de requests del servidor (--request-log-jsonl): fuente de la tabla
 # de requests recientes del Dashboard.
 log = "/root/ninfer-lab/logs/server.requests.jsonl"
-# Catálogo de artifacts del lab (artifact, size_gib, recipe, trust, formats).
+# Lab artifact catalog (artifact, size_gib, recipe, trust, formats).
 catalog = "/root/ninfer-lab/models.json"
 
 [aiperf]
-# La llave: false esconde la pestaña entera y no toca el venv.
+# The key: false hides the whole tab and does not touch the venv.
 enabled = true
 venv = "/root/AIPerf/venv"
 plugins = ["/root/AIPerf/plugins/aiperf-ninfer"]
-# AIPerf exige --tokenizer explícito y local; nunca descarga tokenizers.
+# AIPerf requires an explicit, local --tokenizer; it never downloads tokenizers.
 tokenizer = "/mnt/models_local/ninfer/checkpoints/qwen35-4b"
 runs_dir = "/root/AIPerf/runs"
 registry = "/root/AIPerf/registry.jsonl"
 datasets_dir = "/root/AIPerf/datasets"
-# Descarga de datasets públicos de HuggingFace (cache de AIPerf).
+# Download of public HuggingFace datasets (AIPerf's cache).
 hf_cache = "/root/AIPerf/hf"
-# Tokenizer por modelo del router. Sin entrada acá se usa el default de arriba,
+# Per-model tokenizer from the router. Without an entry here the above default
 # que solo es correcto si el modelo es de esa familia (bug 2026-10-11).
 [aiperf.tokenizers]
 qwen35-9b = "/mnt/models_local/ninfer/checkpoints/qwen35-9b"
@@ -53,8 +53,8 @@ enabled = true
 # Este venv tiene torch + safetensors + numpy (el de AIPerf no).
 venv = "/root/ninfer-lab/venv"
 out_dir = "/mnt/models_local/ninfer/artifacts"
-# Raíces donde el panel busca artifacts (.ninfer) y fuentes (.gguf/checkpoints)
-# para la pestaña Convert, además de HF_HOME si está definido.
+# Roots where the panel looks for artifacts (.ninfer) and sources (.gguf/checkpoints)
+# for the Convert tab, plus HF_HOME if it is set.
 # huggingface/ queda solo por los .gguf dentro de hub/; lo nuestro vive en ninfer/.
 # strata/ entra porque DFlash2 es draft head de ninfer y los Flash-Next son
 # convertibles (familia Qwen4ExpForCausalLM).
@@ -67,8 +67,8 @@ roots = [
 
 # ---------------------------------------------------------------- benchmarks
 # Cada perfil es una familia de tarea. El registro guarda el id del perfil
-# con cada corrida, así el ranking nunca mezcla cosas incomparables: comparar
-# requiere el mismo id (o un flag explícito para cruzar).
+# with each run, so the ranking never mixes incomparable things: comparing
+# requires the same id (or an explicit flag to cross over).
 #
 # dataset.public  -> --public-dataset   (se descarga de HF)
 # dataset.file    -> --input-file + --custom-dataset-type single_turn
@@ -76,7 +76,7 @@ roots = [
 [[benchmarks]]
 id = "spec"
 label = "Spec-decode (acceptance length)"
-note = "Reemplaza el prompt sintético de 550 tok por datasets con licencia."
+note = "Replaces the synthetic 550-token prompt with licensed datasets."
 datasets = ["spec_al_gsm8k", "spec_al_math500", "spec_al_humaneval", "spec_al_mbpp"]
 concurrency = [1, 2, 4]
 output_tokens_mean = 512
@@ -90,7 +90,7 @@ concurrency = [1, 4, 8]
 
 [[benchmarks]]
 id = "code"
-label = "Generación y edición de código"
+label = "Code generation and editing"
 datasets = ["instruct_coder", "blazedit_5k"]
 concurrency = [1, 4]
 
@@ -103,6 +103,6 @@ concurrency = [1, 2]
 
 [[benchmarks]]
 id = "vision"
-label = "Visión"
+label = "Vision"
 datasets = ["mmstar", "llava_onevision"]
 concurrency = [1, 4]

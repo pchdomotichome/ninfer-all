@@ -33,12 +33,12 @@ function buildModelRow(m, d, rich){
   const running = ((d.load && !d.load.error) ? d.load.requests : {}).running || 0;
   const busy = running > 0 && st === 'loaded';
   const act = st==='loaded'
-    ? `<button data-act="sleep" data-model="${esc(m.id)}" ${busy?'disabled':''} title="${busy?'Hay requests en vuelo':''}">Dormir</button>
-       <button data-act="unload" data-model="${esc(m.id)}" class="danger">Descargar</button>`
-    : st==='sleeping' ? `<button data-act="load" data-model="${esc(m.id)}">Despertar</button>`
-    : st==='suspended' ? `<button data-act="resume" data-model="${esc(m.id)}">Reanudar</button>`
+    ? `<button data-act="sleep" data-model="${esc(m.id)}" ${busy?'disabled':''} title="${busy?'requests in flight':''}">Sleep</button>
+       <button data-act="unload" data-model="${esc(m.id)}" class="danger">Unload</button>`
+    : st==='sleeping' ? `<button data-act="load" data-model="${esc(m.id)}">Wake</button>`
+    : st==='suspended' ? `<button data-act="resume" data-model="${esc(m.id)}">Resume</button>`
     : st==='loading' ? `<button disabled>cargando…</button>`
-    : `<button data-act="load" data-model="${esc(m.id)}">Cargar</button>`;
+    : `<button data-act="load" data-model="${esc(m.id)}">Load</button>`;
   const star = rich ? `<button class="iconbtn starbtn${favs.has(m.id)?' on':''}" data-fav="${esc(m.id)}"
       title="${favs.has(m.id)?'Remove from the Dashboard quick load':'Add to the Dashboard quick load'}">${SVG_STAR}</button>` : '';
   const gear = rich ? `<button class="iconbtn" data-cfg="${esc(m.id)}"
@@ -55,7 +55,7 @@ function buildModelRow(m, d, rich){
 
 export function modelRows(d, req, rich){
   const models = (d.models?.data)||[];
-  if (!models.length) return '<div class="empty" style="padding:18px">El servidor no declara modelos.</div>';
+  if (!models.length) return '<div class="empty" style="padding:18px">The server declares no models.</div>';
   const order = {loaded:0, loading:1, sleeping:2, suspended:3, unloaded:4};
   const rows = [...models].sort((a,b)=>
     (order[a.status?.value]??9)-(order[b.status?.value]??9) || a.id.localeCompare(b.id));
@@ -75,8 +75,8 @@ export function renderQuickLoad(d){
       const dot = st==='loaded' ? 'ok' : st==='sleeping' ? 'warn'
         : st==='suspended' ? 'blue' : 'off';
       return `<button class="chip${on?' on':''}" data-act="${on?'unload':'load'}"
-          data-model="${esc(m.id)}" title="${on?'Descargar':'Cargar'} ${esc(m.id)}">
-          <span class="dot ${dot}"></span>${esc(m.id)}${st==='loaded'?' · activo':''}</button>`;
+          data-model="${esc(m.id)}" title="${on?'Unload':'Load'} ${esc(m.id)}">
+          <span class="dot ${dot}"></span>${esc(m.id)}${st==='loaded'?' · active':''}</button>`;
     }).join('') + '</div>';
 }
 
@@ -141,7 +141,7 @@ export function openModelCfg(m){
   $('#modal-cfg-title').textContent = 'Config · ' + m.id;
   $('#modal-cfg-body').innerHTML = `
     <dl class="kv">
-      <dt>estado</dt><dd><span class="dot ${stDot}" style="display:inline-block;margin-right:6px"></span>${esc(m.status?.value || '—')}</dd>
+      <dt>state</dt><dd><span class="dot ${stDot}" style="display:inline-block;margin-right:6px"></span>${esc(m.status?.value || '—')}</dd>
       <dt>contexto</dt><dd>${ar.ctx ?? '—'}</dd>
       <dt>spec decode</dt><dd>${ar.spec ?? 'off'}</dd>
       <dt>residencia</dt><dd>${esc(res.state || '—')}</dd>
@@ -149,7 +149,7 @@ export function openModelCfg(m){
       ${[...map.entries()].map(([k,v])=>
         `<dt style="color:var(--teal)">${esc(k)}</dt><dd style="color:var(--text)">${esc(v)}</dd>`).join('')}
     </dl>
-    <div class="quick-label" style="margin-top:16px">Comando de lanzamiento</div>
+    <div class="quick-label" style="margin-top:16px">Launch command</div>
     <div class="cfg-args">${esc(args.join(' '))}</div>
     <div class="filenote">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" style="flex:none;margin-top:1px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -169,8 +169,8 @@ export function renderCtlRows(d){
   if (!host || !d || !d.online) return;
   host.innerHTML = modelRows(d, null, true);
   const nFav = ((d.models?.data)||[]).filter(m=>favs.has(m.id)).length;
-  $('#ctl-note').textContent = `${(d.models?.data||[]).length} modelos` +
-    (nFav ? ` · ${nFav} favoritos` : '');
+  $('#ctl-note').textContent = `${(d.models?.data||[]).length} models` +
+    (nFav ? ` · ${nFav} favorites` : '');
   wireModelRows(host, d);
 }
 
