@@ -281,7 +281,7 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .tile.info .spark{color:var(--blue)}
 
 /* ── Filas de modelos (reemplazan las cards) ──────────────────────────── */
-.model-rows{display:flex;flex-direction:column}
+.model-rows{display:flex;flex-direction:column;max-height:360px;overflow-y:auto}
 .model-row{display:grid;grid-template-columns:9px minmax(0,1fr) auto auto;gap:12px;align-items:center;
   padding:9px 18px;border-bottom:1px solid var(--line-subtle);font:12px var(--mono);transition:background .12s}
 .model-row:hover{background:rgba(56,189,248,0.05)}
@@ -292,6 +292,20 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .model-row .acts button{padding:3px 9px;font-size:11px}
 .slots-host:empty{display:none}
 section.tight{margin:0}
+
+/* ── Listas con tope: no crecen infinito ──────────────────────────────── */
+.scroll-y{max-height:360px;overflow-y:auto;overflow-x:auto}
+.scroll-y::-webkit-scrollbar{width:9px;height:9px}
+.scroll-y::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
+.scroll-y::-webkit-scrollbar-thumb:hover{background:var(--teal-dark)}
+
+/* ── Tres magnitudes de GPU, tres colores ─────────────────────────────── */
+.bar-row{display:flex;justify-content:space-between;gap:8px;font:11px var(--mono);margin-top:8px}
+.bar-row .bl{color:var(--text-muted)}
+.bar-row .bv{font-weight:600}
+.c-temp{color:var(--amber)}
+.c-pow{color:var(--purple)}
+.c-load{color:var(--blue)}
 
 :focus-visible{outline:2px solid var(--teal);outline-offset:2px;border-radius:4px}
 @media (prefers-reduced-motion: reduce){
@@ -363,7 +377,7 @@ section.tight{margin:0}
           <span class="spacer"></span>
           <button id="q-reqmore" style="white-space:nowrap">Más columnas</button>
         </div>
-        <div style="overflow-x:auto">
+        <div class="scroll-y">
         <table id="tbl-req">
           <thead><tr id="thead-req"></tr></thead>
           <tbody id="tbody-req"></tbody>
@@ -1026,22 +1040,25 @@ function renderRail(d, gpu, loadOk){
     ? (gpu.gpus.find(x=>x.index===dev) || gpu.gpus[0]) : null;
   const vramPct = g ? g.mem_used_mib/g.mem_total_mib*100 : null;
   const vramCls = vramPct==null ? '' : vramPct>=95 ? 'bad' : vramPct>=85 ? 'warn' : '';
+  const vramCol = vramPct==null ? 'var(--dim)' : vramPct>=95?'var(--red)':vramPct>=85?'var(--amber)':'var(--teal)';
   const kvPct = (occ.device_main_kv_tokens!=null && cap.kv_capacity_tokens)
     ? occ.device_main_kv_tokens/cap.kv_capacity_tokens*100 : null;
-  const tempCol = g ? (g.temp_c>=85?'var(--red)':g.temp_c>=75?'var(--amber)':'#fff') : '';
+  const kvCol = kvPct==null ? 'var(--dim)' : kvPct>=95?'var(--red)':kvPct>=85?'var(--amber)':'var(--teal)';
+  const tempCol = g ? (g.temp_c>=85?'var(--red)':g.temp_c>=75?'var(--amber)':'var(--green)') : 'var(--dim)';
+  const uCol = g ? (g.util>=90?'var(--red)':g.util>=60?'var(--amber)':'var(--blue)') : 'var(--dim)';
   $('#rail').innerHTML = `
     <span class="item"><span class="dot ${live.length?'ok':'off'}"></span>
       <span class="val">${live.length?esc(live.map(m=>m.id).join(', ')):'sin modelo'}</span></span>
     <span class="item"><span class="lbl">VRAM</span>
       <span class="gauge ${vramCls}"><i style="width:${(vramPct??0).toFixed(0)}%"></i></span>
-      <span class="val">${g?(g.mem_used_mib/1024).toFixed(1):'—'}<span class="dim">/${g?(g.mem_total_mib/1024).toFixed(0):'—'}G</span></span></span>
+      <span class="val" style="color:${vramCol}">${g?(g.mem_used_mib/1024).toFixed(1):'—'}<span class="dim">/${g?(g.mem_total_mib/1024).toFixed(0):'—'}G</span></span></span>
     <span class="item"><span class="lbl">KV</span>
       <span class="gauge ${kvPct!=null&&kvPct>90?'warn':''}"><i style="width:${(kvPct??0).toFixed(0)}%"></i></span>
-      <span class="val">${occ.device_main_kv_tokens!=null?occ.device_main_kv_tokens.toLocaleString():'—'}<span class="dim">/${cap.kv_capacity_tokens!=null?cap.kv_capacity_tokens.toLocaleString():'—'}</span></span></span>
+      <span class="val" style="color:${kvCol}">${occ.device_main_kv_tokens!=null?occ.device_main_kv_tokens.toLocaleString():'—'}<span class="dim">/${cap.kv_capacity_tokens!=null?cap.kv_capacity_tokens.toLocaleString():'—'}</span></span></span>
     ${g?`<span class="item"><span class="lbl">GPU ${g.index}</span>
-      <span class="val">${g.util.toFixed(0)}%</span>
+      <span class="val" style="color:${uCol}">${g.util.toFixed(0)}%</span>
       <span class="val" style="color:${tempCol}">${g.temp_c.toFixed(0)}°C</span>
-      <span class="val">${g.power_w.toFixed(0)}W</span></span>`:''}
+      <span class="val" style="color:var(--purple)">${g.power_w.toFixed(0)}W</span></span>`:''}
     <span class="item"><span class="lbl">en vuelo</span>
       <span class="val" style="color:${(req.running||0)>0?'var(--teal)':'var(--dim)'}">${req.running??0}</span></span>
     <span class="push"></span>
@@ -1078,13 +1095,15 @@ function renderNow(d, load, cap, occ, req, loadOk){
   const liveTps = running>0 ? (tpTail[tpTail.length-1] || null) : null;
   const tps = liveTps ?? (last ? last.completion_tokens/last.decode_s : null);
   const kv = occ.device_main_kv_tokens, kvcap = cap.kv_capacity_tokens;
+  const kvPct2 = (kv!=null && kvcap) ? kv/kvcap*100 : null;
+  const kvCol2 = kvPct2==null ? '#fff' : kvPct2>=95?'var(--red)':kvPct2>=85?'var(--amber)':'var(--teal)';
   $('#now-metrics').innerHTML = `
     <div class="now-m"><span class="k">carriles</span><b>${maxc?`${running}/${maxc}`:'—'}</b>
       ${maxc?`<div class="progress"><i style="width:${pct}%"></i></div>`:''}</div>
-    <div class="now-m"><span class="k">en vuelo</span><b>${req.running??0}</b></div>
-    <div class="now-m"><span class="k">en cola</span><b>${req.waiting??occ.waiting??0}</b></div>
-    <div class="now-m"><span class="k">${liveTps!=null?'gen ahora':'último gen'}</span><b>${tps!=null?tps.toFixed(1):'—'} <small>tok/s</small></b></div>
-    <div class="now-m"><span class="k">KV device</span><b>${kv!=null?kv.toLocaleString():'—'} <small>tok</small></b>
+    <div class="now-m"><span class="k">en vuelo</span><b style="color:${(req.running||0)>0?'var(--teal)':'#fff'}">${req.running??0}</b></div>
+    <div class="now-m"><span class="k">en cola</span><b style="color:${(req.waiting||0)>0?'var(--amber)':'#fff'}">${req.waiting??occ.waiting??0}</b></div>
+    <div class="now-m"><span class="k">${liveTps!=null?'gen ahora':'último gen'}</span><b style="color:${liveTps!=null?'var(--teal)':'#fff'}">${tps!=null?tps.toFixed(1):'—'} <small>tok/s</small></b></div>
+    <div class="now-m"><span class="k">KV device</span><b style="color:${kvCol2}">${kv!=null?kv.toLocaleString():'—'} <small>tok</small></b>
       ${kvcap?`<div class="progress"><i style="width:${Math.min(100,kv/kvcap*100).toFixed(0)}%"></i></div>`:''}</div>`;
 }
 
@@ -1236,12 +1255,18 @@ async function loadLive(){
   }).join('');
 
   const gpuTiles = gpu && gpu.online && gpu.gpus.length ? gpu.gpus.map(g=>{
-    const tone = g.temp_c>=85?'bad':g.temp_c>=75?'warn':'';
-    return `<div class="tile ${tone}"><div class="k">GPU ${g.index}</div>
-      <div class="v">${g.util.toFixed(0)}<small>%</small></div>
-      <div class="s">${(g.mem_used_mib/1024).toFixed(1)}/${(g.mem_total_mib/1024).toFixed(0)} GiB ·
-        ${g.temp_c.toFixed(0)}°C · ${g.power_w.toFixed(0)}W</div>
-      <div class="bar"><i style="width:${g.util.toFixed(0)}%"></i></div></div>`;
+    const vramPct = g.mem_used_mib/g.mem_total_mib*100;
+    const vramCol = vramPct>=95?'var(--red)':vramPct>=85?'var(--amber)':'var(--teal)';
+    const tCol = g.temp_c>=85?'var(--red)':g.temp_c>=75?'var(--amber)':'var(--green)';
+    const uCol = g.util>=90?'var(--red)':g.util>=60?'var(--amber)':'var(--blue)';
+    return `<div class="tile">
+      <div class="k">GPU ${g.index}</div>
+      <div class="v" style="color:${uCol}">${g.util.toFixed(0)}<small>% carga</small></div>
+      <div class="s"><span class="c-temp" style="font-weight:600">${g.temp_c.toFixed(0)}°C</span> ·
+        <span class="c-pow" style="font-weight:600">${g.power_w.toFixed(0)}W</span></div>
+      <div class="bar-row"><span class="bl">VRAM</span>
+        <span class="bv" style="color:${vramCol}">${(g.mem_used_mib/1024).toFixed(1)}/${(g.mem_total_mib/1024).toFixed(0)} GiB</span></div>
+      <div class="bar"><i style="width:${vramPct.toFixed(0)}%;background:${vramCol}"></i></div></div>`;
   }).join('') : '';
 
   const tpData = (state.charts.tp?.data.datasets[0].data)||[];
