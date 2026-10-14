@@ -1087,7 +1087,49 @@ class API:
                     model["residency"] = json.loads(fh.read())
             except (OSError, ValueError, urllib.error.URLError):
                 pass
+        out["engines"] = self._per_model(url, out)
         return out
+
+    @staticmethod
+    def _per_model(url: str, out: dict) -> dict:
+        """Estado por modelo cargado: /v1/load acepta ?model= y contesta por
+        cada Engine, no sólo por el que está loaded.
+
+        Sin esto el router con dos modelos en memoria muestra una sola fila de
+        ocupación y el resto parece no existir. El modelo que ya trajo el
+        /v1/load sin parámetros no se vuelve a pedir.
+
+        `releasable_device_bytes` (de residency) es pesos + estado en device:
+        para un modelo cargado ES su VRAM; para uno suspendido es el footprint
+        que ocuparía al cargar, porque lo que ya está en host no cuenta. La
+        página lo etiqueta según el estado en vez de llamarlo VRAM siempre.
+        """
+        primary = (out.get("load") or {}).get("model")
+        engines: dict = {}
+        for model in (out.get("models") or {}).get("data") or []:
+            mid = model.get("id")
+            state = (model.get("status") or {}).get("value") or "unloaded"
+            res = model.get("residency") or {}
+            if state == "unloaded":
+                continue
+            # Misma regla que /api/engine: residency.state dice suspendido aunque
+            # /models siga diciendo loaded. Sus nombres internos son "resident" y
+            # "suspended", no los de la UI.
+            if res.get("state") == "suspended":
+                state = "suspended"
+            engines[mid] = {"state": state,
+                            "residency": res,
+                            "load": (out.get("load") if mid == primary and "error" not in (out.get("load") or {})
+                                     else None)}
+            if engines[mid]["load"] is not None:
+                continue
+            try:
+                with urllib.request.urlopen(f"{url}/v1/load?model={urllib.parse.quote(mid)}",
+                                            timeout=5) as fh:
+                    engines[mid]["load"] = json.loads(fh.read())
+            except (OSError, ValueError, urllib.error.URLError):
+                engines[mid]["load"] = {"error": "sin datos"}
+        return engines
 
     def live(self) -> dict:
         """Estado del servidor para la página: /v1/load, /stats, /models, /slots

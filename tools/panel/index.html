@@ -223,9 +223,18 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 /* ── Rail fijo: header + rail comparten el sticky ─────────────────────── */
 .topwrap{position:sticky;top:0;z-index:20}
 .topwrap header{position:static}
-.rail{display:flex;align-items:center;gap:18px;padding:0 24px;height:40px;
-  background:rgba(16,22,34,0.92);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
-  border-bottom:1px solid var(--line-subtle);font:12px var(--mono);white-space:nowrap;overflow-x:auto}
+.rail{background:rgba(16,22,34,0.94);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--line-subtle);font:12px var(--mono);white-space:nowrap}
+.rail-row{display:flex;align-items:center;gap:18px;padding:0 24px;height:40px;overflow-x:auto}
+.rail-rows{display:flex;flex-direction:column}
+/* Una línea por modelo cargado: lo mismo para todos, que es lo que hace
+   comparable una línea con otra. */
+.rail-model{display:flex;align-items:center;gap:16px;padding:0 24px;height:30px;
+  border-top:1px solid var(--line-subtle);color:var(--text-muted)}
+.rail-model .nm{color:#fff;font-weight:600;min-width:190px}
+.rail-model .dim2{color:var(--dimmer)}
+.rail-model button{padding:2px 8px;font-size:10.5px;flex:none}
+.rail-model .sep{color:var(--dimmer)}
 .rail .item{display:flex;align-items:center;gap:7px;flex:none}
 .rail .lbl{color:var(--text-muted);font-weight:700;font-size:10px;text-transform:uppercase;letter-spacing:.7px}
 .rail .val{color:#fff;font-variant-numeric:tabular-nums}
@@ -238,6 +247,21 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .dot.off{background:var(--dimmer);box-shadow:none}
 .dot.blue{background:var(--blue);box-shadow:0 0 8px var(--blue)}
 .sechead h2 .dot{margin-right:3px}
+
+/* ── Un recuadro por Engine en memoria ─────────────────────────────────── */
+.engine-cards{display:flex;flex-wrap:wrap;gap:12px;padding:0 18px 16px}
+.engine-card{flex:1 1 420px;min-width:0;border:1px solid var(--line-subtle);border-radius:var(--radius);
+  background:var(--panel2);overflow:hidden}
+.engine-card.off{opacity:.82;border-style:dashed}
+.ec-head{display:flex;align-items:center;gap:9px;padding:9px 14px;
+  border-bottom:1px solid var(--line-subtle);background:var(--bg-subtle)}
+.ec-head b{font:600 13px var(--mono);color:#fff}
+.ec-head .dot{position:relative}
+.ec-state{font:10.5px var(--mono);color:var(--dim);text-transform:uppercase;letter-spacing:.6px}
+.ec-head button{padding:3px 9px;font-size:11px}
+.ec-head .spacer{flex:1}
+.ec-metrics{display:flex;flex-wrap:wrap;gap:10px 24px;padding:12px 14px}
+.now-m .sub{display:block;font:10px var(--mono);color:var(--dimmer);margin-top:4px}
 
 /* ── Banda "Ahora" ────────────────────────────────────────────────────── */
 .now-metrics{display:flex;flex-wrap:wrap;gap:12px 28px;padding:14px 18px}
@@ -383,7 +407,10 @@ section.tight{margin:0}
     <button data-pg="convert"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Convert</button>
   </nav>
 </header>
-<div class="rail" id="rail"></div>
+<div class="rail" id="rail">
+          <div class="rail-row" id="rail-global"></div>
+          <div class="rail-rows" id="rail-models"></div>
+        </div>
 </div>
 <main>
   <div id="banner"></div>
@@ -1102,7 +1129,88 @@ function liveModels(d){
     ['loaded','sleeping','suspended','loading'].includes(m.status?.value));
 }
 
-function renderRail(d, gpu, loadOk){
+// Tasas por modelo, de los contadores acumulados de SU /v1/load.
+// El delta se guarda por modelo: con dos Engines en memoria, usar el delta
+// global mezclaría las velocidades de uno con los del otro.
+function engineRates(engines){
+  const now = Date.now()/1000;
+  const out = {};
+  state.engPrev = state.engPrev || {};
+  for (const [mid, e] of Object.entries(engines||{})){
+    const c = (e.load && e.load.counters) || {};
+    const prev = state.engPrev[mid];
+    let tg = null, pg = null;
+    if (prev){
+      const dt = now - prev.t;
+      if (dt > 0){
+        tg = Math.max(0, (c.committed_decode_tokens||0) - prev.tok) / dt;
+        pg = Math.max(0, (c.computed_prefill_tokens||0) - prev.pt) / dt;
+      }
+    }
+    state.engPrev[mid] = {t: now, tok: c.committed_decode_tokens||0, pt: c.computed_prefill_tokens||0};
+    const busy = (e.load && e.load.requests && e.load.requests.running) || 0;
+    // En reposo los contadores no avanzan y la tasa es 0 por definición: se
+    // muestra el último valor real del request log de ese modelo.
+    const last = (state.reqs||[]).find(r=>r.model===mid && r.decode_s>0 && r.completion_tokens);
+    const prevReq = (state.reqs||[]).find(r=>r.model===mid && r.prefill_s>0 && r.prefill_tokens);
+    out[mid] = {tg, pg, busy,
+                lastTps: last ? last.completion_tokens/last.decode_s : null,
+                lastPrefill: prevReq ? prevReq.prefill_tokens/prevReq.prefill_s : null};
+  }
+  return out;
+}
+
+function fmtRate(v, last, unit){
+  if (v != null && v > 0.5) return v.toFixed(0)+' '+unit;
+  if (last != null) return last.toFixed(0)+' '+unit;
+  return '—';
+}
+
+// Una línea por Engine en memoria. Mismos campos en todas, que es lo que las
+// hace comparables de un vistazo; lo que cambia de un estado a otro se rotula.
+function renderRailModels(d, rates){
+  const host = $('#rail-models');
+  const engines = d.engines || {};
+  const ids = Object.keys(engines);
+  if (!ids.length){ host.innerHTML = ''; return; }
+  host.innerHTML = ids.map(mid=>{
+    const e = engines[mid];
+    const l = e.load || {};
+    const res = e.residency || {};
+    const on = e.state === 'loaded';
+    const occ = l.occupancy||{}, cap = l.capacity||{};
+    const r = rates[mid] || {};
+    const hostMiB = (res.host_snapshot_bytes||0)/2**20;
+    // "tamaño" para uno dormido, "VRAM" para uno cargado: el mismo número no
+    // significa lo mismo, y llamarle VRAM a los dos sería mentir.
+    const bytes = res.releasable_device_bytes || 0;
+    const memCol = on ? (bytes/2**30 >= 18 ? 'var(--amber)' : 'var(--teal)') : 'var(--dim)';
+    const ctxPct = cap.max_context ? Math.min(100, (occ.device_main_kv_tokens||0)/cap.max_context*100) : 0;
+    const stateLbl = {loaded:'activo', sleeping:'dormido', suspended:'suspendido', loading:'cargando'}[e.state] || e.state;
+    return `<div class="rail-model" data-model="${esc(mid)}">
+      <span class="dot ${on?'ok':e.state==='suspended'?'blue':e.state==='loading'?'warn':'off'}"></span>
+      <span class="nm">${esc(mid)}</span>
+      <span class="dim2">${stateLbl}</span>
+      <span class="sep">|</span>
+      <span style="color:${memCol}">${bytes?(bytes/2**30).toFixed(1)+' GiB':'—'}</span>
+      <span class="dim2">${on?'VRAM':'tamaño'}</span>
+      ${!on && hostMiB>1 ? `<span class="dim2">· ${hostMiB.toFixed(0)} MiB en host</span>` : ''}
+      <span class="sep">|</span>
+      <span style="color:${ctxPct>85?'var(--amber)':'var(--text-muted)'}">ctx ${(occ.device_main_kv_tokens||0).toLocaleString()}<span class="dim2">/${(cap.max_context||0).toLocaleString()}</span></span>
+      <span class="sep">|</span>
+      <span title="tok/s de generación${r.tg>0.5?' (en vivo)':''}">TG ${fmtRate(r.tg, r.lastTps, 'tok/s')}</span>
+      <span class="sep">|</span>
+      <span title="tok/s de prefill${r.pg>0.5?' (en vivo)':''}">PG ${fmtRate(r.pg, r.lastPrefill, 'tok/s')}</span>
+      <span class="sep">|</span>
+      <span style="color:${r.busy?'var(--teal)':'var(--dimmer)'}">${r.busy||0} en vuelo</span>
+      ${on ? `<button data-act="sleep" data-model="${esc(mid)}">Dormir</button>`
+           : `<button data-act="load" data-model="${esc(mid)}">Despertar</button>`}
+    </div>`;
+  }).join('');
+  wireModelRows($('#rail-models'), d);
+}
+
+function renderRail(d, gpu, loadOk, rates){
   const live = liveModels(d);
   const load = loadOk ? (d.load||{}) : {};
   const cap = load.capacity||{}, occ = load.occupancy||{}, req = load.requests||{};
@@ -1120,9 +1228,9 @@ function renderRail(d, gpu, loadOk){
   const kvCol = kvPct==null ? 'var(--dim)' : kvPct>=95?'var(--red)':kvPct>=85?'var(--amber)':'var(--teal)';
   const tempCol = g ? (g.temp_c>=85?'var(--red)':g.temp_c>=75?'var(--amber)':'var(--green)') : 'var(--dim)';
   const uCol = g ? (g.util>=90?'var(--red)':g.util>=60?'var(--amber)':'var(--blue)') : 'var(--dim)';
-  $('#rail').innerHTML = `
+  $('#rail-global').innerHTML = `
     <span class="item"><span class="dot ${live.length?'ok':'off'}"></span>
-      <span class="val">${live.length?esc(live.map(m=>m.id).join(', ')):'sin modelo'}</span></span>
+      <span class="val">${live.length?live.length+' en memoria':'sin modelo'}</span></span>
     <span class="item"><span class="lbl">VRAM</span>
       <span class="gauge ${vramCls}"><i style="width:${(vramPct??0).toFixed(0)}%"></i></span>
       <span class="val" style="color:${vramCol}">${g?(g.mem_used_mib/1024).toFixed(1):'—'}<span class="dim">/${g?(g.mem_total_mib/1024).toFixed(0):'—'}G</span></span></span>
@@ -1137,6 +1245,7 @@ function renderRail(d, gpu, loadOk){
       <span class="val" style="color:${(req.running||0)>0?'var(--teal)':'var(--dim)'}">${req.running??0}</span></span>
     <span class="push"></span>
     ${live.length?`<button id="rail-unload" style="padding:3px 10px;font-size:11px">Descargar todo</button>`:''}`;
+  renderRailModels(d, rates);
   const ub = $('#rail-unload');
   if (ub) ub.onclick = async () => {
     ub.disabled = true; ub.textContent = 'descargando…';
@@ -1183,13 +1292,19 @@ function renderAlerts(d){
     </div>`).join('') + `</div>`;
 }
 
-function renderNow(d, load, cap, occ, req, loadOk){
-  const live = liveModels(d);
-  const has = s => live.some(m=>m.status?.value===s);
+function renderNow(d, load, cap, occ, req, loadOk, rates){
+  // El estado se lee de `engines`, que ya resolvió la contradicción entre
+  // /models (que sigue diciendo "loaded" a un modelo suspendido) y residency.
+  // Antes se leía de /models y por eso el veredicto decía "dormido" con un
+  // modelo activo en memoria: promediaba dos Engines distintos.
+  const eng = d.engines || {};
+  const st = id => (eng[id]||{}).state;
+  const ids = Object.keys(eng);
   const running = occ.running ?? req.running ?? 0;
-  const maxc = cap.max_concurrency ?? 0;
-  const pct = maxc ? Math.min(100, running/maxc*100) : 0;
-  const ids = live.map(m=>m.id).join(' · ');
+  const detail = ids.map(id => {
+    const s = st(id);
+    return s === 'loaded' ? id : `${id} ${({sleeping:'dormido', suspended:'suspendido', loading:'cargando'})[s]||s}`;
+  }).join(' · ');
   const alerts = (state.alerts && state.alerts.alerts) || [];
   const worst = alerts.reduce((w,a)=> (ALERT_RANK[a.level]||0) > (ALERT_RANK[w]||0) ? a.level : w, null);
   if (worst){
@@ -1198,38 +1313,67 @@ function renderNow(d, load, cap, occ, req, loadOk){
       n===1 ? (alerts[0].title) : `${n} alertas`,
       n===1 ? '' : alerts.map(a=>a.title).join(' · '));
   }
-  else if (has('loading')) renderVerdict('warn', 'cargando modelo', ids);
-  else if (running>0)     renderVerdict('good', 'decodificando', `${running} en vuelo · ${ids}`);
-  else if (has('suspended')) renderVerdict('idle', 'suspendido · vive en el host', ids);
-  else if (has('sleeping'))  renderVerdict('idle', 'dormido · despierta al próximo request', ids);
-  else if (live.length)      renderVerdict('good', 'en reposo', ids);
-  else                       renderVerdict('idle', 'sin modelo cargado', 'VRAM libre · carga uno para ver ocupación y KV');
+  else if (ids.some(id=>st(id)==='loading')) renderVerdict('warn', 'cargando modelo', detail);
+  else if (running>0)                          renderVerdict('good', 'decodificando', `${running} en vuelo · ${detail}`);
+  else if (ids.some(id=>st(id)==='loaded'))    renderVerdict('good', 'en reposo', detail);
+  else if (ids.some(id=>st(id)==='suspended')) renderVerdict('idle', 'suspendido · vive en el host', detail);
+  else if (ids.some(id=>st(id)==='sleeping'))  renderVerdict('idle', 'dormido · despierta al próximo request', detail);
+  else                                         renderVerdict('idle', 'sin modelo cargado', 'VRAM libre · carga uno para ver ocupación y KV');
 
-  const last = (state.reqs||[]).find(r=>r.decode_s>0 && r.completion_tokens);
-  const tpTail = (state.charts.tp?.data.datasets[0].data)||[];
-  const liveTps = running>0 ? (tpTail[tpTail.length-1] || null) : null;
-  const tps = liveTps ?? (last ? last.completion_tokens/last.decode_s : null);
-  // La referencia aprendida del modelo cargado: mediana del agregado del
-  // servidor. Sirve para leer "está raro" aunque no haya alerta todavía.
-  // Se busca por el modelo CARGADO, no por la lista de ids: con dos modelos
-  // en memoria el nombre compuesto no existe en el índice.
-  const refId = (live.find(m=>m.status?.value==='loaded') || live[0] || {}).id;
-  const bl = refId ? (((state.alerts && state.alerts.models) || {})[refId]) : null;
-  const blTxt = bl
-    ? (bl.samples >= 12 ? bl.median_tok_s.toFixed(0) : `aprendiendo ${bl.samples}/12`)
-    : '—';
-  const kv = occ.device_main_kv_tokens, kvcap = cap.kv_capacity_tokens;
-  const kvPct2 = (kv!=null && kvcap) ? kv/kvcap*100 : null;
-  const kvCol2 = kvPct2==null ? '#fff' : kvPct2>=95?'var(--red)':kvPct2>=85?'var(--amber)':'var(--teal)';
-  $('#now-metrics').innerHTML = `
-    <div class="now-m"><span class="k">carriles</span><b>${maxc?`${running}/${maxc}`:'—'}</b>
-      ${maxc?`<div class="progress"><i style="width:${pct}%"></i></div>`:''}</div>
-    <div class="now-m"><span class="k">en vuelo</span><b style="color:${(req.running||0)>0?'var(--teal)':'#fff'}">${req.running??0}</b></div>
-    <div class="now-m"><span class="k">en cola</span><b style="color:${(req.waiting||0)>0?'var(--amber)':'#fff'}">${req.waiting??occ.waiting??0}</b></div>
-    <div class="now-m"><span class="k">${liveTps!=null?'gen ahora':'último gen'}</span><b style="color:${liveTps!=null?'var(--teal)':'#fff'}">${tps!=null?tps.toFixed(1):'—'} <small>tok/s</small></b></div>
-    <div class="now-m" title="mediana de la velocidad del servidor para este modelo, aprendida de sus últimas muestras"><span class="k">referencia</span><b style="color:${bl?'var(--muted)':'#fff'}">${blTxt} <small>${bl&&bl.samples>=12?'tok/s':''}</small></b></div>
-    <div class="now-m"><span class="k">KV device</span><b style="color:${kvCol2}">${kv!=null?kv.toLocaleString():'—'} <small>tok</small></b>
-      ${kvcap?`<div class="progress"><i style="width:${Math.min(100,kv/kvcap*100).toFixed(0)}%"></i></div>`:''}</div>`;
+  $('#now-metrics').innerHTML = renderEngineCards(d, rates);
+  wireModelRows($('#now-metrics'), d);
+}
+
+// Un recuadro por Engine en memoria. Con dos modelos cargados una sola fila de
+// números era ambigua: el veredicto mezclaba "dormido" con "activo" y cada cifra
+// era de un solo modelo. Acá cada caja es de un modelo y rotula su estado.
+function renderEngineCards(d, rates){
+  const ids = Object.keys(d.engines || {});
+  if (!ids.length){
+    return `<div class="now-metrics">
+      <div class="now-m"><span class="k">carriles</span><b>—</b></div>
+      <div class="now-m"><span class="k">en vuelo</span><b>0</b></div>
+      <div class="now-m"><span class="k">ctx usado</span><b>—</b></div></div>`;
+  }
+  return `<div class="engine-cards">` + ids.map(mid=>{
+    const e = d.engines[mid], l = e.load || {}, res = e.residency || {};
+    const on = e.state === 'loaded';
+    const occ = l.occupancy||{}, cap = l.capacity||{}, req = l.requests||{};
+    const r = rates[mid] || {};
+    const bl = ((state.alerts && state.alerts.models) || {})[mid];
+    const bytes = res.releasable_device_bytes || 0;
+    const hostMiB = (res.host_snapshot_bytes||0)/2**20;
+    const ctxCap = cap.max_context || cap.kv_capacity_tokens || 0;
+    const ctxPct = ctxCap ? Math.min(100, (occ.device_main_kv_tokens||0)/ctxCap*100) : 0;
+    return `<div class="engine-card${on?'':' off'}">
+      <div class="ec-head">
+        <span class="dot ${on?'ok pulse':e.state==='suspended'?'blue':e.state==='loading'?'warn':'off'}"></span>
+        <b>${esc(mid)}</b>
+        <span class="ec-state">${esc({loaded:'activo',sleeping:'dormido',suspended:'suspendido en host',loading:'cargando'}[e.state]||e.state)}</span>
+        <span class="spacer"></span>
+        ${on ? `<button data-act="sleep" data-model="${esc(mid)}">Dormir</button>`
+             : `<button data-act="load" data-model="${esc(mid)}">Despertar</button>`}
+        <button class="iconbtn" data-cfg="${esc(mid)}" title="Config del modelo">${SVG_GEAR}</button>
+      </div>
+      <div class="ec-metrics">
+        <div class="now-m"><span class="k">${on?'VRAM':'tamaño'}</span>
+          <b style="color:${on?'#fff':'var(--dim)'}">${bytes?(bytes/2**30).toFixed(1):'—'} <small>GiB</small></b>
+          ${!on&&hostMiB>1?`<small class="sub">${hostMiB.toFixed(0)} MiB en host</small>`:''}</div>
+        <div class="now-m"><span class="k">ctx usado</span>
+          <b style="color:${ctxPct>85?'var(--amber)':'#fff'}">${(occ.device_main_kv_tokens||0).toLocaleString()} <small>/ ${ctxCap.toLocaleString()}</small></b>
+          ${ctxCap?`<div class="progress"><i style="width:${ctxPct.toFixed(0)}%"></i></div>`:''}</div>
+        <div class="now-m"><span class="k">carriles</span><b>${req.running??0}/${cap.max_concurrency??'—'}</b>
+          ${cap.max_concurrency?`<div class="progress"><i style="width:${Math.min(100,(req.running||0)/cap.max_concurrency*100).toFixed(0)}%"></i></div>`:''}</div>
+        <div class="now-m"><span class="k">en cola</span><b style="color:${(req.waiting||0)>0?'var(--amber)':'#fff'}">${req.waiting??0}</b></div>
+        <div class="now-m"><span class="k">${r.tg>0.5?'gen ahora':'último gen'}</span>
+          <b style="color:${r.tg>0.5?'var(--teal)':'#fff'}">${fmtRate(r.tg, r.lastTps, '').trim()} <small>tok/s</small></b></div>
+        <div class="now-m"><span class="k">${r.pg>0.5?'prefill ahora':'último prefill'}</span>
+          <b style="color:${r.pg>0.5?'var(--teal)':'#fff'}">${fmtRate(r.pg, r.lastPrefill, '').trim()} <small>tok/s</small></b></div>
+        <div class="now-m" title="mediana aprendida de la velocidad del servidor para este modelo"><span class="k">referencia</span>
+          <b style="color:var(--muted)">${bl? (bl.samples>=12?bl.median_tok_s.toFixed(0):`aprendiendo ${bl.samples}/12`) : '—'} <small>${bl&&bl.samples>=12?'tok/s':''}</small></b></div>
+      </div>
+    </div>`;
+  }).join('') + `</div>`;
 }
 
 function slotsHtml(d, occ){
@@ -1483,9 +1627,10 @@ async function loadLive(){
   let gpu=null;
   try{ gpu = await api('/api/gpu'); }catch(e){}
 
-  renderRail(d, gpu, loadOk);
+  const rates = engineRates(d.engines);
+  renderRail(d, gpu, loadOk, rates);
   loadAlerts();
-  renderNow(d, load, cap, occ, req, loadOk);
+  renderNow(d, load, cap, occ, req, loadOk, rates);
 
   // Tiles: ratio acotado -> barra; tasa -> sparkline. El tono dice si hay que
   // mirarlo (normal, ámbar >75%, rojo >90%).
@@ -1681,11 +1826,11 @@ async function loadRequests(){
   state.reqOpen = state.reqOpen ?? new Set();
   renderSpecPos();
   if (same && $('#tbody-req').children.length) {
-    $('#reqs-note').textContent = `${d.requests.length} de ${d.lines} líneas del jsonl`;
+    $('#reqs-note').innerHTML = reqLogNote(d);
     return;
   }
   renderRequests();
-  $('#reqs-note').textContent = `${d.requests.length} de ${d.lines} líneas del jsonl`;
+  $('#reqs-note').innerHTML = reqLogNote(d);
 }
 
 // Aceptación por posición: la TASA real de cada posición del draft, no un
@@ -1740,6 +1885,19 @@ function renderSpecPos(){
   const perStep = rounds ? accepted/rounds : 0;
   note.textContent = `${key} · ${use.length} req · ${perStep.toFixed(2)} tok/ronda`
     + (drafted ? ` · ${(accepted/drafted*100).toFixed(0)}% de los drafts` : '');
+}
+
+// Un jsonl congelado se lee como vivo: las cifras "último gen" son fijas y
+// parecen fresco. Si el motor no está escribiendo, el panel lo dice.
+function reqLogNote(d){
+  const newest = d.requests?.[0]?.ts_ms;
+  const base = `${d.requests.length} de ${d.lines} líneas del jsonl`;
+  if (!newest) return base;
+  const mins = Math.floor((Date.now() - newest) / 60000);
+  if (mins < 10) return base;
+  const when = mins < 60 ? `${mins} min`
+    : mins < 1440 ? `${Math.floor(mins/60)} h` : `${Math.floor(mins/1440)} d`;
+  return `${base} · <span style="color:var(--amber)">sin escribir desde hace ${when}</span>`;
 }
 
 function renderRequests(){
