@@ -187,8 +187,7 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .slot-meta{font-size:9.5px;color:var(--dim);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* Gráficas */
-.charts{display:grid;gap:14px;grid-template-columns:1fr 1fr;margin-top:14px}
-@media(max-width:1000px){.charts{grid-template-columns:1fr}}
+.charts{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:14px}
 .chartbox{background:linear-gradient(180deg,var(--panel2) 0%,var(--panel) 100%);border:1px solid var(--line);
   border-radius:var(--radius);padding:14px 16px;min-width:0;box-shadow:var(--shadow-sm)}
 .chartbox .k{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;
@@ -248,7 +247,28 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .now-m b small{font-size:11px;font-weight:500;color:var(--dim)}
 .now-m .progress{height:4px;background:rgba(255,255,255,0.06);border-radius:2px;margin-top:8px;overflow:hidden}
 .now-m .progress i{display:block;height:100%;background:linear-gradient(90deg,var(--teal-dark),var(--teal));transition:width .5s}
-#now-state{color:#fff}
+/* ── Línea de veredicto: "¿está bien?" en una frase, no un punto suelto ── */
+.sechead.verdict h2{font-size:15px;letter-spacing:-.2px}
+.sechead.verdict.good h2{color:var(--green)}
+.sechead.verdict.warn h2{color:var(--amber)}
+.sechead.verdict.bad  h2{color:var(--red)}
+.sechead.verdict.idle h2{color:var(--text-muted)}
+.sechead.verdict .dot{margin-right:8px;position:relative}
+
+/* ── Aceptación por posición (spec-decode) ──────────────────────────────── */
+.subnote{font:10.5px var(--mono);color:var(--dim);margin:-4px 0 10px;letter-spacing:0}
+.specpos-wrap{height:180px;display:flex;flex-direction:column}
+.specpos{flex:1;display:flex;align-items:stretch;gap:10px;min-height:0}
+.specpos .sp{flex:1;min-width:0;display:flex;flex-direction:column}
+.specpos .spv{font:10.5px var(--mono);color:var(--text-muted);text-align:center;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.specpos .spbwrap{flex:1;min-height:0;display:flex;align-items:flex-end;justify-content:center}
+.specpos .spb{width:100%;max-width:48px;background:linear-gradient(180deg,var(--teal) 0%,var(--teal-dark) 100%);
+  border-radius:4px 4px 0 0;min-height:2px}
+.specpos .sp.zero .spb{background:var(--line)}
+.specpos .spi{font:10px var(--mono);color:var(--dimmer);text-align:center;margin-top:5px}
+.sp-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  text-align:center;font:11.5px var(--mono);color:var(--dim);line-height:1.7;padding:0 14px}
 
 /* ── Tiles: tono + sparkline ──────────────────────────────────────────── */
 .tile.info .v{color:var(--blue)}
@@ -355,11 +375,13 @@ section.tight{margin:0}
 
   <!-- ═══════════════ DASHBOARD ═══════════════ -->
   <div class="pg active" id="pg-dash">
-    <!-- Banda 1: Ahora — qué está haciendo el motor ahora mismo -->
+    <!-- Banda 1: veredicto + qué está haciendo el motor ahora mismo.
+         La línea de veredicto responde "está bien?" en una frase (InferenceInquire),
+         y no un punto suelto: el detalle va al lado, no lo reemplaza. -->
     <section id="now">
-      <div class="sechead">
-        <h2><span class="dot off" id="now-dot"></span><span id="now-state">sin modelo</span></h2>
-        <span class="note" id="now-note"></span>
+      <div class="sechead verdict">
+        <h2><span class="dot off" id="vd-dot"></span><span id="verdict">conectando…</span></h2>
+        <span class="note" id="vd-detail"></span>
         <span class="spacer"></span>
         <span class="note" id="liveupd"></span>
       </div>
@@ -367,7 +389,7 @@ section.tight{margin:0}
       <div id="livebody"></div>
     </section>
 
-    <!-- Banda 2: métricas + gráficas de tasas -->
+    <!-- Banda 2: métricas + gráficas -->
     <section id="metrics">
       <div class="sechead"><h2>Métricas</h2><span class="note" id="livenote"></span></div>
       <div style="padding:15px">
@@ -380,6 +402,11 @@ section.tight{margin:0}
           <div class="chartbox"><div class="k">Prefill (tok/s)</div>
             <div class="wins" id="w-decode"></div>
             <div class="canvas-wrap"><canvas id="c-decode"></canvas></div></div>
+          <div class="chartbox">
+            <div class="k">Aceptación por posición</div>
+            <div class="subnote" id="sp-note"></div>
+            <div id="spec-pos" class="specpos-wrap"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -1104,21 +1131,30 @@ function renderRail(d, gpu, loadOk){
   };
 }
 
+// El veredicto: una frase que conteste "¿está bien?". El nivel tiñe sólo la
+// línea, y el detalle va al lado en vez de competir con ella.
+const VERDICT_DOT = {good:'ok pulse', warn:'warn', bad:'bad', idle:'off'};
+function renderVerdict(lvl, txt, detail){
+  const head = $('#now').querySelector('.sechead');
+  head.className = 'sechead verdict ' + lvl;
+  $('#vd-dot').className = 'dot ' + VERDICT_DOT[lvl];
+  $('#verdict').textContent = txt;
+  $('#vd-detail').textContent = detail || '';
+}
+
 function renderNow(d, load, cap, occ, req, loadOk){
   const live = liveModels(d);
-  const loading = live.some(m=>m.status?.value==='loading');
+  const has = s => live.some(m=>m.status?.value===s);
   const running = occ.running ?? req.running ?? 0;
   const maxc = cap.max_concurrency ?? 0;
   const pct = maxc ? Math.min(100, running/maxc*100) : 0;
-  let txt, cls;
-  if (loading){ txt='cargando'; cls='warn'; }
-  else if (running>0){ txt='decodificando'; cls='ok pulse'; }
-  else if (live.length){ txt='cargado, en reposo'; cls='ok'; }
-  else { txt='sin modelo'; cls='off'; }
-  $('#now-dot').className = 'dot ' + cls;
-  $('#now-state').textContent = txt;
-  $('#now-note').textContent = live.length
-    ? live.map(m=>m.id).join(' · ') : 'ningún modelo cargado — VRAM libre';
+  const ids = live.map(m=>m.id).join(' · ');
+  if (has('loading'))        renderVerdict('warn', 'cargando modelo', ids);
+  else if (running>0)        renderVerdict('good', 'decodificando', `${running} en vuelo · ${ids}`);
+  else if (has('suspended')) renderVerdict('idle', 'suspendido · vive en el host', ids);
+  else if (has('sleeping'))  renderVerdict('idle', 'dormido · despierta al próximo request', ids);
+  else if (live.length)      renderVerdict('good', 'en reposo', ids);
+  else                       renderVerdict('idle', 'sin modelo cargado', 'VRAM libre · carga uno para ver ocupación y KV');
 
   const last = (state.reqs||[]).find(r=>r.decode_s>0 && r.completion_tokens);
   const tpTail = (state.charts.tp?.data.datasets[0].data)||[];
@@ -1329,8 +1365,8 @@ async function loadLive(){
   catch(e){ errhost.innerHTML = `<div class="err" style="margin:15px">${esc(e.message)}</div>`; return; }
   if (!d.online){
     errhost.innerHTML = `<div class="err" style="margin:15px">El servidor <code>${esc(d.url)}</code> no responde.</div>`;
-    $('#now-state').textContent = 'sin conexión';
-    $('#now-dot').className = 'dot bad';
+    renderVerdict('bad', 'el servidor no responde', d.url || '');
+    $('#now-metrics').innerHTML = '';
     return;
   }
   errhost.innerHTML = '';
@@ -1567,12 +1603,67 @@ async function loadRequests(){
     d.requests[d.requests.length-1]?.ts_ms === prev[prev.length-1]?.ts_ms;
   state.reqs = d.requests;
   state.reqOpen = state.reqOpen ?? new Set();
+  renderSpecPos();
   if (same && $('#tbody-req').children.length) {
     $('#reqs-note').textContent = `${d.requests.length} de ${d.lines} líneas del jsonl`;
     return;
   }
   renderRequests();
   $('#reqs-note').textContent = `${d.requests.length} de ${d.lines} líneas del jsonl`;
+}
+
+// Aceptación por posición: la TASA real de cada posición del draft, no un
+// conteo crudo — el denominador son las rondas de verificación, que es lo que
+// hace comparables posiciones distintas y requests de distinta longitud.
+//
+// Se agrega sólo entre requests del mismo backend y ventana: mezclar ventanas
+// distintas haría la posición 4 existir en unos y no en otros, y la media
+// mentiría.
+function renderSpecPos(){
+  const box = $('#spec-pos'), note = $('#sp-note');
+  const rs = (state.reqs||[]).filter(r => r.spec_rounds>0 && (r.histogram||[]).length);
+  if (!rs.length){
+    box.innerHTML = `<div class="sp-empty">sin spec-decode en los últimos requests
+      <span style="color:var(--dimmer)">aparece cuando el modelo corre con <code>--spec</code></span></div>`;
+    note.textContent = '';
+    return;
+  }
+  const groups = new Map();
+  for (const r of rs){
+    const k = (r.spec_backend||'?')+' · ventana '+(r.draft_window??'?');
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  const [key, g] = [...groups.entries()].sort((a,b)=>b[1].length-a[1].length)[0];
+  const use = g.slice(-50);
+  // `accepted_per_position` siempre viene con 15 ranuras (la del array de
+  // métricas), pero sólo --draft-tokens posiciones pueden tener drafts. Dibujar
+  // las 15 pondría 12 barras siempre en cero; se recorta a la ventana real.
+  const len = Math.max(...use.map(r=>r.histogram.length));
+  let W = use[0].draft_window;
+  if (!(W>0) || W>len) W = len - 1;
+  while (W>1 && use.every(r => !(r.histogram[W-1]>0))) W--;
+  const acc = new Array(W).fill(0);
+  let rounds = 0, accepted = 0, drafted = 0;
+  for (const r of use){
+    for (let i=0;i<W;i++) acc[i] += r.histogram[i] || 0;
+    rounds += r.spec_rounds;
+    accepted += r.accepted_tokens || 0;
+    drafted += r.drafted_tokens || 0;
+  }
+  const rates = acc.map(a => rounds ? a/rounds : 0);
+  box.innerHTML = `<div class="specpos">` + rates.map((v,i)=>{
+    // Escalar contra el 100% no contra el máximo del grupo: si nadie pasa el
+    // 20%, unas barras llenarían la caja y harían creer que el spec va bien.
+    const h = Math.min(100, v*100);
+    return `<div class="sp${v<=0.001?' zero':''}">
+      <div class="spv">${(v*100).toFixed(0)}%</div>
+      <div class="spbwrap"><div class="spb" style="height:${h.toFixed(1)}%"></div></div>
+      <div class="spi">pos ${i}</div></div>`;
+  }).join('') + `</div>`;
+  const perStep = rounds ? accepted/rounds : 0;
+  note.textContent = `${key} · ${use.length} req · ${perStep.toFixed(2)} tok/ronda`
+    + (drafted ? ` · ${(accepted/drafted*100).toFixed(0)}% de los drafts` : '');
 }
 
 function renderRequests(){

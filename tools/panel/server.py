@@ -853,6 +853,9 @@ class API:
                 "finish": res.get("finish_reason"),
                 "spec_backend": spec.get("backend"),
                 "draft_window": spec.get("draft_window"),
+                # Rondas de verificación: el denominador real de la aceptación por
+                # posición (cuántas veces se propuso un draft en cada posición).
+                "spec_rounds": spec.get("rounds"),
                 "accepted_tokens": spec.get("accepted_tokens"),
                 "drafted_tokens": drafted,
                 "acceptance_avg": acc_avg,
