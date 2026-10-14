@@ -1042,20 +1042,30 @@ class API:
         models = []
         if models_dir.is_dir():
             for entry in sorted(models_dir.iterdir()):
-                if not entry.is_dir():
+                # Mirror discover_models() in model_catalog.cpp: a .ninfer file (or a
+                # symlink pointing at one) is a model on its own; a directory holding
+                # exactly one .ninfer is a model named after the directory.
+                if entry.suffix == ".ninfer" and entry.is_file():
+                    mid, artifact = entry.stem, entry
+                elif entry.is_dir():
+                    files = [f for f in entry.iterdir()
+                             if f.suffix == ".ninfer" and f.is_file()]
+                    if len(files) != 1:
+                        continue
+                    mid, artifact = entry.name, files[0]
+                else:
                     continue
-                artifacts = [f for f in entry.iterdir() if f.suffix == ".ninfer" and f.is_file()]
-                if not artifacts:
-                    continue
-                pid = ids.get(entry.name, {})
+                pid = ids.get(mid, {})
+                target = artifact.resolve()
                 models.append({
-                    "id": entry.name,
-                    "artifact": pid.get("artifact") or pid.get("model") or str(artifacts[0]),
+                    "id": mid,
+                    "artifact": pid.get("artifact") or pid.get("model") or str(artifact),
+                    "artifact_real": str(target) if target != artifact else "",
                     "alias": pid.get("alias", ""),
                     "load_on_startup": pid.get("load-on-startup", ""),
                     "flags": {k: v for k, v in pid.items()
                               if k not in ("model", "artifact", "alias", "load-on-startup")},
-                    "preset": entry.name in ids,
+                    "preset": mid in ids,
                     "on_disk": True,
                 })
         # Add preset-only entries that have no directory on disk.
@@ -1072,39 +1082,119 @@ class API:
                 "models": models,
                 "global": (sections[0][1] if (sections and sections[0][0] == "*") else {})}
 
-    def router_set_alias(self, model_id: str, alias: str) -> dict:
-        models_dir, preset_path = self._router_paths()
-        text = preset_path.read_text() if preset_path.is_file() else ""
-        sections = self._parse_preset(preset_path) if preset_path.is_file() else []
-        if not any(n == model_id for n,_ in sections):
-            # add a new section. The router cannot load a model without artifact though.
-            sections.append((model_id, {}))
-        # rebuild text: keep other lines, update alias entry in target section
-        out_lines = []; cur = None; done = False
+    @staticmethod
+    def _split_preset(text: str) -> list:
+        """[(section_name or None, [raw lines])], keeping the preamble as None.
+
+        Line-oriented so comments and unknown keys survive a rewrite; only the
+        one section being edited is rebuilt."""
+        chunks: list = []
         for raw in text.splitlines():
             trimmed = raw.strip()
             if trimmed.startswith("[") and trimmed.endswith("]"):
-                cur = trimmed[1:-1].strip()
-                out_lines.append(raw)
-                continue
-            if cur == model_id and (trimmed.lower().startswith("alias") and "=" in trimmed):
-                if alias.strip():
-                    out_lines.append(f"alias = {alias.strip()}")
-                done = True
-                continue
-            out_lines.append(raw)
-        text = "\n".join(out_lines) + ("\n" if out_lines else "")
-        # if section had no alias line, insert one after header
-        if model_id in [n for n,_ in sections] and not done and alias.strip():
-            lines = text.splitlines()
-            new = []
-            for raw in lines:
-                new.append(raw)
-                if raw.strip() == f"[{model_id}]":
-                    new.append(f"alias = {alias.strip()}")
-            text = "\n".join(new) + ("\n" if new else "")
-        preset_path.write_text(text)
-        return 200, {"ok": True, "restart_required": True, "model": model_id, "alias": alias}
+                chunks.append((trimmed[1:-1].strip(), []))
+            elif chunks:
+                chunks[-1][1].append(raw)
+            else:
+                chunks.append((None, [raw]))
+        return chunks
+
+    @staticmethod
+    def _join_preset(chunks: list) -> str:
+        out: list[str] = []
+        for name, lines in chunks:
+            if name is not None:
+                out.append(f"[{name}]")
+            out.extend(lines)
+        return "\n".join(out) + "\n"
+
+    def _router_write_model(self, model_id: str, artifact: str | None,
+                            alias: str | None, flags: dict | None,
+                            load_on_startup: str | None = None) -> None:
+        """Rewrite one [model] section, preserving every other line.
+
+        section order, other sections and the [*] defaults are byte-preserved.
+        """
+        path = self._router_paths()[1]
+        text = path.read_text() if path.is_file() else ""
+        block: list[str] = []
+        if artifact:
+            block.append(f"artifact = {artifact}")
+        if alias:
+            block.append(f"alias = {alias}")
+        if load_on_startup not in (None, ""):
+            block.append(f"load-on-startup = {load_on_startup}")
+        for key, value in (flags or {}).items():
+            block.append(f"{key} = {value}")
+        chunks = self._split_preset(text)
+        for i, (name, _lines) in enumerate(chunks):
+            if name == model_id:
+                chunks[i] = (name, block)
+                break
+        else:
+            chunks.append((model_id, block))
+        path.write_text(self._join_preset(chunks))
+
+    def router_set_alias(self, model_id: str, alias: str) -> tuple:
+        if not model_id:
+            return 400, {"error": "model is required"}
+        sections = dict(self._parse_preset(self._router_paths()[1]))
+        cur = sections.get(model_id, {})
+        artifact = cur.get("artifact") or cur.get("model") or ""
+        flags = {k: v for k, v in cur.items()
+                 if k not in ("model", "artifact", "alias", "load-on-startup")}
+        self._router_write_model(model_id, artifact, alias,
+                                 flags, cur.get("load-on-startup"))
+        return 200, {"ok": True, "restart_required": True,
+                     "model": model_id, "alias": alias}
+
+    def router_save_model(self, body: dict) -> tuple:
+        """Save alias + flags of an existing model, or add one with an artifact."""
+        model_id = (body.get("model") or "").strip()
+        if not model_id:
+            return 400, {"error": "model is required"}
+        models_dir, preset_path = self._router_paths()
+        sections = dict(self._parse_preset(preset_path))
+        cur = sections.get(model_id)
+        artifact = (body.get("artifact") or (cur or {}).get("artifact")
+                    or (cur or {}).get("model") or "").strip()
+        is_new = cur is None
+        if is_new:
+            if not artifact:
+                return 400, {"error": "a new model needs an artifact (.ninfer path)"}
+            src = Path(artifact)
+            if not src.is_file():
+                return 400, {"error": f"artifact does not exist: {artifact}"}
+            link = models_dir / f"{model_id}.ninfer"
+            if not link.exists():
+                models_dir.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(src)
+            artifact = str(link)
+        flags = {k: v for k, v in (body.get("flags") or {}).items() if k}
+        alias = (body.get("alias") or "").strip()
+        load = (body.get("load_on_startup") or "").strip()
+        self._router_write_model(model_id, artifact, alias, flags, load)
+        return 200, {"ok": True, "restart_required": True, "model": model_id}
+
+    def router_delete_model(self, body: dict) -> tuple:
+        model_id = (body.get("model") or "").strip()
+        if not model_id:
+            return 400, {"error": "model is required"}
+        models_dir, preset_path = self._router_paths()
+        chunks = self._split_preset(preset_path.read_text() if preset_path.is_file() else "")
+        kept = [c for c in chunks if c[0] != model_id]
+        if len(kept) == len(chunks):
+            return 404, {"error": f"{model_id} is not in the preset"}
+        preset_path.write_text(self._join_preset(kept))
+        removed_link = False
+        if body.get("delete_link"):
+            link = models_dir / f"{model_id}.ninfer"
+            # Only the symlink this panel manages, never the artifact it points at.
+            if link.is_symlink():
+                link.unlink()
+                removed_link = True
+        return 200, {"ok": True, "restart_required": True,
+                     "model": model_id, "removed_link": removed_link}
 
     def router_restart(self) -> dict:
         import subprocess
@@ -1559,7 +1649,14 @@ class Handler(BaseHTTPRequestHandler):
             code, payload = self.api.control(body)
             return self._json(payload, code)
         if parsed.path == "/api/router/alias":
-            code, payload = self.api.router_set_alias(body.get("model", ""), body.get("alias", ""))
+            code, payload = self.api.router_set_alias(body.get("model", ""),
+                                                      body.get("alias", ""))
+            return self._json(payload, code)
+        if parsed.path == "/api/router/save":
+            code, payload = self.api.router_save_model(body)
+            return self._json(payload, code)
+        if parsed.path == "/api/router/delete":
+            code, payload = self.api.router_delete_model(body)
             return self._json(payload, code)
         if parsed.path == "/api/router/restart":
             payload = self.api.router_restart()
