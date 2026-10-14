@@ -13,7 +13,7 @@ const REQ_COLS = [
   {k:'cache_hit', t:'cache', d:0},
   {k:'acceptance_avg', t:'acc len', d:2},
   {k:'draft_rate', t:'draft %', d:1},
-  // bajo demanda
+  // on demand
   {k:'protocol', t:'protocolo', more:true, l:true},
   {k:'prefill_tokens', t:'prefill tok', more:true, d:0},
   {k:'finish', t:'finish', more:true, l:true},
@@ -28,8 +28,8 @@ export async function loadRequests(){
   try{ d = await api('/api/requests?n=60'); }
   catch(e){ return; }
   if (!d.ok){ return; }
-  // No re-renderizar si nada cambió: el polling de 3s no debe destruir un
-  // detalle abierto ni resetear el scroll cada vez.
+  // Do not re-render when nothing changed: a 3s poll must not destroy an open
+  // detail row nor reset the scroll every time.
   const prev = state.reqs || [];
   const same = d.requests.length === prev.length &&
     d.requests[0]?.ts_ms === prev[0]?.ts_ms &&
@@ -45,19 +45,19 @@ export async function loadRequests(){
   $('#reqs-note').innerHTML = reqLogNote(d);
 }
 
-// Aceptación por posición: la TASA real de cada posición del draft, no un
-// conteo crudo — el denominador son las rondas de verificación, que es lo que
-// hace comparables posiciones distintas y requests de distinta longitud.
+// Acceptance by position: the real RATE at each draft position, not a raw
+// count -- the denominator is the verification rounds, which is what makes
+// positions and requests of different length comparable.
 //
-// Se agrega sólo entre requests del mismo backend y ventana: mezclar ventanas
-// distintas haría la posición 4 existir en unos y no en otros, y la media
-// mentiría.
+// Aggregated only across requests with the same backend and window: mixing
+// windows would make position 4 exist in some requests and not others, and the
+// mean would lie.
 function renderSpecPos(){
   const box = $('#spec-pos'), note = $('#sp-note');
   const rs = (state.reqs||[]).filter(r => r.spec_rounds>0 && (r.histogram||[]).length);
   if (!rs.length){
-    box.innerHTML = `<div class="sp-empty">sin spec-decode en los últimos requests
-      <span style="color:var(--dimmer)">aparece cuando el modelo corre con <code>--spec</code></span></div>`;
+    box.innerHTML = `<div class="sp-empty">no spec-decode in the recent requests
+      <span style="color:var(--dimmer)">it appears when the model runs with <code>--spec</code></span></div>`;
     note.textContent = '';
     return;
   }
@@ -69,9 +69,10 @@ function renderSpecPos(){
   }
   const [key, g] = [...groups.entries()].sort((a,b)=>b[1].length-a[1].length)[0];
   const use = g.slice(-50);
-  // `accepted_per_position` siempre viene con 15 ranuras (la del array de
-  // métricas), pero sólo --draft-tokens posiciones pueden tener drafts. Dibujar
-  // las 15 pondría 12 barras siempre en cero; se recorta a la ventana real.
+  // `accepted_per_position` always arrives with 15 slots (the size of the metrics
+  // array), but only --draft-tokens positions can ever hold drafts. Drawing all
+  // 15 leaves twelve bars permanently at zero, so it is trimmed to the real
+  // window.
   const len = Math.max(...use.map(r=>r.histogram.length));
   let W = use[0].draft_window;
   if (!(W>0) || W>len) W = len - 1;
@@ -86,8 +87,8 @@ function renderSpecPos(){
   }
   const rates = acc.map(a => rounds ? a/rounds : 0);
   box.innerHTML = `<div class="specpos">` + rates.map((v,i)=>{
-    // Escalar contra el 100% no contra el máximo del grupo: si nadie pasa el
-    // 20%, unas barras llenarían la caja y harían creer que el spec va bien.
+    // Scaled against 100%, not against the group's maximum: if nobody clears
+    // 20%, scaling to the maximum fills the box and suggests the spec works well.
     const h = Math.min(100, v*100);
     return `<div class="sp${v<=0.001?' zero':''}">
       <div class="spv">${(v*100).toFixed(0)}%</div>
@@ -99,17 +100,17 @@ function renderSpecPos(){
     + (drafted ? ` · ${(accepted/drafted*100).toFixed(0)}% de los drafts` : '');
 }
 
-// Un jsonl congelado se lee como vivo: las cifras "último gen" son fijas y
-// parecen fresco. Si el motor no está escribiendo, el panel lo dice.
+// A frozen jsonl reads as a live one: the "last gen" figures are fixed and look
+// fresh. When the engine is not writing, the panel says so.
 function reqLogNote(d){
   const newest = d.requests?.[0]?.ts_ms;
-  const base = `${d.requests.length} de ${d.lines} líneas del jsonl`;
+  const base = `${d.requests.length} of ${d.lines} jsonl lines`;
   if (!newest) return base;
   const mins = Math.floor((Date.now() - newest) / 60000);
   if (mins < 10) return base;
   const when = mins < 60 ? `${mins} min`
     : mins < 1440 ? `${Math.floor(mins/60)} h` : `${Math.floor(mins/1440)} d`;
-  return `${base} · <span style="color:var(--amber)">sin escribir desde hace ${when}</span>`;
+  return `${base} · <span style="color:var(--amber)">not written for ${when}</span>`;
 }
 
 function renderRequests(){
@@ -173,7 +174,7 @@ function detailReq(r){
       ${hist.length?`<div class="hist">${hist.map((v,pos)=>
         `<div style="height:${(v/maxh*100).toFixed(1)}%" title="pos ${pos}: ${v}"><span>${pos}</span></div>`).join('')}
         </div><div style="font:10px var(--mono);color:var(--dimmer);margin-top:20px">
-        aceptados por posición</div>`:''}
+        accepted by position</div>`:''}
       </div>
     </div></td></tr>`;
 }
@@ -181,6 +182,6 @@ function detailReq(r){
 
 export function toggleReqCols(){
   reqMore = !reqMore;
-  $('#q-reqmore').textContent = reqMore ? 'Menos columnas' : 'Más columnas';
+  $('#q-reqmore').textContent = reqMore ? 'Fewer columns' : 'More columns';
   loadRequests();
 }

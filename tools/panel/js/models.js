@@ -10,21 +10,21 @@ export function modelArgs(m){
            vision: has('--vision') };
 }
 
-// ── Favoritos → quick-load del Dashboard ───────────────────────────────────
-// Sin backend: localStorage, por navegador. Cuando el panel tenga config
-// persistente esto se muda ahí y pasa a ser compartido entre navegadores.
+// ── Favourites -> the dashboard's quick load ───────────────────────────────
+// No backend: localStorage, per browser. Once the panel has persistent config
+// this moves there and becomes shared across browsers.
 const FAV_KEY = 'ninfer.favs';
 export let favs = new Set();
 try{ favs = new Set(JSON.parse(localStorage.getItem(FAV_KEY) || '[]')); }catch(e){}
 function favSave(){ try{ localStorage.setItem(FAV_KEY, JSON.stringify([...favs])); }catch(e){} }
 
-// Estrella de favorito: hueca en gris, rellena y ámbar cuando está marcada.
+// Favourite star: hollow grey when unmarked, filled amber when marked.
 const SVG_STAR = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';// Engranaje de verdad (el mismo trazo que la cabecera del modal), no un "sol".
 export const SVG_GEAR = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
 
-// Una fila por modelo, no una card. El cargado primero; el resto es catálogo.
-// `rich` agrega la estrella de favorito y el engranaje de config: es la vista de
-// la pestaña Modelos. La del Dashboard va sin ellas, sólo acciones de carga.
+// One row per model, not a card. The loaded one first; the rest is catalog.
+// `rich` adds the favourite star and the config gear: that is the Modelos tab.
+// The dashboard's has neither, only load actions.
 function buildModelRow(m, d, rich){
   const st = m.status?.value || 'unloaded';
   const ar = modelArgs(m);
@@ -40,9 +40,9 @@ function buildModelRow(m, d, rich){
     : st==='loading' ? `<button disabled>cargando…</button>`
     : `<button data-act="load" data-model="${esc(m.id)}">Cargar</button>`;
   const star = rich ? `<button class="iconbtn starbtn${favs.has(m.id)?' on':''}" data-fav="${esc(m.id)}"
-      title="${favs.has(m.id)?'Quitar del quick-load del Dashboard':'Agregar al quick-load del Dashboard'}">${SVG_STAR}</button>` : '';
+      title="${favs.has(m.id)?'Remove from the Dashboard quick load':'Add to the Dashboard quick load'}">${SVG_STAR}</button>` : '';
   const gear = rich ? `<button class="iconbtn" data-cfg="${esc(m.id)}"
-      title="Config del modelo: flags de lanzamiento">${SVG_GEAR}</button>` : '';
+      title="Model config: launch flags">${SVG_GEAR}</button>` : '';
   const meta = `ctx ${ar.ctx??'—'}${ar.spec?` · ${ar.spec}`:''}${ar.vision?' · vision':''}`;
   return `<div class="model-row${rich?' rich':''} ${st!=='unloaded'?'live':''}">
     ${star}
@@ -62,7 +62,7 @@ export function modelRows(d, req, rich){
   return rows.map(m=>buildModelRow(m, d, rich)).join('');
 }
 
-// Quick-load del Dashboard: los favoritos marcados en la pestaña Modelos.
+// Dashboard quick load: the favourites marked in the Modelos tab.
 export function renderQuickLoad(d){
   const box = $('#quickload');
   const fav = ((d.models?.data)||[]).filter(m=>favs.has(m.id));
@@ -80,8 +80,8 @@ export function renderQuickLoad(d){
     }).join('') + '</div>';
 }
 
-// Un solo wiring para las tres tablas de modelos (dashboard, quick-load, control):
-// `data-*` en el botón, no la posición en el DOM.
+// One wiring for the three model tables (dashboard, quick load, control):
+// `data-*` on the button, not the position in the DOM.
 export function wireModelRows(host, d){
   host.querySelectorAll('button[data-act]').forEach(b=>{
     b.onclick = async () => {
@@ -93,9 +93,9 @@ export function wireModelRows(host, d){
         if (r.error) flash(String(r.error).slice(0,160), true);
       }catch(e){ flash(e.message, true); }
       if (host.id === 'ctl-rows'){
-        // Re-pedir /api/live: si se re-renderiza con el payload viejo la fila
-        // seguiría diciendo "Dormir" sobre un modelo que ya duerme. No se llama
-        // loadControl() completo porque resetearía el formulario de recipes.
+        // Re-fetch /api/live: re-rendering from the stale payload would leave the
+        // row saying "Sleep" on a model that already sleeps. loadControl() is not
+        // called in full because it would reset the recipe form.
         const live = await api('/api/live').catch(()=>null);
         if (live){ state.ctlLive = live; renderCtlRows(live); }
       } else refresh.live?.();
@@ -117,17 +117,17 @@ export function wireModelRows(host, d){
   });
 }
 
-// Config de un modelo: los flags reales con los que el router lo lanzaría.
-// Es de sóla lectura a propósito — el panel lee router-preset.ini, no lo escribe —
-// y el aviso de abajo lo dice, en vez de fingir un botón "Guardar".
+// A model's config: the real flags the router would launch it with. Read-only
+// on purpose -- the panel reads router-preset.ini, it does not write it -- and
+// the note below says so instead of faking a Save button.
 export function openModelCfg(m){
   const ar = modelArgs(m);
   const args = (m.status?.args)||[];
   const res = m.residency || {};
   const stDot = m.status?.value==='loaded' ? 'ok' : m.status?.value==='sleeping' ? 'warn'
     : m.status?.value==='suspended' ? 'blue' : 'off';
-  // Un Map por flag: --device viene dos veces (default del preset + CLI) y
-  // duplicarlo sería ruido. host/port son del proceso, no del modelo.
+  // One Map per flag: --device arrives twice (preset default + CLI) and listing
+  // it twice is noise. host/port belong to the process, not the model.
   const map = new Map();
   for (let i=0;i<args.length;i++){
     const a = args[i];
@@ -135,7 +135,7 @@ export function openModelCfg(m){
     const next = args[i+1];
     const hasVal = next!=null && !next.startsWith('--');
     const prev = map.get(a);
-    map.set(a, (prev ? prev + ', ' : '') + (hasVal ? next : 'sí'));
+    map.set(a, (prev ? prev + ', ' : '') + (hasVal ? next : 'yes'));
     if (hasVal) i++;
   }
   $('#modal-cfg-title').textContent = 'Config · ' + m.id;
@@ -153,17 +153,17 @@ export function openModelCfg(m){
     <div class="cfg-args">${esc(args.join(' '))}</div>
     <div class="filenote">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" style="flex:none;margin-top:1px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-      <div>Estos flags vienen de <code>router-preset.ini</code> y del catálogo de
+      <div>These flags come from <code>router-preset.ini</code> and the catalog in
       <code>--models-dir</code>. El panel los lee, no los escribe: para cambiarlos hay
-      que editar ese archivo y <b>reiniciar el router</b> — no hay hot-reload del catálogo.</div>
+      that file and <b>restart the router</b> — the catalog has no hot-reload.</div>
     </div>`;
   $('#modal-cfg').style.display = 'flex';
 }
 
-// Alertas y referencias aprendidas. El backend corre su propio muestreo cada
-// 2 s aunque nadie mire la página; esto sólo lee el resultado.
-// Re-render barato: sólo las filas, sin volver a pedir /api/live ni a recalcular
-// el formulario de recipes (que perdería lo que el usuario estuviera escribiendo).
+// Alerts and learned baselines. The backend samples on its own every 2 s
+// whether or not anyone is watching; this only reads the result.
+// Cheap re-render: rows only, without re-fetching /api/live or recomputing the
+// recipe form, which would lose whatever the user was typing.
 export function renderCtlRows(d){
   const host = $('#ctl-rows');
   if (!host || !d || !d.online) return;

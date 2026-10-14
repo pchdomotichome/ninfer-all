@@ -20,7 +20,7 @@ async function boot(){
   try{
     state.cfg = await api('/api/config');
   }catch(e){
-    $('#banner').innerHTML = `<div class="err">No se pudo leer la configuración: ${esc(e.message)}</div>`;
+    $('#banner').innerHTML = `<div class="err">Could not read the configuration: ${esc(e.message)}</div>`;
     return;
   }
   const a = state.cfg.aiperf;
@@ -56,12 +56,12 @@ async function boot(){
   $('#c-hf').onclick = hfOpen;
   $('#modal-hf-close').onclick = hfClose;
   $('#modal-hf').onclick = (e) => { if (e.target.id === 'modal-hf') hfClose(); };
-  // Config de modelo (solo lectura; ver openModelCfg)
+  // Model config (read-only; see openModelCfg)
   $('#modal-cfg-close').onclick = () => { $('#modal-cfg').style.display = 'none'; };
   $('#modal-cfg').onclick = (e) => { if (e.target.id === 'modal-cfg') $('#modal-cfg').style.display = 'none'; };
   wireHfSearch();
   $('#q-more').onclick = e=>{ state.more=!state.more;
-    e.target.textContent = state.more?'Menos columnas':'Más columnas'; load(); };
+    e.target.textContent = state.more?'Fewer columns':'More columns'; load(); };
   ['#q-profile','#q-engine','#q-spec','#q-dataset'].forEach(s=>$(s).onchange=()=>{
     state.page = 1; load();
   });

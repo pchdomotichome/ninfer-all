@@ -23,17 +23,17 @@ export async function loadConvertFiles(){
     ${esc(c.path.split('/').pop())}</option>`);
   ss.innerHTML = '<option value="">— elegir fuente —</option>' + srcOpts.join('');
   ss.onchange = syncDelCtl; syncDelCtl();
-  // Recipes reales de tools/convert, no hardcodeadas: MoE/35B/Flash-Next incluidas.
+  // Real recipes from tools/convert, not hardcoded: MoE/35B/Flash-Next included.
   if (recs && recs.ok){
     $('#c-recipe').innerHTML = Object.keys(recs.recipes).sort().map(r=>
       `<option value="${esc(r)}">${esc(r)}</option>`).join('');
     $('#convnote').textContent =
       `${d.artifacts.length} artifacts · ${d.sources.length} fuentes · ${d.checkpoints.length} checkpoints · ${Object.keys(recs.recipes).length} recipes`;
   } else {
-    $('#convnote').textContent = `no se pudieron leer las recipes: ${recs?.error||'?'}`;
+    $('#convnote').textContent = `could not read the recipes: ${recs?.error||'?'}`;
   }
-  // Basenames de GGUFs locales → ruta real, para marcar "✓ ya lo tenés"
-  // en el buscador HF y seleccionar el archivo local de una.
+  // Local GGUF basenames -> real path, to mark "✓ you already have it" in the
+  // HF search and to pick the local file for one of them.
   hfLocal = new Map(d.sources.map(s=>[s.path.split('/').pop(), s.path]));
 }
 
@@ -55,8 +55,8 @@ export async function hfSearch(q){
   try{ r = await api('/api/convert/search?q=' + encodeURIComponent(q)); }
   catch(e){ $('#hf-status').textContent = e.message; return; }
   const hits = r.hits || [];
-  $('#hf-status').textContent = r.error || (hits.length ? hits.length + ' resultados' : 'sin resultados');
-  if (!hits.length){ box.innerHTML = `<div class="empty" style="padding:14px">nada para "${esc(q)}"</div>`; return; }
+  $('#hf-status').textContent = r.error || (hits.length ? hits.length + ' results' : 'no results');
+  if (!hits.length){ box.innerHTML = `<div class="empty" style="padding:14px">nothing for "${esc(q)}"</div>`; return; }
   box.innerHTML = hits.map(h=>`
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 12px;
       border:1px solid var(--line-subtle);border-radius:var(--radius-sm);margin-bottom:6px;cursor:pointer"
@@ -75,8 +75,8 @@ async function hfPick(encModel){
   let g;
   try{ g = await api('/api/convert/ggufs?model=' + encodeURIComponent(model)); }
   catch(e){ $('#hf-status').textContent = e.message; return; }
-  if (!g || !g.length){ $('#hf-results').innerHTML = '<div class="empty" style="padding:14px">sin .gguf en este repo</div>'; return; }
-  // Agrupar por quant: los shards de una cuantización se bajan juntos.
+  if (!g || !g.length){ $('#hf-results').innerHTML = '<div class="empty" style="padding:14px">no .gguf in this repo</div>'; return; }
+  // Group by quant: the shards of one quantisation download together.
   const groups = new Map();
   for (const x of g){
     if (!groups.has(x.quant)) groups.set(x.quant, []);
@@ -85,7 +85,7 @@ async function hfPick(encModel){
   const quantLabel = q => q.startsWith('__') ? q.slice(2).toUpperCase() : q;
   $('#hf-results').innerHTML = `
     <div style="margin-bottom:10px;font:12px var(--mono);color:var(--dim)">
-      <b style="color:var(--teal)">${esc(model)}</b> — elegí una cuantización (✓ = ya local, ⬇ = descargar):
+      <b style="color:var(--teal)">${esc(model)}</b> — pick a quantisation (✓ = already local, ⬇ = download):
       <span style="float:right;cursor:pointer;color:var(--amber)" onclick="hfSearch(document.getElementById('hf-q').value)">← volver</span>
     </div>
     ${[...groups.entries()].map(([q, fs]) => {
@@ -109,7 +109,7 @@ async function hfPick(encModel){
 }
 
 function hfPickRow(el){
-  if (el.dataset.act === 'dl') return;      // el click fue en el botón de descargar
+  if (el.dataset.act === 'dl') return;      // the click was on the download button
   const model = atob(el.dataset.model);
   const val = atob(el.dataset.first);
   const label = val.split('/').pop();
@@ -124,11 +124,11 @@ function hfPickRow(el){
   hfClose();
   syncDelCtl();
   flash(val.startsWith('hf://')
-    ? 'Fuente remota marcada — usá ⬇ para descargarla al inbox.'
+    ? 'Remote source marked — use ⬇ to download it into the inbox.'
     : 'Fuente local seleccionada.');
 }
 
-// El borrado de la fuente solo aplica a lo que el panel descargó (inbox/).
+// Deleting the source only applies to what the panel downloaded (inbox/).
 export function syncDelCtl(){
   const w = $('#c-del-wrap');
   if (!w) return;
@@ -137,11 +137,11 @@ export function syncDelCtl(){
   $('#c-del').disabled = !inbox;
   $('#c-del').checked = false;
   w.title = inbox ? 'Opt-in: borra ninfer/inbox/ completo de ese repo al convertir OK.' 
-                  : 'Solo vale para fuentes descargadas por el panel (inbox/).';
+                  : 'Only valid for sources the panel downloaded (inbox/).';
   probeSource(src);
 }
 
-// Auto-recipe + sources de la fuente: lee la fuente y arma recipe/base/gguf/
+// Auto-recipe + sources from the source: read it and assemble recipe/base/gguf/
 // dflash2/vision/components/template. state.probe alimenta runConvert.
 let probeCache = {};
 async function probeSource(src){
@@ -153,7 +153,7 @@ async function probeSource(src){
   if (probeCache[src]){ pr = probeCache[src]; }
   else{
     try{ pr = await api('/api/convert/probe?path=' + encodeURIComponent(src)); }
-    catch(e){ box.innerHTML = `<span class="err">probe falló: ${esc(e.message)}</span>`; return; }
+    catch(e){ box.innerHTML = `<span class="err">probe failed: ${esc(e.message)}</span>`; return; }
     if (pr && !pr.error) probeCache[src] = pr;
   }
   state.probe = pr;
@@ -172,7 +172,7 @@ async function probeSource(src){
       (pr.components.length>1?` · <span style="color:var(--cyan)">comp: ${esc(pr.components.join(','))}</span>`:'') +
       (pr.template?` · tmpl:${esc(pr.template.split('/').slice(-2)[0])}`:'');
   } else {
-    box.innerHTML = `<span class="err">⚠ recipe desconocida para esta fuente — seleccioná la recipe manualmente.</span>`;
+    box.innerHTML = `<span class="err">⚠ unknown recipe for this source — pick the recipe manually.</span>`;
   }
 }
 
@@ -214,7 +214,7 @@ async function pollDownload(){
   state.download = null;
   $('#hf-status').textContent = '';
   if (st.status==='failed'){
-    flash('Fallo la descarga: ' + (st.error || 'ver log').slice(0,200), true);
+    flash('Download failed: ' + (st.error || 'see log').slice(0,200), true);
     return;
   }
   // done
@@ -250,7 +250,7 @@ export async function inspectArtifact(){
     box.innerHTML = `<div class="detailbox" style="width:100%;max-width:none">
       <div class="dgroup"><h4>Artifact</h4><dl class="kv">
         <span>nombre</span><span>${esc(r.name||'—')}</span>
-        <span>versión</span><span>${r.version}</span>
+        <span>version</span><span>${r.version}</span>
         <span>peso</span><span>${fmtSize(r.file_bytes)}</span>
         <span>tensores</span><span>${r.tensors}</span>
         <span>formats</span><span>${esc(Object.entries(r.formats||{}).map(([k,v])=>k+': '+v).join(', '))}</span>
@@ -262,13 +262,13 @@ export async function inspectArtifact(){
 
 export async function runConvert(){
   const body = { model:$('#c-sources').value.trim(), recipe:$('#c-recipe').value };
-  if (!body.model){ flash('Elegí una fuente primero.'); return; }
+  if (!body.model){ flash('Pick a source first.'); return; }
   if (body.model.startsWith('hf://')){
-    flash('Esa fuente es remota (paso 2: descarga). Por ahora elegí una local o marcá la descarga.', true);
+    flash('That source is remote (step 2: download). For now pick a local one or tick the download.', true);
     return;
   }
   body.delete_source = !$('#c-del').disabled && $('#c-del').checked;
-  // Auto-sources del probe: base/gguf/dflash2/vision/components/template.
+  // Auto-sources from the probe: base/gguf/dflash2/vision/components/template.
   const pr = state.probe;
   if (pr && pr.known && pr.base){
     body.base = pr.base;
@@ -276,7 +276,7 @@ export async function runConvert(){
     body.components = pr.components;
     body.template = pr.template;
   }
-  $('#convlog').innerHTML = '<div class="empty" style="padding:14px">Lanzando conversión…</div>';
+  $('#convlog').innerHTML = '<div class="empty" style="padding:14px">Starting conversion…</div>';
   $('#c-run').disabled = true;
   try{
     const r = await api('/api/convert/run', {method:'POST',
@@ -296,8 +296,8 @@ export async function runConvert(){
 }
 
 
-// El stream SSE se abre una vez al arrancar (ver boot.js), así que aquí ya no
-// hace faltaensureStream(): sin trabajo que报了 el server sigue同理.
+// The SSE stream is opened once at startup (see boot.js), so there is nothing
+// left for ensureStream() here: with no job running the server stays quiet.
 
 export function wireHfSearch(){
   $('#hf-q').addEventListener('input', e => {

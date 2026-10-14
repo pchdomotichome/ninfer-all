@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Panel ninfer — servidor HTTP y API. Sin dependencias.
+"""
+The ninfer panel: HTTP server and API. No dependencies.
 
-    python3 tools/panel/server.py            # lee config.toml
+    python3 tools/panel/server.py            # reads config.toml
 
-Sirve la UI y expone el registro de benchmarks. Los jobs AIPerf viven en este
-proceso: se lanzan, se sigue su progreso por SSE y se ingieren al terminar.
+Serves the UI and exposes the benchmark registry. The AIPerf jobs live in this
+process: they are started, their progress is followed over SSE, and they are
+ingested when they finish.
 """
 from __future__ import annotations
 
@@ -33,8 +35,10 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=ut
 
 
 class Jobs:
-    """Corridas vivas. Un lock porque el handler es threaded y el SSE son varias
-    conexiones leyendo a la vez."""
+    """
+    Live runs. One lock because the handler is threaded and the SSE is several
+    connections reading at once.
+    """
 
     def __init__(self):
         self._runs: dict[str, dict] = {}
@@ -54,24 +58,25 @@ class Jobs:
 
 
 class Baselines:
-    """Velocidad normal de decode por modelo, y las alertas que se derivan.
+    """
+    Normal decode speed per model, and the alerts derived from it.
 
-    La referencia se aprende de los contadores acumulados de /v1/load — el
-    AGREGADO del servidor — y no del tiempo de pared de cada request. Con
-    --max-concurrency N los requests comparten el batch de decode, así que el
-    tok/s de un request individual depende de cuántos corren juntos: usarlo como
-    referencia daría falsos positivos en cuanto el servidor se usa en paralelo.
-    El agregado no depende de cómo se reparta.
+    The baseline is learned from the cumulative counters of /v1/load -- the server's
+    AGGREGATE -- and not from each request's wall time. With --max-concurrency N the
+    requests share the decode batch, so one request's tok/s depends on how many run
+    beside it: using it as a baseline would raise false positives as soon as the
+    server is used in parallel. The aggregate does not depend on how the work is
+    split.
 
-    Es la falla que el dashboard existe para ver: si la GPU se cae, el motor
-    sigue respondiendo 200 y genera diez o veinte veces más lento.
+    It is the failure the dashboard exists to catch: if the GPU drops out the engine
+    still answers 200 and generates ten or twenty times slower.
     """
 
     WINDOW = 300          # muestras retenidas por modelo (mediana robusta)
     MIN_SAMPLES = 12      # antes de esto no se alerta contra la referencia
     RATIO = 0.25          # bajo el 25% de la mediana -> sospechoso
     STREAK = 3            # seguidos, porque uno lento no significa nada
-    ABSOLUTE = 5.0        # tok/s: regla para cuando todavía no hay referencia
+    ABSOLUTE = 5.0        # tok/s: rule used when there is no baseline yet
     SAMPLE_EVERY = 2.0    # segundos entre muestras
     SAVE_EVERY = 30.0
 
@@ -88,7 +93,7 @@ class Baselines:
         self._stop = threading.Event()
         self._load()
 
-    # ------------------------------------------------------------ persistencia
+    # ------------------------------------------------------------ persistence
     def _load(self):
         try:
             saved = json.loads(self.path.read_text())
@@ -115,7 +120,7 @@ class Baselines:
         except OSError:
             pass
 
-    # ---------------------------------------------------------------- muestreo
+    # ---------------------------------------------------------------- sampling
     @staticmethod
     def _median(xs: list) -> float:
         s = sorted(xs)
@@ -125,18 +130,19 @@ class Baselines:
         return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
     def start(self, url: str):
-        """Arranca el muestreo. Corre aunque nadie tenga el panel abierto: una
-        alerta que sólo existe mientras miro la página no es una alerta.
+        """
+        Start sampling. It runs whether or not anyone has the panel open: an alert
+        that only exists while I am looking at the page is not an alert.
 
-        Lee sólo /v1/load, no el lector completo de la página: son cuatro
-        endpoints más la residency de cada modelo, y esto corre cada 2 s
-        para siempre."""
+        Reads only /v1/load, not the page's full reader: that is four endpoints plus
+        the residency of every model, and this runs every 2 s forever.
+        """
         def once() -> dict:
             try:
                 with urllib.request.urlopen(url.rstrip("/") + "/v1/load", timeout=4) as fh:
                     return {"reachable": True, "load": json.loads(fh.read())}
             except urllib.error.HTTPError:
-                # El router responde: no hay modelo cargado, que es reposo.
+                # The router answered: no model is loaded, which is idle.
                 return {"reachable": True, "load": {"error": "no model loaded"}}
             except (OSError, ValueError):
                 return {"reachable": False, "load": None}
@@ -160,9 +166,9 @@ class Baselines:
         `now` es inyectable para que las reglas se puedan ejercitar sin esperar
         el reloj: ver test_baselines.py."""
         now = time.time() if now is None else now
-        # "Caído" es que no conteste NADA. Un 404 en /v1/load es el router en
-        # reposo, no una falla: confundirlas daría una alerta falsa con el
-        # servidor andando bien.
+        # "Down" means it answers nothing at all. A 404 on /v1/load is the idle
+        # router, not a fault: confusing the two would raise a false alert while the
+        # server runs fine.
         reachable = bool(snap.get("reachable"))
         load = snap.get("load") or {}
         counters = load.get("counters") or {}
@@ -170,8 +176,8 @@ class Baselines:
         tokens = counters.get("committed_decode_tokens")
 
         self.down_polls = 0 if reachable else self.down_polls + 1
-        self._raise("server_unreachable", "el servidor no responde",
-                    "sin respuesta desde hace %ds" % round(self.down_polls * self.SAMPLE_EVERY),
+        self._raise("server_unreachable", "the server is not answering",
+                    "no answer for %ds" % round(self.down_polls * self.SAMPLE_EVERY),
                     "ok" if reachable else ("critical" if self.down_polls >= 4 else "warning"))
         if not reachable or not model or tokens is None:
             with self.lock:
@@ -183,8 +189,8 @@ class Baselines:
         if not prev:
             return
         dtok, dt = tokens - prev[0], now - prev[1]
-        # Sólo cuando hay requests en vuelo: en reposo la tasa es 0 por
-        # definición y no dice nada sobre la velocidad del modelo.
+        # Only while requests are in flight: at rest the rate is zero by definition and
+        # says nothing about the model's speed.
         if dt <= 0 or dtok <= 0 or not (load.get("requests") or {}).get("running"):
             return
         rate = dtok / dt
@@ -198,8 +204,8 @@ class Baselines:
                 del series[:-self.WINDOW]
             n, median = len(series), self._median(series)
 
-        # Antes de tener referencia, la única regla posible es "esto no es
-        # velocidad de inferencia": 5 tok/s es el piso de una GPU saludable.
+        # Before a baseline exists the only possible rule is "this is not inference
+        # speed": 5 tok/s is the floor of a healthy GPU.
         self.slow_streak = self.slow_streak + 1 if rate < self.ABSOLUTE else 0
         self._raise("decode_suspiciously_slow", "decode sospechosamente lento",
                     "%.1f tok/s" % rate, "serious" if self.slow_streak >= self.STREAK else "ok")
@@ -209,16 +215,16 @@ class Baselines:
         threshold = median * self.RATIO
         self.streak = self.streak + 1 if rate < threshold else 0
         self._raise("decode_below_baseline", "decode muy por debajo de su norma",
-                    "%.1f tok/s · referencia %.1f (mediana de %d muestras, %s)"
+                    "%.1f tok/s · baseline %.1f (median of %d samples, %s)"
                     % (rate, median, n, model),
                     "critical" if self.streak >= self.STREAK else "ok")
         self._save()
 
-    # ---------------------------------------------------------------- alertas
+    # ---------------------------------------------------------------- alerts
     def _raise(self, key: str, title: str, detail: str, level: str):
         with self.lock:
             prev = next((a for a in self.alerts if a["key"] == key), None)
-            # "ok" es un estado interno: si la regla no dispara, se cierra.
+            # "ok" is an internal state: when the rule does not fire, the alert closes.
             if level == "ok":
                 if prev:
                     self.alerts.remove(prev)
@@ -255,7 +261,7 @@ class API:
                                         (HERE / "panel-state.json")))
         self.baselines.start(cfg["ninfer"]["url"])
 
-    # ---------------------------------------------------------------- avisos
+    # ---------------------------------------------------------------- notices
     def publish(self, event: dict):
         with self.hub_lock:
             for push in list(self.hub):
@@ -273,14 +279,14 @@ class API:
             if push in self.hub:
                 self.hub.remove(push)
 
-    # ---------------------------------------------------------------- rutas
+    # ---------------------------------------------------------------- routes
     def config(self) -> dict:
         ready, why = bench.aiperf_ready(self.cfg)
         ap = self.cfg.get("aiperf", {})
         nin = self.cfg.get("ninfer", {})
         url = nin.get("url", "").rstrip("/")
-        # Endpoint para clientes/agentes: la base OpenAI-compatible del router.
-        # Un agente se configura con BASE_URL + MODEL del catálogo.
+        # Endpoint for clients/agents: the router's OpenAI-compatible base. An agent
+        # is configured with BASE_URL + MODEL from the catalog.
         return {
             "aiperf": {"enabled": bool(ap.get("enabled")), "ready": ready, "why": why,
                        "tokenizer": ap.get("tokenizer", ""),
@@ -288,7 +294,7 @@ class API:
             "endpoint": {
                 "base_url": url + "/v1",
                 "api_key": nin.get("api_key") or "",
-                "model": "",         # lo llena el frontend con el catálogo
+                "model": "",         # the frontend fills it from the catalog
                 "curl": f"curl {url}/v1/models",
             },
             "benchmarks": [
@@ -302,12 +308,13 @@ class API:
         }
 
     def engine(self) -> dict:
-        """Estado del servidor: qué está cargado y qué hay para cargar.
+        """
+        Server state: what is loaded and what is available to load.
 
-        El catálogo sale de /models, así que la lista de modelos a benchmarkear
-        no está hardcodeada en el panel: es la del servidor. El estado fino
-        (loaded/sleeping/suspended) sale de /residency por modelo, que es el
-        único que distingue dormir de suspend.
+        The catalog comes from /models, so the list of models to benchmark is not
+        hardcoded in the panel: it is the server's. The fine-grained state
+        (loaded/sleeping/suspended) comes from /residency per model, the only source
+        that tells sleeping from suspended.
         """
         url = self.cfg["ninfer"]["url"]
         try:
@@ -321,8 +328,8 @@ class API:
         for m in models:
             mid = m["id"]
             state = (m.get("status") or {}).get("value", "")
-            # residency.state es la verdad para Dormir vs Suspend: un modelo
-            # suspendido sigue `loaded` en /models pero está `suspended` aquí.
+            # residency.state is the truth for Sleep vs Suspend: a suspended model is still
+            # `loaded` in /models but is `suspended` here.
             try:
                 with urllib.request.urlopen(f"{url.rstrip('/')}/v1/models/{mid}/residency",
                                             timeout=5) as fh:
@@ -340,16 +347,17 @@ class API:
         return {"url": url, "online": True, "loaded": loaded, "catalog": catalog}
 
     def convert_recipes(self) -> dict:
-        """Recipes reales de tools/convert, agrupadas por módulo.
+        """
+        The real recipes from tools/convert, grouped by module.
 
-        No se hardcodean: se leen de los registros RECIPES de cada módulo en el
-        venv de convert (torch), que es donde viven. Si el repo agrega una
-        recipe nueva, aparece sola en el dropdown.
+        They are not hardcoded: they are read from each module's RECIPES registry in
+        the convert venv (torch), which is where they live. If the repo adds a new
+        recipe it appears in the dropdown on its own.
         """
         venv = self.cfg.get("convert", {}).get("venv", "")
         python = str(Path(venv) / "bin" / "python") if venv else sys.executable
         if not Path(python).is_file():
-            return {"ok": False, "error": f"no hay python en {python} ([convert] venv)"}
+            return {"ok": False, "error": f"no python at {python} ([convert] venv)"}
         probe = (
             "import sys, json\n"
             "sys.path.insert(0, '.')\n"
@@ -372,20 +380,21 @@ class API:
         try:
             return {"ok": True, "recipes": json.loads(out.stdout)}
         except json.JSONDecodeError:
-            return {"ok": False, "error": "el probe de recipes devolvió algo raro"}
+            return {"ok": False, "error": "the recipes probe returned something odd"}
 
     def convert_inspect(self, query: dict) -> tuple[int, dict]:
-        """Lee un .ninfer y devuelve su resumen: componentes, tensores, formatos.
+        """
+        Read a .ninfer and return its summary: components, tensors, formats.
 
-        tools/artifact/inspect.py es stdlib puro, así que se corre como módulo
-        en un subprocess: usa imports relativos y no quiere contaminar el path
-        del panel.
+        tools/artifact/inspect.py is pure stdlib, so it runs as a module in a
+        subprocess: it uses relative imports and does not want to pollute the panel's
+        path.
         """
         path = (query.get("path") or [""])[0]
         if not path:
-            return 400, {"error": "hace falta path"}
+            return 400, {"error": "path is required"}
         if not Path(path).is_file():
-            return 404, {"error": f"no existe {path}"}
+            return 404, {"error": f"{path} does not exist"}
         try:
             out = subprocess.run(
                 [sys.executable, "-m", "tools.artifact.inspect", path, "--json"],
@@ -399,28 +408,29 @@ class API:
         try:
             return 200, json.loads(out.stdout)
         except json.JSONDecodeError:
-            return 502, {"error": "el inspector devolvió algo que no es JSON"}
+            return 502, {"error": "the inspector returned something that is not JSON"}
     def convert_run(self, body: dict) -> tuple[int, dict]:
-        """Lanza una conversión GGUF/safetensors → .ninfer con log en vivo.
+        """
+        Start a GGUF/safetensors -> .ninfer conversion with a live log.
 
-        tools/convert necesita torch: corre en su venv, no en el del panel.
+        tools/convert needs torch: it runs in its own venv, not the panel's.
         """
         venv = self.cfg.get("convert", {}).get("venv", "")
         python = str(Path(venv) / "bin" / "python") if venv else sys.executable
         if not Path(python).is_file():
-            return 503, {"error": f"no hay python en {python} ([convert] venv)"}
+            return 503, {"error": f"no python at {python} ([convert] venv)"}
         model = body.get("model")
         recipe = body.get("recipe")
         if not model and not body.get("base"):
-            return 400, {"error": "hacen falta model (o base) y recipe"}
+            return 400, {"error": "model (or base) and recipe are required"}
         if not recipe:
-            return 400, {"error": "hacen falta model y recipe"}
+            return 400, {"error": "model and recipe are required"}
         out_dir = Path(self.cfg["convert"]["out_dir"])
         out_dir.mkdir(parents=True, exist_ok=True)
-        # Una fuente GGUF no va como --model: el modelo base es el checkpoint
-        # (config+tokenizer) y el gguf entra como --source gguf=. Con la fuente
-        # correcta armamos el comando completo; sin `base`, queda el camino
-        # anterior (checkpoint como --model).
+        # A GGUF source does not go in as --model: the base model is the checkpoint
+        # (config+tokenizer) and the gguf comes in as --source gguf=. With the right
+        # source the full command is assembled; without `base` the previous path stays
+        # (checkpoint as --model).
         base = body.get("base")
         if base:
             argv = [python, "-m", "tools.convert", "--model", base,
@@ -436,7 +446,8 @@ class API:
         else:
             argv = [python, "-m", "tools.convert", "--model", model,
                     "--recipe", recipe]
-        # El nombre del artifact sale de la fuente: el gguf (si hay) o el base.
+        # The artifact's name comes from the source: the gguf if there is one, else the
+        # base.
         out_src = body.get("sources", {}).get("gguf") or base or model
         out_stem = Path(out_src).stem
         argv += ["--out", str(out_dir / (out_stem + ".ninfer")), "--proposal"]
@@ -450,7 +461,7 @@ class API:
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, bufsize=1, start_new_session=True)
         except (OSError, subprocess.SubprocessError) as err:
-            return 500, {"error": f"no se pudo lanzar: {err}"}
+            return 500, {"error": f"could not start: {err}"}
         state = {"run_id": run_dir.name, "proc": proc, "log": [], "status": "running"}
         self.jobs.add(run_dir.name, state)
 
@@ -472,11 +483,12 @@ class API:
         return 202, {"run_id": run_dir.name}
 
     def _drop_inbox(self, model_path: str) -> bool:
-        """Borra el staging descargado de un modelo tras una conversión OK.
+        """
+        Delete a model's downloaded staging after a successful conversion.
 
-        Solo actúa sobre lo que nosotros bajamos: una fuente dentro de
-        ninfer/inbox/<slug>/. Nunca toca nada fuera de esa raíz (el usuario
-        podría pasar cualquier path como source).
+        It only touches what we downloaded: a source inside ninfer/inbox/<slug>/. It
+        never touches anything outside that root (the user could pass any path as the
+        source).
         """
         inbox_root = Path(self.cfg.get("convert", {}).get(
             "out_dir", "/mnt/models_local/ninfer/artifacts")).parent / "inbox"
@@ -491,8 +503,10 @@ class API:
             return False
 
     def gpu(self) -> dict:
-        """Datos de la GPU por nvidia-smi. Se cachea 2s: lanzar nvidia-smi
-        a cada poll de 2s es descartable, pero el proceso cuesta ~50ms."""
+        """
+        GPU figures from nvidia-smi. Cached for 2s: spawning nvidia-smi on every 2s
+        poll is throwaway work, but the process costs ~50ms.
+        """
         now = time.time()
         if now - self._gpu_ts < 2.0:
             return self._gpu_cache
@@ -518,11 +532,13 @@ class API:
         return out
 
     def help_flags(self) -> tuple[int, dict]:
-        """Flags de ninfer-serve parseadas de --help, para el formulario de
-        recipes. Se leen en vivo: si el binario cambia, el formulario también."""
+        """
+        ninfer-serve flags parsed from --help, for the recipe form. Read live: if
+        the binary changes, the form changes with it.
+        """
         binary = self.cfg.get("ninfer", {}).get("binary", "")
         if not binary or not Path(binary).is_file():
-            return 503, {"error": f"no existe el binario {binary} ([ninfer] binary)"}
+            return 503, {"error": f"the binary {binary} does not exist ([ninfer] binary)"}
         try:
             out = subprocess.run([binary, "--help"], capture_output=True,
                                  text=True, timeout=30)
@@ -546,9 +562,11 @@ class API:
         return 200, {"flags": flags, "binary": Path(binary).name}
 
     def convert_roots(self) -> list[str]:
-        """Raíces donde buscar artifacts y fuentes: las del config más HF_HOME
-        y los directorios reales de modelos, si existen. Nada adivinado: cada
-        ruta se verifica contra el disco."""
+        """
+        Roots to search for artifacts and sources: the config's plus HF_HOME and the
+        real model directories, if they exist. Nothing guessed: every path is checked
+        against the disk.
+        """
         roots = []
         cfg = self.cfg.get("convert", {})
         for r in cfg.get("roots", []):
@@ -562,14 +580,16 @@ class API:
             p = Path(r).expanduser()
             if p.is_dir():
                 roots.append(str(p))
-        # dedupe preservando orden
+        # dedupe preserving order
         return list(dict.fromkeys(roots))
 
     def convert_files(self) -> dict:
-        """Artifacts .ninfer y fuentes (GGUF/safetensors) disponibles.
+        """
+        The .ninfer artifacts and (GGUF/safetensors) sources available.
 
-        El usuario no escribe rutas a mano: el panel lista lo que ya existe en
-        las raíces configuradas (config.toml [convert] roots) y en HF_HOME."""
+        The user does not type paths by hand: the panel lists what already exists in
+        the configured roots (config.toml [convert] roots) and in HF_HOME.
+        """
         roots = self.convert_roots()
         artifacts, sources, checkpoints = [], [], []
         for root in roots:
@@ -584,7 +604,7 @@ class API:
                         sources.append({"path": str(f), "size": f.stat().st_size})
                 except OSError:
                     continue
-        # checkpoints: directorios con config.json (modelo a convertir)
+        # checkpoints: directories holding config.json (the model to convert)
         for root in roots:
             for cfg_dir in Path(root).rglob("config.json"):
                 if "snapshots" in str(cfg_dir):
@@ -597,12 +617,12 @@ class API:
         artifacts.sort(key=sort_key); sources.sort(key=sort_key)
         checkpoints.sort(key=sort_key)
         return {"roots": roots,
-                "artifacts": artifacts[-200:],   # demo: acotar a lo manejable
+                "artifacts": artifacts[-200:],   # demo: capped at what is manageable
                 "sources": sources[-200:],
                 "checkpoints": checkpoints[-100:]}
 
     # ---------------------------------------------- Hugging Face API (0 deps)
-    # Orden de prefijos de cuantización para agrupar los .gguf en el selector.
+    # Quantisation prefix order, to group the .gguf files in the selector.
     GGUF_PREFIXES = ("IQ3_XXS", "IQ3_XS", "IQ3_S", "IQ2_XXS", "IQ2_S", "IQ1_M",
                      "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S",
                      "Q4_0", "Q3_K_M", "Q3_K_S", "Q3_K_L", "Q2_K", "BF16", "F16")
@@ -610,18 +630,20 @@ class API:
     _HF_BASE = "https://huggingface.co/api/models"
 
     def hf_search(self, query: str) -> dict:
-        """Buscar modelos en HF. query: substring de título/autor.
-        Devuelve {hits: [...], error: ...}."""
+        """
+        Search HF for models. query: substring of title/author.
+        Returns {hits: [...], error: ...}.
+        """
         if not query or len(query) < 3:
             return {"hits": [], "error": None}
         url = self._HF_BASE + "?search=" + urllib.parse.quote(query, safe="") + "&limit=50"
         try:
             with urllib.request.urlopen(url, timeout=self._HF_TIMEOUT) as resp:
                 if resp.status != 200:
-                    return {"hits": [], "error": "respuesta de HF no es 200"}
+                    return {"hits": [], "error": "HF answered with something other than 200"}
                 hits = json.loads(resp.read().decode())
         except OSError as e:
-            return {"hits": [], "error": f"no se pudo consultar HF: {e}"}
+            return {"hits": [], "error": f"could not query HF: {e}"}
         out = []
         for h in hits:
             aid = h.get("id", "")
@@ -637,13 +659,13 @@ class API:
         return {"hits": out, "error": None}
 
     def hf_details(self, model: str) -> list | None:
-        """Lista de archivos de un modelo (`.gguf` y demás) con sus tamaños.
+        """
+        A model's files (`.gguf` and the rest) with their sizes.
 
-        La API de HF no pone `size` en `siblings`, así que se consulta el
-        árbol de la rama por defecto: `.../tree/{branch}`. El árbol de una
-        subcarpeta (p.ej. `ggml-model-...`) exige recursión, así que se usa
-        `?recursive=true`. Si el repo no tiene rama `main`, se cae al
-        endpoint del modelo (sin tamaños).
+        The HF API does not put `size` in `siblings`, so the default branch's tree is
+        queried instead: `.../tree/{branch}`. A subdirectory's tree (e.g.
+        `ggml-model-...`) needs recursion, so `?recursive=true` is used. If the repo has
+        no `main` branch it falls back to the model endpoint (without sizes).
         """
         q = urllib.parse.quote(model, safe="/")
         for branch in ("main", "master"):
@@ -668,7 +690,7 @@ class API:
         return None
 
     def hf_ggufs(self, model: str) -> list:
-        """Los GGUF de un modelo, agrupados por cuantización; mmproj/mtp aparte."""
+        """A model's GGUFs, grouped by quantisation; mmproj/mtp separately."""
         tree = self.hf_details(model)
         if not tree:
             return []
@@ -692,14 +714,14 @@ class API:
         return groups
 
     def hf_inbox(self, model: str) -> Path:
-        """Carpeta de staging para el GGUF efímero: ninfer/inbox/<org>--<repo>."""
+        """Staging directory for the ephemeral GGUF: ninfer/inbox/<org>--<repo>."""
         out_dir = Path(self.cfg.get("convert", {}).get("out_dir",
                         "/mnt/models_local/ninfer/artifacts"))
         slug = re.sub(r"[^A-Za-z0-9_.-]", "-", model)
         return out_dir.parent / "inbox" / slug
 
     def hf_bin(self) -> str:
-        """El CLI de HF: se prefiere el `hf` de huggingface_hub (ya instalado)."""
+        """The HF CLI: `hf` from huggingface_hub is preferred (already installed)."""
         found = shutil.which("hf")
         if found:
             return found
@@ -707,25 +729,26 @@ class API:
         return str(candidate) if candidate.is_file() else "hf"
 
     def hf_download(self, body: dict) -> tuple[int, dict]:
-        """Descarga GGUFs exactos de un repo HF a ninfer/inbox/ con progreso.
+        """
+        Download specific GGUFs from an HF repo into ninfer/inbox/ with progress.
 
-        El progreso se lee del disco (bytes aparecidos en la carpeta), no de
-        stdout: `hf download` pinta un progress bar con \r que no sirve para
-        líneas. La descarga va a inbox/ — staging efímero, no al cache de HF.
+        Progress is read from the disk (bytes appearing in the folder), not from
+        stdout: `hf download` paints a progress bar with \r that is useless for lines.
+        The download goes to inbox/ -- ephemeral staging, not to the HF cache.
         """
         model, files = body.get("model", ""), body.get("files", [])
         total = int(body.get("total", 0) or 0)
         if not model or not isinstance(files, list) or not files:
-            return 400, {"error": "hacen falta model y files"}
+            return 400, {"error": "model and files are required"}
         dest = self.hf_inbox(model)
         dest.mkdir(parents=True, exist_ok=True)
-        # Guard de disco: nunca dejar la NVMe sin aire por una conversión.
+        # Disk guard: never let a conversion leave the NVMe without headroom.
         free = shutil.disk_usage(dest).free
         need = int(total * 1.2) + (5 << 30)
         if free < need:
-            return 507, {"error": f"disco insuficiente: {free/2**30:.0f} GiB libres, "
-                                    f"se calculan {need/2**30:.0f} GiB (1,2× la descarga). "
-                                    "Liberá espacio o elegí otra quant."}
+            return 507, {"error": f"not enough disk: {free/2**30:.0f} GiB free, "
+                                    f"{need/2**30:.0f} GiB estimated (1.2x the download). "
+                                    "Free space or pick another quant."}
         hf = self.hf_bin()
         argv = [hf, "download", model, *files, "--local-dir", str(dest), "--quiet"]
         try:
@@ -733,7 +756,7 @@ class API:
                                     stderr=subprocess.STDOUT, text=True,
                                     bufsize=1, start_new_session=True)
         except (OSError, subprocess.SubprocessError) as err:
-            return 500, {"error": f"no se pudo lanzar hf: {err}"}
+            return 500, {"error": f"could not start hf: {err}"}
         run_id = f"dl-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
         state = {"run_id": run_id, "proc": proc, "status": "running", "model": model,
                  "pct": 0, "done": 0, "total": total, "files": [], "error": ""}
@@ -767,8 +790,8 @@ class API:
                 "done": st["done"], "total": st["total"], "files": st["files"],
                 "error": st["error"], "dest": str(self.hf_inbox(st["model"]))}
 
-    # ------------------------------------------- probe de fuentes + recipe
-    # (arch, moe, layers, hidden) -> recipe oficial (checkpoint) / gguf / base local
+    # ------------------------------------------- source probe + recipe
+    # (arch, moe, layers, hidden) -> official recipe (checkpoint) / gguf / local base
     SHAPE_RECIPE = {
         (False, 64, 5120): ("qwen3_8_27b", "qwen3_8_27b_gguf", "qwen38-config"),
         (False, 32, 4096): ("qwen3_5_9b", "qwen3_5_dense_gguf", "qwen35-9b"),
@@ -781,7 +804,7 @@ class API:
                    "num_key_value_heads", "num_experts")
 
     def _text_config(self, cfg: dict) -> dict:
-        """La torre de texto de un config multimodal (text_config anidado)."""
+        """The text tower of a multimodal config (nested text_config)."""
         t = cfg.get("text_config") or cfg
         return t if isinstance(t, dict) else {}
 
@@ -802,7 +825,7 @@ class API:
         }
 
     def _read_gguf_params(self, path: Path) -> dict:
-        """Metadata de un .gguf via el venv de convert (tiene gguf-py)."""
+        """A .gguf's metadata via the convert venv (it has gguf-py)."""
         venv = self.cfg.get("convert", {}).get("venv", "")
         python = str(Path(venv) / "bin" / "python") if venv else sys.executable
         probe = (
@@ -838,10 +861,11 @@ class API:
             return {}
 
     def _local_hf_base(self, patterns: tuple) -> str | None:
-        """Snapshot HF local (config+tokenizer) que sirva de base, por nombre.
+        """
+        A local HF snapshot (config+tokenizer) to serve as a base, by name.
 
-        Busca en el cache de HF de las roots un snapshot que no sea un repo GGUF
-        y tenga tokenizer.json: es el '--model' que la conversión necesita.
+        It searches the HF cache of the roots for a snapshot that is not a GGUF repo
+        and has tokenizer.json: that is the '--model' the conversion needs.
         """
         for root in self.cfg.get("convert", {}).get("roots", []):
             hub = Path(root) / "hub"
@@ -867,15 +891,16 @@ class API:
         return None
 
     def convert_probe(self, path: str) -> dict:
-        """Lee la fuente (checkpoint o gguf), matchea recipe y arma los flags.
+        """
+        Read the source (checkpoint or gguf), match the recipe and assemble the flags.
 
-        Devuelve lo necesario para convertir sin saber nada a mano: recipe
-        (o 'recipe desconocida'), base local, sources disponibles
-        (gguf/dflash2/vision/imatrix), componentes y template.
+        It returns everything needed to convert without knowing anything by hand: the
+        recipe (or 'unknown recipe'), the local base, the available sources
+        (gguf/dflash2/vision/imatrix), components and template.
         """
         p = Path(path)
         if not p.exists():
-            return {"known": False, "error": f"no existe {path}"}
+            return {"known": False, "error": f"{path} does not exist"}
         if p.is_file() and p.suffix == ".gguf":
             params, kind = self._read_gguf_params(p), "gguf"
         elif p.is_dir() and (p / "config.json").is_file():
@@ -893,11 +918,12 @@ class API:
         flash = "qwen4exp" in arch_l
         gemma4 = "gemma4" in arch_l
         if flash:
-            # Flash-Next: solo recipe gguf; base local no lo cubre (otra arquitectura).
+            # Flash-Next: gguf recipe only; a local base does not cover it (other
+            # architecture).
             out["recipe"], out["recipe_kind"] = self.FLASH_RECIPE, "gguf"
             out["known"] = True
         elif gemma4:
-            # Gemma 4: recipe gguf (QAT Q4_0); el base es el repo HF (config+tokenizer).
+            # Gemma 4: gguf recipe (QAT Q4_0); the base is the HF repo (config+tokenizer).
             out["recipe"] = self.GEMMA4_RECIPE if kind == "gguf" else None
             out["recipe_kind"] = "gguf"
             out["known"] = bool(out["recipe"])
@@ -915,10 +941,10 @@ class API:
                         out["base"] = str(base_dir)
                     break
 
-        # sources: lo que exista realmente en el disco
+        # sources: whatever actually exists on disk
         if kind == "gguf":
             out["sources"]["gguf"] = str(p)
-            # mmproj al lado del gguf (como hace el script del lab)
+            # mmproj beside the gguf (as the lab's script does)
             mm = sorted(p.parent.glob("mmproj*.gguf")) or sorted(p.parent.glob("*mmproj*.gguf"))
             if mm:
                 out["sources"]["vision"] = str(mm[0])
@@ -927,7 +953,7 @@ class API:
             if im:
                 out["sources"]["imatrix"] = str(im)
             if gemma4:
-                # El drafter de Gemma 4 es el assistant GGUF, al lado de la fuente.
+                # Gemma 4's drafter is the assistant GGUF, beside the source.
                 asst = next((x for x in p.parent.glob("*.gguf")
                              if x != p and ("mtp" in x.name.lower()
                                             or "assistant" in x.name.lower())), None)
@@ -935,7 +961,7 @@ class API:
                     out["sources"]["mtp"] = str(asst)
         if out["base"]:
             out["sources"]["base"] = out["base"]
-        # dflash2 es el draft head de la familia Qwen3.8-27B; Gemma 4 no lo usa.
+        # dflash2 is the draft head of the Qwen3.8-27B family; Gemma 4 does not use it.
         if not gemma4:
             dflash2 = Path("/mnt/models_local/strata/DFlash2")
             if dflash2.is_dir():
@@ -945,7 +971,9 @@ class API:
                 if dg.is_file():
                     out["sources"]["dflash2"] = str(dg)
 
-        # componentes: texto base; +vision si hay mmproj; mtp/dflash2 si hay draft
+        # components: base text; +vision if there is an mmproj; mtp/dflash2 if there is a
+
+        # draft
         comps = ["text"]
         if "vision" in out["sources"]:
             comps.append("vision")
@@ -955,7 +983,7 @@ class API:
             comps.append("dflash2")
         out["components"] = comps
 
-        # template: el del base si lo tiene, si no el probado del lab.
+        # template: the base's if it has one, otherwise the one proven in the lab.
         if out["base"] and (Path(out["base"]) / "chat_template.jinja").is_file():
             out["template"] = str(Path(out["base"]) / "chat_template.jinja")
         else:
@@ -967,10 +995,11 @@ class API:
         return out
 
     def history(self, query: dict) -> dict:
-        """Serie temporal de throughput desde el jsonl (eventos `throughput`).
+        """
+        A throughput time series from the jsonl (`throughput` events).
 
-        Las gráficas arrancan con historia, no vacías: al abrir el panel se
-        rellenan con los últimos ~15 minutos que ya escribió el servidor.
+        The charts start with history, not empty: opening the panel fills them with the
+        last ~15 minutes the server already wrote.
         """
         path = Path(self.cfg["ninfer"].get("log", ""))
         if not path or not path.is_file():
@@ -1001,15 +1030,16 @@ class API:
         return {"ok": True, "points": points[-360:]}
 
     def requests(self, query: dict) -> dict:
-        """Últimas requests completadas, del jsonl del servidor.
+        """
+        The most recent completed requests, from the server's jsonl.
 
-        El jsonl de ninfer ya tiene ttft/decode/prefill/cache y el spec-decode
-        por request: no hay que parsear otra cosa. Se lee el archivo completo
-        (rotación por inode incluida: si el archivo cambia, se vuelve a leer).
+        ninfer's jsonl already carries ttft/decode/prefill/cache and the per-request
+        spec-decode: there is nothing else to parse. The whole file is read (including
+        inode rotation: when the file changes it is read again).
         """
         path = Path(self.cfg["ninfer"].get("log", ""))
         if not path or not path.is_file():
-            return {"ok": False, "error": "config.toml no define [ninfer] log"}
+            return {"ok": False, "error": "config.toml does not define [ninfer] log"}
         try:
             lines = path.read_text(errors="replace").splitlines()
         except OSError as err:
@@ -1046,8 +1076,8 @@ class API:
                 "finish": res.get("finish_reason"),
                 "spec_backend": spec.get("backend"),
                 "draft_window": spec.get("draft_window"),
-                # Rondas de verificación: el denominador real de la aceptación por
-                # posición (cuántas veces se propuso un draft en cada posición).
+                # Verification rounds: the real denominator of acceptance by position (how many
+                # times a draft was proposed at each position).
                 "spec_rounds": spec.get("rounds"),
                 "accepted_tokens": spec.get("accepted_tokens"),
                 "drafted_tokens": drafted,
@@ -1061,11 +1091,12 @@ class API:
                 "requests": rows[:max(n, 1)]}
 
     def _live_once(self) -> dict:
-        """Un muestreo del estado del motor, sin cache de GPU ni trabajo extra.
+        """
+        One sample of the engine's state, with no GPU cache and no extra work.
 
-        Lo usan tanto el endpoint /api/live como el hilo de baselines: que
-        compartan el lector evita que las referencias se aprendan con una forma
-        del payload distinta a la que ve la página.
+        Both the /api/live endpoint and the baselines thread use it: sharing the reader
+        keeps the baselines from being learned with a payload shape different from the
+        one the page sees.
         """
         url = self.cfg["ninfer"]["url"].rstrip("/")
         out: dict = {"url": url, "online": False}
@@ -1077,7 +1108,7 @@ class API:
                 out["online"] = True
             except (OSError, ValueError, urllib.error.URLError) as err:
                 out[name] = {"error": str(err)[:120]}
-        # Residency por modelo: qué libera un suspend y cuánto tardó el último.
+        # Per-model residency: what a suspend releases and how long the last one took.
         for model in (out.get("models") or {}).get("data") or []:
             mid = model.get("id")
             if not mid:
@@ -1092,17 +1123,18 @@ class API:
 
     @staticmethod
     def _per_model(url: str, out: dict) -> dict:
-        """Estado por modelo cargado: /v1/load acepta ?model= y contesta por
-        cada Engine, no sólo por el que está loaded.
+        """
+        State per model in memory: /v1/load accepts ?model= and answers for every
+        Engine, not just the loaded one.
 
-        Sin esto el router con dos modelos en memoria muestra una sola fila de
-        ocupación y el resto parece no existir. El modelo que ya trajo el
-        /v1/load sin parámetros no se vuelve a pedir.
+        Without this a router with two models in memory shows one row of occupancy and
+        the rest look like they do not exist. The model the parameterless /v1/load
+        already brought is not requested again.
 
-        `releasable_device_bytes` (de residency) es pesos + estado en device:
-        para un modelo cargado ES su VRAM; para uno suspendido es el footprint
-        que ocuparía al cargar, porque lo que ya está en host no cuenta. La
-        página lo etiqueta según el estado en vez de llamarlo VRAM siempre.
+        `releasable_device_bytes` (from residency) is weights + device state: for a
+        loaded model it IS its VRAM; for a suspended one it is the footprint it would
+        take when loaded, since what is already in host does not count. The page labels
+        it by state instead of always calling it VRAM.
         """
         primary = (out.get("load") or {}).get("model")
         engines: dict = {}
@@ -1112,9 +1144,9 @@ class API:
             res = model.get("residency") or {}
             if state == "unloaded":
                 continue
-            # Misma regla que /api/engine: residency.state dice suspendido aunque
-            # /models siga diciendo loaded. Sus nombres internos son "resident" y
-            # "suspended", no los de la UI.
+            # Same rule as /api/engine: residency.state says suspended even while /models
+            # still says loaded. Its internal names are "resident" and "suspended", not the
+            # UI's.
             if res.get("state") == "suspended":
                 state = "suspended"
             engines[mid] = {"state": state,
@@ -1128,28 +1160,31 @@ class API:
                                             timeout=5) as fh:
                     engines[mid]["load"] = json.loads(fh.read())
             except (OSError, ValueError, urllib.error.URLError):
-                engines[mid]["load"] = {"error": "sin datos"}
+                engines[mid]["load"] = {"error": "no data"}
         return engines
 
     def live(self) -> dict:
-        """Estado del servidor para la página: /v1/load, /stats, /models, /slots
-        y las GPUs, con cache para no pegarle a nvidia-smi en cada poll."""
+        """
+        Server state for the page: /v1/load, /stats, /models, /slots and the GPUs,
+        cached so a poll does not spawn nvidia-smi.
+        """
         out = self._live_once()
         out["gpu"] = self.gpu()
         return out
 
     def control(self, body: dict) -> tuple[int, dict]:
-        """Acciones sobre el motor: dormir/despertar un modelo.
+        """
+        Actions on the engine: sleep or wake a model.
 
-        Son los endpoints que ya trae ninfer; el panel no inventa nada.
+        These are endpoints ninfer already has; the panel invents nothing.
         """
         url = self.cfg["ninfer"]["url"].rstrip("/")
         action = body.get("action")
         model = body.get("model")
         if action not in ("sleep", "load", "unload", "suspend", "resume"):
-            return 400, {"error": f"acción desconocida: {action}"}
+            return 400, {"error": f"unknown action: {action}"}
         if not model:
-            return 400, {"error": "hace falta model"}
+            return 400, {"error": "model is required"}
         path = {"sleep": "/models/sleep", "load": "/models/load",
                 "unload": "/models/unload"}.get(action)
         if path:
@@ -1164,8 +1199,8 @@ class API:
             with urllib.request.urlopen(req, timeout=30) as fh:
                 return 200, json.loads(fh.read())
         except urllib.error.HTTPError as err:
-            # 409 model_busy es una respuesta válida: el modelo tiene requests
-            # en vuelo y no se puede dormir. Hay que decirla, no esconderla.
+            # 409 model_busy is a valid answer: the model has requests in flight and cannot
+            # sleep. It has to be reported, not hidden.
             detail = err.read().decode()[:300]
             return err.code, {"error": detail, "action": action, "model": model}
         except (OSError, ValueError) as err:
@@ -1173,9 +1208,9 @@ class API:
 
     def runs(self, query: dict) -> dict:
         rows = bench.list_runs(Path(self.cfg["aiperf"]["registry"]))
-        # engine y spec no son campos del registro: viven anidados en `server`.
-        # Se derivan antes de filtrar y se agregan a la fila, para que el filtro
-        # y la ordenación trabajen sobre lo mismo que ve la UI.
+        # engine and spec are not registry fields: they live nested under `server`.
+        # They are derived before filtering and added to the row, so filtering and
+        # sorting work on what the UI sees.
         for row in rows:
             server = row.get("server") or {}
             row["engine"] = server.get("binary") or ""
@@ -1183,19 +1218,20 @@ class API:
                            (f"/{server['draft_depth']}" if server.get("draft_depth") else "")
                            if server.get("spec_backend") else
                            ("off" if server else ""))
-        # Filtros: vacíos significan "todos". Cada uno es un substring sobre un
-        # campo de la línea, para no inventar un lenguaje de consultas.
+        # Filters: empty means "all". Each one is a substring over a row field, to avoid
+        # inventing a query language.
         for field in ("profile", "dataset", "model", "concurrency", "engine", "spec"):
             want = (query.get(field) or [""])[0]
             if want:
                 rows = [r for r in rows if str(r.get(field, "")) == want]
         sort = (query.get("sort") or ["ts"])[0]
         desc = (query.get("dir") or ["1"])[0] == "1"
-        # nulls al fondo siempre: una corrida sin spec-decode no es "peor", es
-        # otra medición, y no debe hundirse la tabla al ordenar por acceptance.
+        # Nulls always sort last: a run without spec-decode is not "worse", it is
+        # another measurement, and it must not sink the table when sorting by
+        # acceptance.
         rows.sort(key=lambda r: (r.get(sort) is None, r.get(sort) or 0), reverse=desc)
-        # Paginación después de filtrar y ordenar: si no, la página 2 repite
-        # corridas cuando el orden cambia entre dos requests.
+        # Pagination after filtering and sorting: otherwise page 2 repeats runs when the
+        # order changes between two requests.
         total = len(rows)
         size = int((query.get("size") or ["50"])[0])
         page = max(int((query.get("page") or ["1"])[0]), 1)
@@ -1217,12 +1253,13 @@ class API:
 
     # ---------------------------------------------------------------- jobs
     def _resolve_tokenizer(self, model: str, explicit: str | None) -> str:
-        """Tokenizer que corresponde al modelo, no al default del cfg.
+        """
+        The tokenizer that belongs to the model, not the config's default.
 
-        Un tokenizer equivocado no aborta AIPerf: produce profile_export_aiperf.json
-        vacío y la corrida nunca se registra (bug del 2026-10-11 con qwen35-9b
-        corriendo con el tokenizer de qwen35-4b). Por eso se valida acá y se
-        falla rápido con 400 en vez de lanzar una corrida condenada.
+        A wrong tokenizer does not abort AIPerf: it produces an empty
+        profile_export_aiperf.json and the run is never registered (bug of 2026-10-11
+        with qwen35-9b running on qwen35-4b's tokenizer). That is why it is validated
+        here and fails fast with a 400 instead of launching a doomed run.
         """
         ap = self.cfg.get("aiperf", {})
         cand = (explicit or "").strip() or ap.get("tokenizers", {}).get(model, "") \
@@ -1230,8 +1267,8 @@ class API:
         if cand and Path(cand, "tokenizer_config.json").is_file():
             return cand
         raise ValueError(
-            f"sin tokenizer válido para {model!r} (probé {cand!r}). "
-            "Agregalo en config.toml [aiperf.tokenizers].")
+            f"no valid tokenizer for {model!r} (tried {cand!r}). "
+            "Add it in config.toml [aiperf.tokenizers].")
 
     def start(self, body: dict) -> tuple[int, dict]:
         if not self.config()["aiperf"]["ready"]:
@@ -1239,18 +1276,18 @@ class API:
         profile = body.get("profile")
         dataset = body.get("dataset")
         if not profile or not dataset:
-            return 400, {"error": "hacen falta profile y dataset"}
+            return 400, {"error": "profile and dataset are required"}
         known = {b["id"] for b in self.cfg.get("benchmarks", [])}
         if profile not in known:
-            return 400, {"error": f"perfil desconocido: {profile}"}
+            return 400, {"error": f"unknown profile: {profile}"}
         probe = bench.RunSpec(profile, dataset, 1, "", url=body.get("url", ""))
         server = probe.capture_server(self.cfg)
-        # El nombre del modelo lo decide el servidor, no el panel: se lo preguntamos
-        # con /props. Hardcodearlo acá fue el bug que dejó una corrida con --model vacío.
+        # The model name is the server's to decide, not the panel's: ask it with
+        # /props. Hardcoding it here was the bug that left a run with an empty --model.
         model = body.get("model") or server.get("alias") or server.get("model")
         if not model:
-            return 502, {"error": "el servidor no respondió /props; no se puede saber "
-                                  "el nombre del modelo. ¿está arriba en "
+            return 502, {"error": "the server did not answer /props; the model name is unknown. "
+                                  "Is it up at "
                                   f"{body.get('url') or self.cfg['ninfer']['url']}?"}
         try:
             tokenizer = self._resolve_tokenizer(model, body.get("tokenizer"))
@@ -1271,7 +1308,7 @@ class API:
         try:
             runner.start()
         except (OSError, subprocess.SubprocessError) as err:
-            return 500, {"error": f"no se pudo lanzar: {err}"}
+            return 500, {"error": f"could not start: {err}"}
         state = {"run_id": spec.run_id, "spec": spec, "runner": runner,
                  "status": "running", "server": server}
         self.jobs.add(spec.run_id, state)
@@ -1285,8 +1322,8 @@ class API:
             if entry:
                 bench.append_registry(Path(self.cfg["aiperf"]["registry"]), entry)
             state["status"] = "done" if entry else "failed"
-            # El log del subproceso viaja con el evento: un fallo que solo dice
-            # "no registró" es indescifrable sin él.
+            # The subprocess log travels with the event: a failure that only says "did not
+            # register" is unreadable without it.
             self.publish({"type": "finished", "run_id": spec.run_id,
                           "ok": bool(entry), "run": entry,
                           "exit": runner.proc.returncode,
@@ -1300,7 +1337,7 @@ class API:
         run_id = body.get("run_id")
         state = self.jobs.get(run_id) if run_id else None
         if not state:
-            return 404, {"error": "no hay esa corrida viva"}
+            return 404, {"error": "there is no such live run"}
         state["runner"].stop()
         state["status"] = "stopped"
         return 200, {"run_id": run_id, "status": "stopped"}
@@ -1359,7 +1396,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self.api.hf_ggufs(query.get("model", [""])[0]))
         if path == "/api/convert/download":
             st = self.api.hf_download_state(query.get("run_id", [""])[0])
-            return self._json(st if st else {"error": "no hay esa descarga"},
+            return self._json(st if st else {"error": "there is no such download"},
                              200 if st else 404)
         if path == "/api/convert/probe":
             return self._json(self.api.convert_probe(query.get("path", [""])[0]))
@@ -1383,7 +1420,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(detail) if detail else self._json({"error": "no existe"}, 404)
         if path == "/api/bench/stream":
             return self._sse()
-        self._json({"error": "ruta desconocida"}, 404)
+        self._json({"error": "unknown path"}, 404)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -1403,7 +1440,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/convert/download":
             code, payload = self.api.hf_download(body)
             return self._json(payload, code)
-        self._json({"error": "ruta desconocida"}, 404)
+        self._json({"error": "unknown path"}, 404)
 
     def _static(self, name: str):
         # The name arrives from the URL now that /js and /css are served from a
@@ -1412,20 +1449,20 @@ class Handler(BaseHTTPRequestHandler):
         root = HERE.resolve()
         path = (root / name).resolve()
         if path != root and root not in path.parents:
-            return self._json({"error": "ruta fuera del panel"}, 404)
+            return self._json({"error": "path outside the panel"}, 404)
         if not path.is_file():
-            return self._json({"error": "falta " + name}, 404)
+            return self._json({"error": "missing " + name}, 404)
         body = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", MIME.get(path.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
-        # Si no, el navegador cachea index.html y no se ve un cambio del panel.
+        # Without it the browser caches index.html and a panel change does not show.
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
     def _sse(self):
-        """Progreso de las corridas vivas. Un stream por cliente."""
+        """Progress of the live runs. One stream per client."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -1441,8 +1478,8 @@ class Handler(BaseHTTPRequestHandler):
         self.api.subscribe(push)
         try:
             for state in self.api.jobs.snapshot():
-                # Solo los jobs con Runner emiten progress aquí; los de convert
-                # y download publican sus propios eventos desde su watch thread.
+                # Only Runner jobs emit progress here; the convert and download ones publish
+                # their own events from their watch thread.
                 if state["status"] == "running" and "runner" in state:
                     self._emit({"type": "progress", "run_id": state["run_id"],
                                 "progress": state["runner"].progress()})

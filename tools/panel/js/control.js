@@ -6,9 +6,9 @@ import { liveModels } from './live.js';
 export async function loadControl(){
   const body = $('#ctl-body');
   try{
-    // /api/live en vez de /api/engine: status.args trae los flags del modelo
-    // (ctx, spec, draft) y la misma fuente alimenta el Dashboard, así que hay
-    // una sola renderer de filas en vez de dos.
+    // /api/live rather than /api/engine: status.args carries the model's flags
+    // (ctx, spec, draft), and the same source feeds the Dashboard, so there is
+    // one row renderer instead of two.
     const [h, live] = await Promise.all([
       api('/api/help').catch(()=>({flags:[]})),
       api('/api/live').catch(()=>({online:false, url:'', models:{data:[]}})),
@@ -21,7 +21,7 @@ export async function loadControl(){
       host.className = 'empty';
       host.style.maxHeight = 'none';
       host.textContent = `El servidor ${live.url || ''} no responde.`;
-      $('#ctl-note').textContent = 'sin conexión';
+      $('#ctl-note').textContent = 'no connection';
     } else {
       host.innerHTML = modelRows(live, null, true);
       const nFav = ((live.models?.data)||[]).filter(m=>favs.has(m.id)).length;
@@ -29,9 +29,9 @@ export async function loadControl(){
       $('#ctl-upd').textContent = 'actualizado ' + new Date().toLocaleTimeString('es-AR',{hour12:false});
       wireModelRows(host, live);
     }
-    // recipe form: dropdown de artifacts + flags
+    // recipe form: artifact dropdown + flags
     if (h.flags && h.flags.length){
-      $('#rec-note').textContent = `${h.flags.length} flags leídas de ${h.binary}`;
+      $('#rec-note').textContent = `${h.flags.length} flags read from ${h.binary}`;
       let files = {artifacts:[]};
       try{ files = await api('/api/convert/files'); }catch(err){}
       $('#r-artifact').innerHTML = '<option value="">— elegir artifact —</option>' +
@@ -39,19 +39,19 @@ export async function loadControl(){
           ${esc(a.path.split('/').pop())} (${fmtSize(a.size)})</option>`).join('');
       renderRecipeFlags(h.flags);
     } else {
-      $('#r-flags').innerHTML = '<div class="err">No se pudo leer --help del binario.</div>';
+      $('#r-flags').innerHTML = '<div class="err">Could not read the binary\'s --help.</div>';
     }
-    // endpoint para agentes: base url + modelo activo del catálogo
+    // endpoint for agents: base url + the loaded model from the catalog
     const base = state.cfg?.endpoint?.base_url || '';
     if (base){
       const loaded = liveModels(live).map(m=>m.id);
       const model = loaded.length ? loaded.join(', ') : ((live.models?.data||[])[0]?.id || '');
-      const key = state.cfg.endpoint.api_key || '(sin api key)';
+      const key = state.cfg.endpoint.api_key || '(no api key)';
       $('#ep-kv').innerHTML = `
         <dt>base_url</dt><dd id="ep-base">${esc(base)}</dd>
         <dt>model</dt><dd id="ep-model">${esc(model)}</dd>
         <dt>api_key</dt><dd>${esc(key)}</dd>
-        <dt>modelos</dt><dd>${(live.models?.data||[]).length} en catálogo</dd>`;
+        <dt>models</dt><dd>${(live.models?.data||[]).length} in catalog</dd>`;
       const activeModel = model.split(',')[0].trim() || 'qwen35-9b';
       const epSnippets = {
         curl: `# OpenAI-compatible cURL\n` +
@@ -91,7 +91,7 @@ export async function loadControl(){
 
       $('#ep-copy').onclick = () => {
         navigator.clipboard.writeText($('#ep-example').textContent)
-          .then(()=>flash('Código copiado al portapapeles', false))
+          .then(()=>flash('Code copied to the clipboard', false))
           .catch(()=>flash('No se pudo copiar', true));
       };
     }
@@ -101,14 +101,14 @@ export async function loadControl(){
 }
 
 function renderRecipeFlags(flags){
-  // 154 flags a la vez es ruido: los relevantes primero, el resto bajo "más".
-  // Se agrupan por categoría según el prefijo del flag (modelo, contexto,
-  // spec-decode, etc.) para que el formulario sea navegable.
+  // 154 flags at once is noise: the relevant ones first, the rest under "more".
+  // They are grouped by category from the flag's prefix (model, context,
+  // spec-decode, etc.) so the form stays navigable.
   const GROUPS = [
     {name:'modelo', re:/^--(model-id|models|chat-template|mmproj|vision|expert)/},
     {name:'contexto y kv', re:/^--(max-context|kv-|host-|device-|prefill|context-)/},
     {name:'spec-decode', re:/^--(spec|draft|lm-head|adaptive|ngram|verbose|mtp)/},
-    {name:'ejecución', re:/^--(max-concurrency|max-pending|sleep-idle|unload-idle|model-suspend|no-models)/},
+    {name:'execution', re:/^--(max-concurrency|max-pending|sleep-idle|unload-idle|model-suspend|no-models)/},
     {name:'salida y api', re:/^--(api-key|host|port|cors|no-webui|response|revision)/},
   ];
   const byFlag = Object.fromEntries(flags.map(f=>[f.flag, f]));
@@ -135,11 +135,11 @@ function renderRecipeFlags(flags){
     const seen = new Set();
     $('#r-flags').querySelectorAll('input[data-flag]').forEach(i=>{
       const v = i.value.trim();
-      if (!v || seen.has(i.dataset.flag)) return;  // un flag puede existir dos veces en --help
+      if (!v || seen.has(i.dataset.flag)) return;  // a flag can exist twice in --help
       seen.add(i.dataset.flag);
       lines.push(`${i.dataset.flag} = ${v}`);
     });
-    $('#r-preview').textContent = lines.join('\n') || '(sin flags)';
+    $('#r-preview').textContent = lines.join('\n') || '(no flags)';
   };
   $('#r-flags').addEventListener('input', preview); preview();
 }

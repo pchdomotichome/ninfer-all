@@ -56,7 +56,7 @@ main{max-width:1560px;margin:0 auto;padding:20px 24px 60px}
   animation:dotPulse 1.8s infinite}
 @keyframes dotPulse{0%{transform:scale(0.8);opacity:1}100%{transform:scale(2.2);opacity:0}}
 
-/* Contenedores de sección */
+/* Section containers */
 section{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-lg);
   margin-bottom:18px;overflow:hidden;box-shadow:var(--shadow-sm);transition:border-color .2s}
 section:hover{border-color:rgba(56,189,248,0.25)}
@@ -107,7 +107,7 @@ tr.run{cursor:pointer}
 tr.run.selected td{background:rgba(56,189,248,0.12);border-color:rgba(56,189,248,0.3)}
 .muted{color:var(--dimmer)}
 
-/* Pills y badges semánticos con glow */
+/* Semantic pills and badges with glow */
 .pill{display:inline-flex;align-items:center;padding:2px 8px;border-radius:12px;font:600 10.5px var(--mono);
   border:1px solid var(--line);color:var(--dim)}
 .pill.ninfer{border-color:rgba(96,165,250,0.35);color:var(--blue);background:rgba(96,165,250,0.08)}
@@ -178,7 +178,7 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .slot-status.free{color:var(--dimmer)}
 .slot-meta{font-size:9.5px;color:var(--dim);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
-/* Gráficas */
+/* Charts */
 .charts{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:14px}
 .chartbox{background:linear-gradient(180deg,var(--panel2) 0%,var(--panel) 100%);border:1px solid var(--line);
   border-radius:var(--radius);padding:14px 16px;min-width:0;box-shadow:var(--shadow-sm)}
@@ -219,8 +219,8 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
   border-bottom:1px solid var(--line-subtle);font:12px var(--mono);white-space:nowrap}
 .rail-row{display:flex;align-items:center;gap:18px;padding:0 24px;height:40px;overflow-x:auto}
 .rail-rows{display:flex;flex-direction:column}
-/* Una línea por modelo cargado: lo mismo para todos, que es lo que hace
-   comparable una línea con otra. */
+/* One line per loaded model: the same field set for every one, which is
+   what makes one line comparable to another. */
 .rail-model{display:flex;align-items:center;gap:16px;padding:0 24px;height:30px;
   border-top:1px solid var(--line-subtle);color:var(--text-muted)}
 .rail-model .nm{color:#fff;font-weight:600;min-width:190px}
@@ -263,7 +263,7 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .now-m b small{font-size:11px;font-weight:500;color:var(--dim)}
 .now-m .progress{height:4px;background:rgba(255,255,255,0.06);border-radius:2px;margin-top:8px;overflow:hidden}
 .now-m .progress i{display:block;height:100%;background:linear-gradient(90deg,var(--teal-dark),var(--teal));transition:width .5s}
-/* ── Línea de veredicto: "¿está bien?" en una frase, no un punto suelto ── */
+/* ── Verdict line: "is it fine?" in one sentence, not a lone dot ── */
 .sechead.verdict h2{font-size:15px;letter-spacing:-.2px}
 .sechead.verdict.good h2{color:var(--green)}
 .sechead.verdict.warn h2{color:var(--amber)}
@@ -286,7 +286,7 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .alert.warning{color:var(--amber);border-color:rgba(251,191,36,0.25);background:rgba(251,191,36,0.05)}
 .alert.critical .t,.alert.serious .t,.alert.warning .t{color:inherit}
 
-/* ── Aceptación por posición (spec-decode) ──────────────────────────────── */
+/* ── Acceptance by position (spec-decode) ────────────────────────────── */
 .subnote{font:10.5px var(--mono);color:var(--dim);margin:-4px 0 10px;letter-spacing:0}
 .specpos-wrap{height:180px;display:flex;flex-direction:column}
 .specpos{flex:1;display:flex;align-items:stretch;gap:10px;min-height:0}

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Motor de benchmarks: lanza AIPerf, sigue el progreso, archiva y registra.
+"""
+Benchmark engine: starts AIPerf, follows its progress, archives and records.
 
-Sin dependencias. Lee config.toml con tomllib, lanza el venv de AIPerf como
-subproceso y sigue sus exports. El registro es un JSONL acumulado: cada línea
-lleva el perfil con el que se corrió, así el ranking nunca mezcla corridas
-incomparables (comparar exige el mismo perfil, o un cruce explícito).
+No dependencies. Reads config.toml with tomllib, runs AIPerf's venv as a
+subprocess and follows its exports. The registry is an appended JSONL: every row
+carries the profile it ran under, so the ranking never mixes incomparable runs
+(comparing requires the same profile, or an explicit crossover).
 
     bench.py run --profile spec --dataset spec_al_gsm8k --concurrency 2
     bench.py runs --profile spec
@@ -30,10 +31,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE / "config.toml"
 
-# Métricas de spec-decode que deja el adaptador `ninfer`. Los nombres llevan el
-# prefijo spec_decode_ del propio AIPerf; si el motor no emite
-# metrics.speculative_decoding (llama.cpp, o ninfer sin el parche) no aparecen
-# y quedan en null en vez de romper la ingesta.
+# The spec-decode metrics the `ninfer` adapter leaves behind. The names carry
+# AIPerf's own spec_decode_ prefix; when the engine does not emit
+# metrics.speculative_decoding (llama.cpp, or ninfer without the patch) they are
+# absent and stay null instead of breaking the ingest.
 SPEC_FIELDS = ("spec_decode_acceptance_length", "spec_decode_draft_acceptance_rate",
                "spec_decode_accepted_per_verified",
                "spec_decode_token_weighted_acceptance_length",
@@ -42,10 +43,11 @@ SPEC_FIELDS = ("spec_decode_acceptance_length", "spec_decode_draft_acceptance_ra
 
 
 def scalar(value) -> float | None:
-    """Aplana las tres formas que usa AIPerf para un número.
+    """
+    Flatten the three shapes AIPerf uses for a number.
 
-    En el export de resumen una métrica es {"avg":..,"p50":..}; en un registro
-    por request es {"value":..,"unit":..}; algunos campos vienen planos.
+    In the summary export a metric is {"avg":..,"p50":..}; in a per-request record it
+    is {"value":..,"unit":..}; some fields come flat.
     """
     if isinstance(value, dict):
         for key in ("value", "avg"):
@@ -71,13 +73,13 @@ def load_config(path: Path = CONFIG) -> dict:
 
 
 def aiperf_ready(cfg: dict) -> tuple[bool, str]:
-    """(listo, motivo). Un venv roto se reporta, no se esconde."""
+    """(ready, reason). A broken venv is reported, not hidden."""
     if not cfg.get("aiperf", {}).get("enabled", False):
-        return False, "deshabilitado en config.toml"
+        return False, "disabled in config.toml"
     venv = Path(cfg["aiperf"]["venv"])
     exe = venv / "bin" / "aiperf"
     if not exe.is_file():
-        return False, f"no existe {exe}"
+        return False, f"{exe} does not exist"
     try:
         out = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=30)
         return out.returncode == 0, (out.stdout or out.stderr).strip().splitlines()[0]
@@ -96,7 +98,7 @@ def git_rev(repo: str | None) -> str:
         return ""
 
 
-# ------------------------------------------------------------------------- servidor
+# ------------------------------------------------------------------------- server
 
 def pid_on_port(port: int) -> int | None:
     try:
@@ -109,8 +111,10 @@ def pid_on_port(port: int) -> int | None:
 
 
 def process_argv(port: int) -> list[str]:
-    """ argv real del servidor. /props no expone la config de spec-decode en
-    ninguno de los dos motores, así que la línea de comandos es la fuente. """
+    """
+    The server's real argv. /props does not expose the spec-decode config in
+    either engine, so the command line is the source.
+    """
     pid = pid_on_port(port)
     if pid is None:
         return []
@@ -121,11 +125,12 @@ def process_argv(port: int) -> list[str]:
 
 
 def spec_config(argv: list[str]) -> dict:
-    """Normaliza la config de spec-decode de cualquier motor a campos comunes.
+    """
+    Normalise any engine's spec-decode config into common fields.
 
-    Sin esto, una corrida de llama.cpp con --spec-draft-n-max 5 y una de ninfer
-    con --draft-tokens 3 se ven idénticas en la tabla, y no lo son: MTP depth es
-    exactamente la variable que explica la diferencia de aceptación.
+    Without this a llama.cpp run with --spec-draft-n-max 5 and an ninfer run with
+    --draft-tokens 3 look identical in the table, and they are not: MTP depth is
+    exactly the variable that explains the acceptance difference.
     """
     def value(*flags: str) -> str | None:
         for i, arg in enumerate(argv):
@@ -139,7 +144,7 @@ def spec_config(argv: list[str]) -> dict:
     backend = value("--spec")
     draft = value("--draft-tokens")
     if backend is None and (has("--spec-draft-n-max") or has("--spec-draft-p-min")):
-        backend = "llama.cpp-draft"          # llama.cpp no nombra el backend
+        backend = "llama.cpp-draft"          # llama.cpp does not name the backend
         draft = value("--spec-draft-n-max")
     return {
         "spec_backend": backend or "none",
@@ -152,7 +157,7 @@ def spec_config(argv: list[str]) -> dict:
 
 
 def server_snapshot(url: str) -> dict:
-    """Retrato del servidor en el momento de la corrida, engine-neutral."""
+    """A snapshot of the server at run time, engine-neutral."""
     snap: dict = {"url": url}
     try:
         with urllib.request.urlopen(url.rstrip("/") + "/props", timeout=5) as fh:
@@ -183,7 +188,7 @@ def server_snapshot(url: str) -> dict:
 # --------------------------------------------------------------------------- run spec
 
 class RunSpec:
-    """Una corrida: qué se mide, contra qué dataset, a qué concurrencia."""
+    """One run: what is measured, against which dataset, at which concurrency."""
 
     def __init__(self, profile: str, dataset: str, concurrency: int,
                  model: str, requests: int = 50, output_tokens: int = 512,
@@ -198,9 +203,9 @@ class RunSpec:
         self.url = url
         self.extra = extra or []
         self.tokenizer = tokenizer  # None → argv usa el del cfg
-        # El run_id se congela acá: como property que re-estampa now() en cada
-        # acceso, el directorio y el registro terminaban con run_ids distintos
-        # (bug 2026-10-11: la UI mostraba T054148 y el ranking guardaba T054206).
+        # The run_id is frozen here: as a property re-stamping now() on every access,
+        # the directory and the registry ended up with different run_ids (bug
+        # 2026-10-11: the UI showed T054148 and the ranking stored T054206).
         self._run_id = (f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
                         f"-{self.profile}-{self.dataset}-c{self.concurrency}")
 
@@ -208,10 +213,11 @@ class RunSpec:
         return self.url or cfg["ninfer"]["url"]
 
     def capture_server(self, cfg: dict) -> dict:
-        """Retrato del servidor ANTES de correr, guardado junto a los artifacts.
+        """
+        A snapshot of the server taken BEFORE the run, stored beside the artifacts.
 
-        Va al directorio de la corrida y no solo al registro: así `reingest`
-        puede reconstruir una línea vieja aunque el servidor ya haya cambiado.
+        It goes into the run directory and not only into the registry: that way
+        `reingest` can rebuild an old row even after the server has changed.
         """
         return server_snapshot(self.resolved_url(cfg))
 
@@ -221,26 +227,25 @@ class RunSpec:
 
     def argv(self, cfg: dict) -> list[str]:
         ap = cfg["aiperf"]
-        # tokenizer propio de la corrida, o el global del cfg como fallback.
+        # The run's own tokenizer, falling back to the one from the config.
         tok = self.tokenizer or ap["tokenizer"]
         argv = [
             str(Path(ap["venv"]) / "bin" / "aiperf"), "profile",
             "--model", self.model,
-            # AIPerf exige tokenizer explícito y local; sin esto aborta.
+            # AIPerf requires an explicit, local tokenizer; without this it aborts.
             "--tokenizer", tok,
             "--endpoint-type", "chat",
             "--url", self.resolved_url(cfg),
-            # Sin --streaming no existe time_to_first_token: el ranking
-            # perdería la columna de TTFT.
+            # Without --streaming there is no time_to_first_token: the ranking would lose
+            # the TTFT column.
             "--streaming",
             "--request-count", str(self.requests),
             "--concurrency", str(self.concurrency),
             "--output-tokens-mean", str(self.output_tokens),
             "--public-dataset", self.dataset,
             "--export-level", "records",
-            # Rejilla de arrivals fija: con poisson/gamma la concurrencia
-            # efectiva varía entre corridas y dos registros dejan de ser
-            # comparables fila a fila.
+            # Fixed arrival grid: with poisson/gamma the effective concurrency varies
+            # between runs and two records stop being comparable row by row.
             "--request-rate-mode", "constant",
         ]
         argv += self.extra
@@ -250,7 +255,7 @@ class RunSpec:
 # --------------------------------------------------------------------------- runner
 
 class Runner:
-    """Subproceso AIPerf con estado consultable. El panel lo lee por SSE."""
+    """The AIPerf subprocess with a queryable state. The panel reads it over SSE."""
 
     def __init__(self, spec: RunSpec, cfg: dict, run_dir: Path):
         self.spec = spec
@@ -285,12 +290,12 @@ class Runner:
             return list(self.log_lines)
 
     def progress(self) -> dict:
-        """Parciales desde el jsonl que AIPerf va escribiendo durante la corrida."""
+        """Partials from the jsonl AIPerf writes during the run."""
         partial = {"records": 0, "latency_avg": None, "out_tps_avg": None, "done": False,
-                   "phase": "iniciando", "log_tail": ""}
-        # Antes del primer request no hay jsonl que leer (descargando dataset,
-        # calentando). Sin esto la UI muestra "0 requests" en silencio y no hay
-        # forma de saber si 下载ó, se colgó o está fallando.
+                   "phase": "starting", "log_tail": ""}
+        # Before the first request there is no jsonl to read (dataset downloading,
+        # warming up). Without this the UI silently shows "0 requests" and there is no
+        # way to tell whether it downloaded, hung or is failing.
         with self._lock:
             if self.log_lines:
                 last = [ln for ln in self.log_lines if ln.strip()]
@@ -305,10 +310,10 @@ class Runner:
                         try:
                             metrics = json.loads(raw).get("metrics", {})
                         except json.JSONDecodeError:
-                            continue  # línea a medio escribir
+                            continue  # a half-written line
                         lat += scalar(metrics.get("request_latency")) or 0.0
-                        # output_token_throughput no existe por request; el
-                        # equivalente por request es e2e_output_token_throughput.
+                        # output_token_throughput does not exist per request; the per-request
+                        # equivalent is e2e_output_token_throughput.
                         tps += (scalar(metrics.get("output_token_throughput"))
                                 or scalar(metrics.get("e2e_output_token_throughput")) or 0.0)
                         n += 1
@@ -317,15 +322,15 @@ class Runner:
             if n:
                 partial.update(records=n, latency_avg=lat / n, out_tps_avg=tps / n)
         if not partial["records"] and partial["log_tail"]:
-            # Hay actividad (descargando dataset, calentando) pero aún ningún
-            # request medido: no es "iniciando", es "preparando".
-            partial["phase"] = "preparando"
+            # There is activity (dataset downloading, warming up) but no measured request
+            # yet: this is not "starting", it is "preparing".
+            partial["phase"] = "preparing"
         elif partial["records"]:
-            partial["phase"] = "midiendo"
+            partial["phase"] = "measuring"
         with self._lock:
             partial["done"] = self.proc is not None and self.proc.poll() is not None
             if partial["done"]:
-                partial["phase"] = "terminado" if partial["records"] else "fallido"
+                partial["phase"] = "finished" if partial["records"] else "failed"
         return partial
 
     def stop(self) -> None:
@@ -339,14 +344,14 @@ class Runner:
             self.proc.wait(timeout=10)
 
 
-# --------------------------------------------------------------------------- ingesta
+# --------------------------------------------------------------------------- ingest
 
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
 def ingest(run_dir: Path, spec: RunSpec, cfg: dict) -> dict | None:
-    """Convierte los exports de AIPerf en una línea de registro."""
+    """Turn AIPerf's exports into one registry row."""
     export = run_dir / "profile_export_aiperf.json"
     if not export.exists():
         return None
@@ -354,8 +359,8 @@ def ingest(run_dir: Path, spec: RunSpec, cfg: dict) -> dict | None:
         data = json.loads(export.read_text())
     except json.JSONDecodeError:
         return None
-    # El retrato del servidor se capturó antes de correr y vive junto a los
-    # artifacts, así sobrevive a un cambio de configuración posterior.
+    # The server snapshot is taken before the run and lives beside the artifacts,
+    # so it survives a later configuration change.
     try:
         server = json.loads((run_dir / "server.json").read_text())
     except (OSError, json.JSONDecodeError):
@@ -364,9 +369,9 @@ def ingest(run_dir: Path, spec: RunSpec, cfg: dict) -> dict | None:
     def avg(block: str, key: str = "avg"):
         return (data.get(block) or {}).get(key)
 
-    # AIPerf ya poola las métricas de spec-decode en el export de resumen, con
-    # la ponderación correcta. Solo si el resumen no las trae (corrida cancelada,
-    # export a medias) se promedian los registros sueltos como red de seguridad.
+    # AIPerf already pools the spec-decode metrics into the summary export, with
+    # the right weighting. Only when the summary lacks them (cancelled run, partial
+    # export) are the individual records averaged, as a safety net.
     spec_pool: dict[str, float | None] = {f: avg(f) for f in SPEC_FIELDS}
     records = run_dir / "profile_export.jsonl"
     if all(v is None for v in spec_pool.values()) and records.exists():
@@ -383,7 +388,7 @@ def ingest(run_dir: Path, spec: RunSpec, cfg: dict) -> dict | None:
                         pool[field].append(value)
         spec_pool = {f: _mean(v) for f, v in pool.items()}
 
-    # El comando exacto queda en la línea: es lo que hace reproducible una corrida.
+    # The exact command stays on the row: it is what makes a run reproducible.
     try:
         aiperf_cmd = (run_dir / "cmd.txt").read_text().strip()
     except OSError:
@@ -396,9 +401,9 @@ def ingest(run_dir: Path, spec: RunSpec, cfg: dict) -> dict | None:
         "dataset": spec.dataset,
         "model": spec.model,
         "concurrency": spec.concurrency,
-        # Todo lo que hace dos corridas incomparables viaja con la línea.
-        # El ranking agrupa por profile; dentro de un profile, si estos tres
-        # difieren, la comparación es engañosa y hay que decirlo.
+        # Everything that makes two runs incomparable travels with the row.
+        # The ranking groups by profile; within a profile, if these three differ the
+        # comparison is misleading and has to be said so.
         "request_count_target": spec.requests,
         "output_tokens_mean": spec.output_tokens,
         "request_rate_mode": "constant",
@@ -415,26 +420,26 @@ def ingest(run_dir: Path, spec: RunSpec, cfg: dict) -> dict | None:
         "ttft_avg": avg("time_to_first_token"),
         "ttft_p99": avg("time_to_first_token", "p99"),
         "out_tps_avg": avg("output_token_throughput"),
-        # Prefill y decode son bottlenecks distintos: un artifact con prefill
-        # lento y decode rápido no es el mismo problema que al revés.
+        # Prefill and decode are different bottlenecks: an artifact with slow prefill and
+        # fast decode is not the same problem as the reverse.
         "prefill_tps": avg("effective_prefill_throughput"),
         "total_tps": data.get("total_token_throughput"),
         "req_per_s": avg("request_throughput"),
-        # effective_concurrency llega como {avg, p50, ...}: sin aplanarlo la
-        # UI imprime [object Object].
+        # effective_concurrency arrives as {avg, p50, ...}: without flattening it the
+        # UI prints [object Object].
         "effective_concurrency": scalar(data.get("effective_concurrency")),
         "aiperf_version": data.get("aiperf_version"),
         "ninfer_git": git_rev(cfg.get("ninfer", {}).get("repo")),
         "ninfer_binary": cfg.get("ninfer", {}).get("binary", ""),
         "url": spec.resolved_url(cfg),
-        # Qué estaba haciendo el servidor: motor, slots, contexto y la config de
-        # spec-decode normalizada. Sin esto, MTP5 y MTP3 se ven iguales.
+        # What the server was doing: engine, slots, context and the normalised
+        # spec-decode config. Without it MTP5 and MTP3 look identical.
         "server": server,
         "tokenizer": spec.tokenizer or cfg["aiperf"]["tokenizer"],
         "artifacts_dir": run_dir.as_posix(),
-        # Histograma pooled por posición: {"0": n, "1": n, ...} sobre las
-        # posiciones de aceptación. Es lo que muestra el decaimiento por
-        # posición en la UI; sin él solo queda el promedio.
+        # Histogram pooled by position: {"0": n, "1": n, ...} over the acceptance
+        # positions. It is what shows the per-position decay in the UI; without it only
+        # the average survives.
         "acceptance_histogram": data.get("pooled_spec_decode_acceptance_histogram"),
         "aiperf_cmd": aiperf_cmd,
         **spec_pool,
@@ -458,7 +463,7 @@ def list_runs(registry: Path, profile: str | None = None) -> list[dict]:
         try:
             entry = json.loads(raw)
         except json.JSONDecodeError:
-            continue                      # línea a medias de una corrida viva
+            continue                      # a half-written line of a live run
         if profile and entry.get("profile") != profile:
             continue
         runs.append(entry)
@@ -470,17 +475,17 @@ def list_runs(registry: Path, profile: str | None = None) -> list[dict]:
 def cmd_run(args, cfg: dict) -> int:
     ok, why = aiperf_ready(cfg)
     if not ok:
-        print(f"AIPerf no disponible: {why}", file=sys.stderr)
+        print(f"AIPerf not available: {why}", file=sys.stderr)
         return 2
 
     profile = next((b for b in cfg.get("benchmarks", []) if b["id"] == args.profile), None)
     if not profile:
-        print(f"perfil desconocido: {args.profile}", file=sys.stderr)
+        print(f"unknown profile: {args.profile}", file=sys.stderr)
         return 2
     if args.dataset not in profile["datasets"] and not args.force_dataset:
-        print(f"dataset '{args.dataset}' no está en el perfil '{args.profile}'.\n"
+        print(f"dataset '{args.dataset}' is not in profile '{args.profile}'.\n"
               f"  del perfil: {', '.join(profile['datasets'])}\n"
-              f"  (--force_dataset para igual así; la corrida queda en su propio perfil)",
+              f"  (--force_dataset to use it anyway; the run stays in its own profile)",
               file=sys.stderr)
         return 2
 
@@ -488,16 +493,16 @@ def cmd_run(args, cfg: dict) -> int:
                    requests=args.requests, output_tokens=args.output_tokens,
                    url=args.url, extra=args.flag)
     run_dir = Path(cfg["aiperf"]["runs_dir"]) / spec.run_id
-    # El retrato va primero: si el servidor no está arriba, la corrida falla
-    # igual, pero el registro conserva por qué.
+    # The snapshot goes first: if the server is not up the run fails either way, but
+    # the record keeps why.
     server = spec.capture_server(cfg)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "server.json").write_text(json.dumps(server, indent=2))
     runner = Runner(spec, cfg, run_dir)
     runner.start()
     print(f"run_id     {spec.run_id}")
-    print(f"directorio {run_dir}")
-    print(f"servidor   {server.get('binary', '?')} · "
+    print(f"directory {run_dir}")
+    print(f"server    {server.get('binary', '?')} · "
           f"spec {server.get('spec_backend', '?')}"
           f"{'/' + str(server['draft_depth']) if server.get('draft_depth') else ''} · "
           f"{server.get('slots', '?')} carriles · ctx {server.get('max_context', '?')}")
@@ -521,7 +526,7 @@ def cmd_run(args, cfg: dict) -> int:
               f"p95 {num(entry['latency_p95'])} ms · "
               f"out {num(entry['out_tps_avg'])} tok/s · err {num(entry['error_rate'])}%")
     else:
-        print("\nsin export: la corrida no llegó a escribir resultados", file=sys.stderr)
+        print("\nno export: the run never got to writing results", file=sys.stderr)
         for line in runner.log()[-15:]:
             print(f"  {line}", file=sys.stderr)
     return code
@@ -533,7 +538,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", type=Path, default=CONFIG)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    run = sub.add_parser("run", help="correr un benchmark")
+    run = sub.add_parser("run", help="run a benchmark")
     run.add_argument("--profile", required=True)
     run.add_argument("--dataset", default="")
     run.add_argument("--concurrency", type=int, default=1)
@@ -545,12 +550,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--force_dataset", action="store_true")
     run.set_defaults(fn=lambda a, c: cmd_run(a, c))
 
-    runs = sub.add_parser("runs", help="listar el registro")
+    runs = sub.add_parser("runs", help="list the registry")
     runs.add_argument("--profile", default="")
     runs.add_argument("--json", action="store_true")
     runs.set_defaults(fn=lambda a, c: cmd_runs(a, c))
 
-    sub.add_parser("reingest", help="reconstruir el registro desde los artifacts").set_defaults(
+    sub.add_parser("reingest", help="rebuild the registry from the artifacts").set_defaults(
         fn=lambda a, c: cmd_reingest(a, c))
 
     sub.add_parser("profiles", help="listar perfiles y datasets").set_defaults(
@@ -561,11 +566,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def cmd_reingest(args, cfg: dict) -> int:
-    """Reconstruye el registro desde los artifacts ya en disco.
+    """
+    Rebuild the registry from the artifacts already on disk.
 
-    El esquema del registro cambia (nuevas métricas, campos renombrados) y las
-    corridas viejas guardan la versión anterior. Reingerir las arregla sin
-    gastar GPU en volver a correr lo que ya se midió.
+    The registry schema changes (new metrics, renamed fields) and old runs stored
+    the previous version. Reingesting fixes them without spending GPU re-running
+    what was already measured.
     """
     registry = Path(cfg["aiperf"]["registry"])
     runs = list_runs(registry)
@@ -573,7 +579,7 @@ def cmd_reingest(args, cfg: dict) -> int:
     for old in runs:
         run_dir = Path(old.get("artifacts_dir", ""))
         if not run_dir.is_dir():
-            continue                      # artifacts borrados: se dejan como están
+            continue                      # deleted artifacts: left as they are
         spec = RunSpec(old["profile"], old["dataset"], old["concurrency"], old["model"],
                        requests=old.get("request_count_target") or 50,
                        output_tokens=old.get("output_tokens_mean") or 512,
@@ -581,7 +587,7 @@ def cmd_reingest(args, cfg: dict) -> int:
         fresh = ingest(run_dir, spec, cfg)
         if not fresh:
             continue
-        # run_id y ts son identidad, no medida: se conservan de la corrida real.
+        # run_id and ts are identity, not measurement: they come from the real run.
         fresh["run_id"], fresh["ts"] = old["run_id"], old["ts"]
         rewritten.append(fresh)
     if not rewritten:
@@ -590,7 +596,7 @@ def cmd_reingest(args, cfg: dict) -> int:
     with open(registry, "w") as fh:       # reconstruye el append-only
         for entry in rewritten:
             fh.write(json.dumps(entry, sort_keys=True) + "\n")
-    print(f"reingeridas {len(rewritten)} corridas; esquema actual aplicado")
+    print(f"{len(rewritten)} runs reingested; current schema applied")
     return 0
 
 
@@ -600,7 +606,7 @@ def cmd_runs(args, cfg: dict) -> int:
         print(json.dumps(runs, indent=2))
         return 0
     if not runs:
-        print("registro vacío")
+        print("empty registry")
         return 0
     head = f"{'run_id':<46} {'ds':<18} {'c':>2} {'p95 ms':>8} {'ttft ms':>8} {'tok/s':>7}"
     print(head)

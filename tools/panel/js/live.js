@@ -12,8 +12,8 @@ export function initCharts(){
   const def = {responsive:true, maintainAspectRatio:false,
     scales:{x:{display:true,ticks:{maxTicksLimit:8,color:'#5d6b81'},grid:{color:'#1c2534'}},
              y:{ticks:{color:'#5d6b81',maxTicksLimit:5},grid:{color:'#1c2534'}}},
-    // Sin legend: con una sola serie, el cuadradito de la leyenda solo hacía
-    // ruido. El nombre de la serie vive en el tooltip ahora.
+    // No legend: with a single series the legend box was only noise. The series
+    // name lives in the tooltip now.
     plugins:{legend:{display:false}},
     animation:false};
   const mk = (id, color, name) => new Chart(document.getElementById(id), {
@@ -31,8 +31,8 @@ export function initCharts(){
       b.className = state.win===w ? 'on' : '';
       b.onclick=()=>{
         state.win=w;
-        // Cambiar ventana = recortar, no solo limitar los pushes futuros.
-        // Se limpian las series y se re-backfillea desde la historia.
+        // Changing the window trims; it does not only cap future pushes. The
+        // series are cleared and backfilled again from history.
         for (const c2 of Object.values(state.charts)){
           c2.data.labels=[]; c2.data.datasets[0].data=[]; c2.update('none');
         }
@@ -57,8 +57,9 @@ function chartPush(ch, label, v, t){
   ch.update('none');
 }
 
-// El router en reposo responde 404 model_not_found a /v1/load, /stats y /slots:
-// no es un error, es "ningún modelo cargado". Sin modelo no hay ocupación ni KV.
+// An idle router answers 404 model_not_found to /v1/load, /stats and /slots:
+// that is not an error, it means "no model loaded". With no model there is no
+// occupancy and no KV to report.
 
 function sparkSvg(vals){
   const v = (vals||[]).map(x=>x==null?0:x);
@@ -75,9 +76,9 @@ export function liveModels(d){
     ['loaded','sleeping','suspended','loading'].includes(m.status?.value));
 }
 
-// Tasas por modelo, de los contadores acumulados de SU /v1/load.
-// El delta se guarda por modelo: con dos Engines en memoria, usar el delta
-// global mezclaría las velocidades de uno con los del otro.
+// Per-model rates, from the cumulative counters of ITS OWN /v1/load. The
+// previous reading is kept per model: with two Engines in memory a global
+// delta would mix one model's speed with the other's.
 function engineRates(engines){
   const now = Date.now()/1000;
   const out = {};
@@ -95,8 +96,8 @@ function engineRates(engines){
     }
     state.engPrev[mid] = {t: now, tok: c.committed_decode_tokens||0, pt: c.computed_prefill_tokens||0};
     const busy = (e.load && e.load.requests && e.load.requests.running) || 0;
-    // En reposo los contadores no avanzan y la tasa es 0 por definición: se
-    // muestra el último valor real del request log de ese modelo.
+    // At rest the counters do not advance and the rate is zero by definition, so
+    // the last real value from that model's request log is shown instead.
     const last = (state.reqs||[]).find(r=>r.model===mid && r.decode_s>0 && r.completion_tokens);
     const prevReq = (state.reqs||[]).find(r=>r.model===mid && r.prefill_s>0 && r.prefill_tokens);
     out[mid] = {tg, pg, busy,
@@ -112,8 +113,8 @@ function fmtRate(v, last, unit){
   return '—';
 }
 
-// Una línea por Engine en memoria. Mismos campos en todas, que es lo que las
-// hace comparables de un vistazo; lo que cambia de un estado a otro se rotula.
+// One line per Engine in memory. The same fields on every one, which is what
+// makes them comparable at a glance; what changes with state is labelled.
 function renderRailModels(d, rates){
   const host = $('#rail-models');
   const engines = d.engines || {};
@@ -127,24 +128,24 @@ function renderRailModels(d, rates){
     const occ = l.occupancy||{}, cap = l.capacity||{};
     const r = rates[mid] || {};
     const hostMiB = (res.host_snapshot_bytes||0)/2**20;
-    // "tamaño" para uno dormido, "VRAM" para uno cargado: el mismo número no
-    // significa lo mismo, y llamarle VRAM a los dos sería mentir.
+    // "size" for a sleeping model, "VRAM" for a loaded one: the same number
+    // does not mean the same, and calling both VRAM would be lying.
     const bytes = res.releasable_device_bytes || 0;
     const memCol = on ? (bytes/2**30 >= 18 ? 'var(--amber)' : 'var(--teal)') : 'var(--dim)';
     const ctxPct = cap.max_context ? Math.min(100, (occ.device_main_kv_tokens||0)/cap.max_context*100) : 0;
-    const stateLbl = {loaded:'activo', sleeping:'dormido', suspended:'suspendido', loading:'cargando'}[e.state] || e.state;
+    const stateLbl = {loaded:'loaded', sleeping:'sleeping', suspended:'suspended', loading:'loading'}[e.state] || e.state;
     return `<div class="rail-model" data-model="${esc(mid)}">
       <span class="dot ${on?'ok':e.state==='suspended'?'blue':e.state==='loading'?'warn':'off'}"></span>
       <span class="nm">${esc(mid)}</span>
       <span class="dim2">${stateLbl}</span>
       <span class="sep">|</span>
       <span style="color:${memCol}">${bytes?(bytes/2**30).toFixed(1)+' GiB':'—'}</span>
-      <span class="dim2">${on?'VRAM':'tamaño'}</span>
+      <span class="dim2">${on?'VRAM':'size'}</span>
       ${!on && hostMiB>1 ? `<span class="dim2">· ${hostMiB.toFixed(0)} MiB en host</span>` : ''}
       <span class="sep">|</span>
       <span style="color:${ctxPct>85?'var(--amber)':'var(--text-muted)'}">ctx ${(occ.device_main_kv_tokens||0).toLocaleString()}<span class="dim2">/${(cap.max_context||0).toLocaleString()}</span></span>
       <span class="sep">|</span>
-      <span title="tok/s de generación${r.tg>0.5?' (en vivo)':''}">TG ${fmtRate(r.tg, r.lastTps, 'tok/s')}</span>
+      <span title="generation tok/s${r.tg>0.5?' (live)':''}">TG ${fmtRate(r.tg, r.lastTps, 'tok/s')}</span>
       <span class="sep">|</span>
       <span title="tok/s de prefill${r.pg>0.5?' (en vivo)':''}">PG ${fmtRate(r.pg, r.lastPrefill, 'tok/s')}</span>
       <span class="sep">|</span>
@@ -160,8 +161,8 @@ function renderRail(d, gpu, loadOk, rates){
   const live = liveModels(d);
   const load = loadOk ? (d.load||{}) : {};
   const cap = load.capacity||{}, occ = load.occupancy||{}, req = load.requests||{};
-  // El modelo corre en un device puntual (--device N del preset): el gauge debe
-  // mostrar ESA GPU, no la primera del host.
+  // A model runs on one specific device (--device N from the preset): the gauge
+  // must show THAT GPU, not the first one on the host.
   const loadedModel = live.find(m=>m.status?.value==='loaded') || live[0];
   const dev = loadedModel ? Number(modelArgs(loadedModel).device) : NaN;
   const g = gpu && gpu.online && gpu.gpus.length
@@ -176,7 +177,7 @@ function renderRail(d, gpu, loadOk, rates){
   const uCol = g ? (g.util>=90?'var(--red)':g.util>=60?'var(--amber)':'var(--blue)') : 'var(--dim)';
   $('#rail-global').innerHTML = `
     <span class="item"><span class="dot ${live.length?'ok':'off'}"></span>
-      <span class="val">${live.length?live.length+' en memoria':'sin modelo'}</span></span>
+      <span class="val">${live.length?live.length+' in memory':'no model'}</span></span>
     <span class="item"><span class="lbl">VRAM</span>
       <span class="gauge ${vramCls}"><i style="width:${(vramPct??0).toFixed(0)}%"></i></span>
       <span class="val" style="color:${vramCol}">${g?(g.mem_used_mib/1024).toFixed(1):'—'}<span class="dim">/${g?(g.mem_total_mib/1024).toFixed(0):'—'}G</span></span></span>
@@ -203,8 +204,8 @@ function renderRail(d, gpu, loadOk, rates){
   };
 }
 
-// El veredicto: una frase que conteste "¿está bien?". El nivel tiñe sólo la
-// línea, y el detalle va al lado en vez de competir con ella.
+// The verdict: one sentence answering "is it fine?". The level tints only that
+// line; the detail sits beside it rather than competing with it.
 const VERDICT_DOT = {good:'ok pulse', warn:'warn', bad:'bad', idle:'off'};
 const ALERT_RANK = {critical:3, serious:2, warning:1};
 const ALERT_ICON = {
@@ -221,8 +222,8 @@ function renderVerdict(lvl, txt, detail){
   $('#vd-detail').textContent = detail || '';
 }
 
-// La alerta manda sobre el estado: si algo está mal, el veredicto lo dice
-// primero, no "en reposo".
+// An alert outranks the state: when something is wrong the verdict says so
+// first, instead of "idle".
 function renderAlerts(d){
   const box = $('#alerts');
   const list = (d.alerts||[]).slice().sort(
@@ -239,17 +240,17 @@ function renderAlerts(d){
 }
 
 function renderNow(d, load, cap, occ, req, loadOk, rates){
-  // El estado se lee de `engines`, que ya resolvió la contradicción entre
-  // /models (que sigue diciendo "loaded" a un modelo suspendido) y residency.
-  // Antes se leía de /models y por eso el veredicto decía "dormido" con un
-  // modelo activo en memoria: promediaba dos Engines distintos.
+  // State is read from `engines`, which already resolves the contradiction
+  // between /models (which still reports a suspended model as loaded) and
+  // residency. Reading /models is what made the verdict say "asleep" while a
+  // model was running: it was averaging two different Engines.
   const eng = d.engines || {};
   const st = id => (eng[id]||{}).state;
   const ids = Object.keys(eng);
   const running = occ.running ?? req.running ?? 0;
   const detail = ids.map(id => {
     const s = st(id);
-    return s === 'loaded' ? id : `${id} ${({sleeping:'dormido', suspended:'suspendido', loading:'cargando'})[s]||s}`;
+    return s === 'loaded' ? id : `${id} ${({sleeping:'sleeping', suspended:'suspended', loading:'loading'})[s]||s}`;
   }).join(' · ');
   const alerts = (state.alerts && state.alerts.alerts) || [];
   const worst = alerts.reduce((w,a)=> (ALERT_RANK[a.level]||0) > (ALERT_RANK[w]||0) ? a.level : w, null);
@@ -261,18 +262,18 @@ function renderNow(d, load, cap, occ, req, loadOk, rates){
   }
   else if (ids.some(id=>st(id)==='loading')) renderVerdict('warn', 'cargando modelo', detail);
   else if (running>0)                          renderVerdict('good', 'decodificando', `${running} en vuelo · ${detail}`);
-  else if (ids.some(id=>st(id)==='loaded'))    renderVerdict('good', 'en reposo', detail);
+  else if (ids.some(id=>st(id)==='loaded'))    renderVerdict('good', 'idle', detail);
   else if (ids.some(id=>st(id)==='suspended')) renderVerdict('idle', 'suspendido · vive en el host', detail);
-  else if (ids.some(id=>st(id)==='sleeping'))  renderVerdict('idle', 'dormido · despierta al próximo request', detail);
-  else                                         renderVerdict('idle', 'sin modelo cargado', 'VRAM libre · carga uno para ver ocupación y KV');
+  else if (ids.some(id=>st(id)==='sleeping'))  renderVerdict('idle', 'sleeping · wakes on the next request', detail);
+  else                                         renderVerdict('idle', 'no model loaded', 'free VRAM · load one to see occupancy and KV');
 
   $('#now-metrics').innerHTML = renderEngineCards(d, rates);
   wireModelRows($('#now-metrics'), d);
 }
 
-// Un recuadro por Engine en memoria. Con dos modelos cargados una sola fila de
-// números era ambigua: el veredicto mezclaba "dormido" con "activo" y cada cifra
-// era de un solo modelo. Acá cada caja es de un modelo y rotula su estado.
+// One box per Engine in memory. With two models loaded a single row of numbers
+// was ambiguous: the verdict mixed "asleep" with "running", and every figure
+// belonged to one model. Each box is one model and labels its state.
 function renderEngineCards(d, rates){
   const ids = Object.keys(d.engines || {});
   if (!ids.length){
@@ -295,14 +296,14 @@ function renderEngineCards(d, rates){
       <div class="ec-head">
         <span class="dot ${on?'ok pulse':e.state==='suspended'?'blue':e.state==='loading'?'warn':'off'}"></span>
         <b>${esc(mid)}</b>
-        <span class="ec-state">${esc({loaded:'activo',sleeping:'dormido',suspended:'suspendido en host',loading:'cargando'}[e.state]||e.state)}</span>
+        <span class="ec-state">${esc({loaded:'loaded',sleeping:'sleeping',suspended:'suspended on host',loading:'loading'}[e.state]||e.state)}</span>
         <span class="spacer"></span>
         ${on ? `<button data-act="sleep" data-model="${esc(mid)}">Dormir</button>`
              : `<button data-act="load" data-model="${esc(mid)}">Despertar</button>`}
-        <button class="iconbtn" data-cfg="${esc(mid)}" title="Config del modelo">${SVG_GEAR}</button>
+        <button class="iconbtn" data-cfg="${esc(mid)}" title="Model config">${SVG_GEAR}</button>
       </div>
       <div class="ec-metrics">
-        <div class="now-m"><span class="k">${on?'VRAM':'tamaño'}</span>
+        <div class="now-m"><span class="k">${on?'VRAM':'size'}</span>
           <b style="color:${on?'#fff':'var(--dim)'}">${bytes?(bytes/2**30).toFixed(1):'—'} <small>GiB</small></b>
           ${!on&&hostMiB>1?`<small class="sub">${hostMiB.toFixed(0)} MiB en host</small>`:''}</div>
         <div class="now-m"><span class="k">ctx usado</span>
@@ -311,11 +312,11 @@ function renderEngineCards(d, rates){
         <div class="now-m"><span class="k">carriles</span><b>${req.running??0}/${cap.max_concurrency??'—'}</b>
           ${cap.max_concurrency?`<div class="progress"><i style="width:${Math.min(100,(req.running||0)/cap.max_concurrency*100).toFixed(0)}%"></i></div>`:''}</div>
         <div class="now-m"><span class="k">en cola</span><b style="color:${(req.waiting||0)>0?'var(--amber)':'#fff'}">${req.waiting??0}</b></div>
-        <div class="now-m"><span class="k">${r.tg>0.5?'gen ahora':'último gen'}</span>
+        <div class="now-m"><span class="k">${r.tg>0.5?'generating':'last gen'}</span>
           <b style="color:${r.tg>0.5?'var(--teal)':'#fff'}">${fmtRate(r.tg, r.lastTps, '').trim()} <small>tok/s</small></b></div>
-        <div class="now-m"><span class="k">${r.pg>0.5?'prefill ahora':'último prefill'}</span>
+        <div class="now-m"><span class="k">${r.pg>0.5?'prefilling':'last prefill'}</span>
           <b style="color:${r.pg>0.5?'var(--teal)':'#fff'}">${fmtRate(r.pg, r.lastPrefill, '').trim()} <small>tok/s</small></b></div>
-        <div class="now-m" title="mediana aprendida de la velocidad del servidor para este modelo"><span class="k">referencia</span>
+        <div class="now-m" title="learned median of the server speed for this model"><span class="k">baseline</span>
           <b style="color:var(--muted)">${bl? (bl.samples>=12?bl.median_tok_s.toFixed(0):`aprendiendo ${bl.samples}/12`) : '—'} <small>${bl&&bl.samples>=12?'tok/s':''}</small></b></div>
       </div>
     </div>`;
@@ -327,14 +328,14 @@ function slotsHtml(d, occ){
   if (!slots.length) return '';
   return `<div class="slots-strip">
       <div class="slots-strip-head">
-        <b><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg> Paged KV Cache — Slots de Ejecución (${slots.length} carriles)</b>
+        <b><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg> Paged KV Cache — Execution Slots (${slots.length} lanes)</b>
         <span style="color:var(--dim)">${occ.device_main_kv_tokens != null ? occ.device_main_kv_tokens.toLocaleString() + ' tok activos' : ''}</span>
       </div>
       <div class="slots-grid">
         ${slots.map(sl => {
           const isBusy = sl.is_processing, isRetained = sl.retained;
           const stateCls = isBusy ? 'busy' : isRetained ? 'retained' : '';
-          const statusTxt = isBusy ? 'decodificando' : isRetained ? 'en caché' : 'libre';
+          const statusTxt = isBusy ? 'decoding' : isRetained ? 'cached' : 'free';
           const statusCls = isBusy ? 'active' : isRetained ? 'cached' : 'free';
           const tok = sl.n_prompt_tokens || sl.n_prompt_tokens_cache || 0;
           return `<div class="slot-cell ${stateCls}">
@@ -352,8 +353,8 @@ export async function loadAlerts(){
   try{ d = await api('/api/alerts'); }
   catch(e){ return; }
   if (!d || !d.ok) return;
-  // Las alertas y la referencia cambian mucho más lento que el estado: no
-  // hay que re-renderizar si el contenido es el mismo.
+  // Alerts and the learned baseline move far more slowly than the state, so
+  // nothing is re-rendered while the content is unchanged.
   const sig = JSON.stringify([d.alerts, d.models]);
   if (sig === state.alertsSig) return;
   state.alertsSig = sig;
@@ -377,7 +378,7 @@ export async function loadLive(){
   }
   errhost.innerHTML = '';
 
-  // Backfill: las gráficas arrancan con la historia del jsonl, no vacías.
+  // Backfill: the charts start with the jsonl history instead of empty.
   if (!state.histLoaded){
     state.histLoaded = true;
     try{
@@ -397,8 +398,8 @@ export async function loadLive(){
   const t = Date.now()/1000;
   const lbl = new Date().toLocaleTimeString('es-AR',{hour12:false});
 
-  // series desde /v1/load counters. `lastDT !== undefined` es el "hay muestra
-  // previa": el objeto se reemplaza entero, así que no existe una clave `last`.
+  // series from the /v1/load counters. `lastDT !== undefined` means "there is a
+  // previous sample": the object is replaced whole, so no `last` key exists.
   if (loadOk){
     const c = load.counters||{};
     if(state.series.counters.lastDT !== undefined){
@@ -419,8 +420,8 @@ export async function loadLive(){
   loadAlerts();
   renderNow(d, load, cap, occ, req, loadOk, rates);
 
-  // Tiles: ratio acotado -> barra; tasa -> sparkline. El tono dice si hay que
-  // mirarlo (normal, ámbar >75%, rojo >90%).
+  // Tiles: a bounded ratio gets a bar, a rate gets a sparkline. The tone says
+  // whether it is worth looking at (blue normal, amber >75%, red >90%).
   const tiles = LIVE_TILES.map(ti => {
     const v = occ[ti.k] ?? req[ti.k];
     const max = cap[ti.max] ?? occ[ti.max];
@@ -455,13 +456,13 @@ export async function loadLive(){
     <div class="s">${state.win==='retained'?'retenido':state.win}</div>
     ${sparkSvg(tpData.slice(-40))}</div>`;
 
-  // Sin modelo no hay ocupación ni KV que mostrar: esos tiles serían cuatro
-  // guiones. Quedan sólo los de GPU, que siempre tienen dato.
+  // With no model there is no occupancy or KV to show: those tiles would be
+  // four dashes. Only the GPU ones stay, which always have data.
   $('#tiles').innerHTML = sparkTile + (loadOk ? tiles : '') + gpuTiles;
-  $('#livenote').textContent = loadOk ? '' : 'sin modelo cargado — cargá uno para ver ocupación y KV';
+  $('#livenote').textContent = loadOk ? '' : 'no model loaded — load one to see occupancy and KV';
   $('#slots-host').innerHTML = slotsHtml(d, occ);
   $('#modelrows').innerHTML = modelRows(d, req, false);
-  $('#modelnote').textContent = `${(d.models?.data||[]).length} en el catálogo`;
+  $('#modelnote').textContent = `${(d.models?.data||[]).length} in the catalog`;
   renderQuickLoad(d);
   $('#liveupd').textContent = 'actualizado ' + new Date().toLocaleTimeString('es-AR',{hour12:false});
   wireModelRows($('#modelrows'), d);

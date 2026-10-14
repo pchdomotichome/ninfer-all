@@ -134,16 +134,16 @@ def test_progress_muestra_fase_y_log():
         d = Path(tmp)
         r = bench.Runner(spec, cfg, d)
         p = r.progress()
-        assert p["phase"] == "iniciando" and p["records"] == 0
+        assert p["phase"] == "starting" and p["records"] == 0
 
         r.log_lines.append("  Downloading dataset Math-500 …")
         p = r.progress()
-        assert p["phase"] == "preparando", "con log pero sin jsonl, está preparándose"
+        assert p["phase"] == "preparing", "log but no jsonl, it is preparing"
         assert "Downloading" in p["log_tail"]
 
         (d / "profile_export.jsonl").write_text(
             json.dumps({"metrics": {"request_latency": {"value": 500.0}}}) + "\n")
-        assert r.progress()["phase"] == "midiendo"
+        assert r.progress()["phase"] == "measuring"
 
 
 def test_spec_config_normaliza_los_dos_motores():

@@ -2,7 +2,7 @@ import { $, state, esc, num, flat, specKey, api, flash } from './core.js';
 import { loadConvertFiles, syncDelCtl } from './convert.js';
 
 const COLS = [
-  // Las que hacen falta para decidir, siempre visibles.
+  // The ones needed to decide, always on screen.
   {k:'model',      t:'modelo',       l:true,  f:r => r.model},
   {k:'engine',     t:'motor',        l:true,  f:r => (r.server?.binary)||'—'},
   {k:'spec',       t:'spec',         l:true,  f:r => r.server?.spec_backend
@@ -14,7 +14,7 @@ const COLS = [
   {k:'latency_p95',t:'p95 ms',       d:0,     f:r => r.latency_p95},
   {k:'ttft_avg',   t:'ttft ms',      d:0,     f:r => r.ttft_avg},
   {k:'spec_decode_acceptance_length', t:'acc', d:2, f:r => r.spec_decode_acceptance_length},
-  // Las que uno necesita cuando algo no cuadra, a un click.
+  // The ones reached for when something does not add up, one click away.
   {k:'isl_avg',    t:'isl',    more:true, d:0, f:r => r.isl_avg},
   {k:'osl_avg',    t:'osl',    more:true, d:0, f:r => r.osl_avg},
   {k:'latency_p50',t:'p50 ms',more:true, d:0, f:r => r.latency_p50},
@@ -97,7 +97,7 @@ export function showCompareModal(){
     <table>
       <thead>
         <tr>
-          <th class="l">Métrica</th>
+          <th class="l">Metric</th>
           <th>Baseline (A)</th>
           <th>Target (B)</th>
           <th style="text-align:center">Delta (B vs A)</th>
@@ -110,7 +110,7 @@ export function showCompareModal(){
 }
 
 export function exportCsv(){
-  if (!state.runs.length) { flash('No hay corridas para exportar.', true); return; }
+  if (!state.runs.length) { flash('No runs to export.', true); return; }
   const cols = COLS.filter(c => state.more || !c.more);
   const header = ['run_id', ...cols.map(c => c.k)].join(',');
   const rows = state.runs.map(r => {
@@ -143,13 +143,13 @@ function renderStrip(){
     <span><b>${runs.length}</b> <span class="k">corridas</span></span>
     <span><b>${best ? best.out_tps_avg.toFixed(0)+' tok/s' : '—'}</b>
       <span class="k">mejor</span></span>
-    <span><b>${spec.length}</b> <span class="k">con spec-decode</span></span>
+    <span><b>${spec.length}</b> <span class="k">with spec-decode</span></span>
     ${eng.length?`<span><span class="k">motores</span> <b>${esc(eng.join(' · '))}</b></span>`:''}
     <span><span class="k">actualizado</span> <b id="upd">ahora</b></span>`;
 }
 
 function renderHead(){
-  const selectTh = `<th style="width:34px;text-align:center" title="Seleccionar para comparar">#</th>`;
+  const selectTh = `<th style="width:34px;text-align:center" title="Tick to compare">#</th>`;
   $('#thead').innerHTML = selectTh + COLS.filter(c=>state.more||!c.more).map(c=>{
     const arrow = sortK===c.k ? `<span class="arrow">${sortDir>0?'▼':'▲'}</span>` : '';
     return `<th data-k="${c.k}" class="${c.l?'l':''}">${c.t} ${arrow}</th>`;
@@ -173,11 +173,11 @@ function renderRows(){
       .some(s => $(s).value);
     empty.hidden = false;
     empty.innerHTML = sinFiltros
-      ? `<b>Ninguna corrida todavía</b>Los benchmarks se archivan acá.<br>
-         <span class="hint">Elegí un perfil y un dataset arriba y apretá
+      ? `<b>No runs yet</b>Benchmarks are archived here.<br>
+         <span class="hint">Pick a profile and a dataset above and press
          <code>Correr</code>.</span>`
-      : `<b>Ninguna corrida con estos filtros</b>
-         <span class="hint">Probá sacar algún filtro, o
+      : `<b>No runs match these filters</b>
+         <span class="hint">Try dropping a filter, or
          <a href="#" id="limpiar" style="color:var(--teal)">limpiar todos</a>.</span>`;
     $('#limpiar')?.addEventListener('click', e => {
       e.preventDefault();
@@ -200,7 +200,7 @@ function renderRows(){
       let cell;
       if (c.k==='engine'){
         cell = !raw.server || !raw.server.binary
-          ? '<span class="muted" title="corrida anterior al retrato de servidor">sin dato</span>'
+          ? '<span class="muted" title="run from before the server snapshot existed">sin dato</span>'
           : `<span class="pill ${eng}">${esc(v)}</span>`;
       }
       else if (c.k==='spec'){
@@ -227,7 +227,7 @@ function renderRows(){
       const id = cb.dataset.id;
       if (cb.checked) {
         if (state.selected.size >= 2) {
-          // Si ya hay 2, sacamos el primero
+          // Once there are 2, the older one goes
           const first = state.selected.values().next().value;
           state.selected.delete(first);
         }
@@ -270,16 +270,16 @@ function detailRow(r){
       <pre>${esc(flags || '(ninguna)')}</pre></div>
     <div class="dgroup"><h4>Spec-decode</h4><dl class="kv">
       <dt>acceptance length</dt><dd>${num(r.spec_decode_acceptance_length,3)}</dd>
-      <dt>ponderado por tok</dt><dd>${num(r.spec_decode_token_weighted_acceptance_length,3)}</dd>
+      <dt>weighted by token</dt><dd>${num(r.spec_decode_token_weighted_acceptance_length,3)}</dd>
       <dt>draft acceptance</dt><dd>${num(r.spec_decode_draft_acceptance_rate,1)}%</dd>
       <dt>acc/verificado</dt><dd>${num(r.spec_decode_accepted_per_verified,3)}</dd>
       <dt>drafts</dt><dd>${num(r.spec_decode_draft_tokens,0)} → ${num(r.spec_decode_accepted_draft_tokens,0)}</dd>
       <dt>rondas</dt><dd>${num(r.spec_decode_steps,0)}</dd>
     </dl>
     ${hist?`<div class="hist">${hist.map(([k,v])=>
-      `<div style="height:${(v/maxh*100).toFixed(1)}%" title="posición ${k}: ${v}"><span>${k}</span></div>`).join('')}
+      `<div style="height:${(v/maxh*100).toFixed(1)}%" title="position ${k}: ${v}"><span>${k}</span></div>`).join('')}
       </div><div style="font:10px var(--mono);color:var(--dimmer);margin-top:20px">
-      histograma pooled por posición</div>`:''}
+      pooled histogram by position</div>`:''}
     </div>
     <div class="dgroup"><h4>Carga</h4><dl class="kv">
       <dt>dataset</dt><dd>${esc(r.dataset)}</dd>
@@ -301,16 +301,16 @@ function renderPager(d){
   const el = $('#pager');
   if (!d || (d.total <= d.runs.length && d.pages <= 1)){
     el.innerHTML = d && d.total > d.runs.length
-      ? `<span style="color:var(--dimmer)">${d.total} corridas en total — subí el tamaño de página para ver más</span>` : '';
+      ? `<span style="color:var(--dimmer)">${d.total} runs in total — raise the page size to see more</span>` : '';
     return;
   }
   const btn = (label, page, dis) => `<button data-p="${page}" ${dis?'disabled':''}>${label}</button>`;
   el.innerHTML = `
-    <span>página <b style="color:var(--text)">${d.page}</b> de ${d.pages}</span>
+    <span>page <b style="color:var(--text)">${d.page}</b> of ${d.pages}</span>
     ${btn('‹ anterior', d.page-1, d.page<=1)}
     ${btn('siguiente ›', d.page+1, d.page>=d.pages)}
     <span class="spacer" style="flex:1"></span>
-    <span>por página</span>
+    <span>per page</span>
     <select id="pg-size">
       ${[10,25,50,100,0].map(n=>
         `<option value="${n}" ${n===d.size?'selected':''}>${n||'todas'}</option>`).join('')}
@@ -367,11 +367,11 @@ function renderLive(job){
   if (!job){ $('#livejobs').innerHTML=''; $('#btn-stop').disabled=true; return; }
   $('#btn-stop').disabled = false;
   const p = job.progress||{}, done = p.records||0, want = job.total||1;
-  const PHASE = {iniciando:'iniciando', preparando:'preparando · descargando dataset',
-    midiendo:'midiendo', terminado:'terminado', fallido:'fallido'};
+  const PHASE = {starting:'starting', preparing:'preparing · downloading dataset',
+    measuring:'measuring', finished:'finished', failed:'failed'};
   $('#livejobs').innerHTML = `<div class="live" style="margin:0 15px 15px;border-radius:8px;padding:12px 14px">
     <div style="display:flex;gap:16px;align-items:baseline;font:12px var(--mono);flex-wrap:wrap">
-      <b style="color:${p.phase==='fallido'?'var(--red)':'var(--green)'}">● ${esc(PHASE[p.phase]||'en vivo')}</b>
+      <b style="color:${p.phase==='failed'?'var(--red)':'var(--green)'}">● ${esc(PHASE[p.phase]||'live')}</b>
       <span>${esc(job.run_id)}</span>
       <span>${done} / ${want} requests</span>
       ${done?`<span>lat ${num(p.latency_avg,0)} ms</span>
@@ -396,10 +396,10 @@ export function connect(){
         state.job=null; renderLive(null);
         if (m.ok){
           flash(`Corrida <code>${m.run_id}</code> registrada — ${num(m.run.out_tps_avg,1)} tok/s,
-            ${num(m.run.spec_decode_acceptance_length,2)} de aceptación.`);
+            ${num(m.run.spec_decode_acceptance_length,2)} acceptance.`);
         } else {
           $('#banner').innerHTML = `<div class="err"><b>La corrida
-            <code>${esc(m.run_id)}</code> no registró resultados</b>
+            <code>${esc(m.run_id)}</code> registered no results</b>
             (exit ${m.exit}).<pre style="margin-top:9px">${esc((m.log_tail||[]).join('\n'))}</pre></div>`;
         }
       }
@@ -413,18 +413,18 @@ export function connect(){
         state.convert = null;
         const pre = $('#convlogpre');
         if (pre) pre.insertAdjacentText('beforeend',
-          m.ok ? '\n\nCONVERSIÓN OK' : '\n\nFALLO (ver log arriba)');
-        if (m.ok && m.deleted) flash('Conversión OK · fuente descargada borrada del inbox.');
+          m.ok ? '\n\nCONVERSION OK' : '\n\nFAILED (see the log above)');
+        if (m.ok && m.deleted) flash('Conversion OK · downloaded source deleted from the inbox.');
         loadConvertFiles(); syncDelCtl();
       }
     } else if (m.type==='download_done' && state.download?.run_id===m.run_id){
-      // redundante: el progreso de descargas se sigue por polling (pollDownload).
+      // redundant: download progress is followed by polling (pollDownload).
     }
   };
   es.onerror = ()=>{ /* el EventSource reconecta solo */ };
 }
 
-// El modelo no se elige a ciegas: sale del catálogo que declara el servidor.
+// The model is not picked blind: it comes from the catalog the server declares.
 export async function loadEngine(){
   const sel = $('#f-model'), bar = $('#engbar');
   try{
@@ -435,17 +435,17 @@ export async function loadEngine(){
     }
     sel.innerHTML = e.catalog.map(m=>{
       const loaded = e.loaded.includes(m.id);
-      return `<option value="${esc(m.id)}">${esc(m.id)} · ${loaded?'cargado':(m.status||'sin cargar')}</option>`;
+      return `<option value="${esc(m.id)}">${esc(m.id)} · ${loaded?'loaded':(m.status||'unloaded')}</option>`;
     }).join('');
     if (e.loaded.length) sel.value = e.loaded[0];
     sel.disabled = false;
-    // El tokenizer sigue al modelo: con otro tokenizer AIPerf no agrega
-    // resultados y la corrida nunca entra al registro.
+    // The tokenizer follows the model: with another one AIPerf produces no
+    // results and the run never reaches the registry.
     const syncTok = () => {
       const map = state.cfg?.aiperf?.tokenizers || {};
       $('#f-tok').value = map[sel.value] || state.cfg?.aiperf?.tokenizer || '';
     };
     sel.onchange = syncTok; syncTok();
-  }catch(err){ /* servidor caído: lo dice el tab en vivo */ }
+  }catch(err){ /* server down: the live tab says so */ }
 }
 
