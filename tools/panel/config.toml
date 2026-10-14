@@ -1,0 +1,105 @@
+# Panel ninfer — configuración
+#
+# Se lee con tomllib (stdlib, Python 3.11+). Editar y reiniciar el panel.
+# Si una sección falta, el panel arranca igual y avisa por consola.
+
+[panel]
+host = "0.0.0.0"
+port = 9080
+# Detrás de NPM: cambiar host a "127.0.0.1" y dejar que el proxy exponga.
+
+[ninfer]
+# Binario que compila este checkout. `git describe` da la versión.
+binary = "/root/ninfer-all/build-sm86/apps/ninfer-serve"
+# Repo que compila ese binario: se guarda el rev en cada corrida del registro,
+# para poder comparar un baseline contra un fix.
+repo = "/root/ninfer-all"
+url = "http://127.0.0.1:9081"
+api_key = ""
+# jsonl de requests del servidor (--request-log-jsonl): fuente de la tabla
+# de requests recientes del Dashboard.
+log = "/root/ninfer-lab/logs/server.requests.jsonl"
+# Catálogo de artifacts del lab (artifact, size_gib, recipe, trust, formats).
+catalog = "/root/ninfer-lab/models.json"
+
+[aiperf]
+# La llave: false esconde la pestaña entera y no toca el venv.
+enabled = true
+venv = "/root/AIPerf/venv"
+plugins = ["/root/AIPerf/plugins/aiperf-ninfer"]
+# AIPerf exige --tokenizer explícito y local; nunca descarga tokenizers.
+tokenizer = "/mnt/models_local/ninfer/checkpoints/qwen35-4b"
+runs_dir = "/root/AIPerf/runs"
+registry = "/root/AIPerf/registry.jsonl"
+datasets_dir = "/root/AIPerf/datasets"
+# Descarga de datasets públicos de HuggingFace (cache de AIPerf).
+hf_cache = "/root/AIPerf/hf"
+# Tokenizer por modelo del router. Sin entrada acá se usa el default de arriba,
+# que solo es correcto si el modelo es de esa familia (bug 2026-10-11).
+[aiperf.tokenizers]
+qwen35-9b = "/mnt/models_local/ninfer/checkpoints/qwen35-9b"
+apex35b-mtp = "/mnt/models_local/ninfer/checkpoints/qwen36-35b-config"
+qwen36-35b-a3b = "/mnt/models_local/ninfer/checkpoints/qwen36-35b-config"
+qwen36-35b-a3b-compact = "/mnt/models_local/ninfer/checkpoints/qwen36-35b-config"
+qwen38-27b-iq3s = "/mnt/models_local/ninfer/checkpoints/qwen38-config"
+qwen38-27b-iq3xxs = "/mnt/models_local/ninfer/checkpoints/qwen38-config"
+
+[convert]
+# tools/convert: GGUF o safetensors -> .ninfer
+enabled = true
+# Este venv tiene torch + safetensors + numpy (el de AIPerf no).
+venv = "/root/ninfer-lab/venv"
+out_dir = "/mnt/models_local/ninfer/artifacts"
+# Raíces donde el panel busca artifacts (.ninfer) y fuentes (.gguf/checkpoints)
+# para la pestaña Convert, además de HF_HOME si está definido.
+# huggingface/ queda solo por los .gguf dentro de hub/; lo nuestro vive en ninfer/.
+# strata/ entra porque DFlash2 es draft head de ninfer y los Flash-Next son
+# convertibles (familia Qwen4ExpForCausalLM).
+roots = [
+    "/mnt/models_local/ninfer",
+    "/mnt/models_local/strata",
+    "/mnt/models_local/huggingface",
+    "/mnt/models_fast/huggingface",
+]
+
+# ---------------------------------------------------------------- benchmarks
+# Cada perfil es una familia de tarea. El registro guarda el id del perfil
+# con cada corrida, así el ranking nunca mezcla cosas incomparables: comparar
+# requiere el mismo id (o un flag explícito para cruzar).
+#
+# dataset.public  -> --public-dataset   (se descarga de HF)
+# dataset.file    -> --input-file + --custom-dataset-type single_turn
+
+[[benchmarks]]
+id = "spec"
+label = "Spec-decode (acceptance length)"
+note = "Reemplaza el prompt sintético de 550 tok por datasets con licencia."
+datasets = ["spec_al_gsm8k", "spec_al_math500", "spec_al_humaneval", "spec_al_mbpp"]
+concurrency = [1, 2, 4]
+output_tokens_mean = 512
+sweep_flags = ["--spec mtp", "--draft-tokens 3", "--no-spec"]
+
+[[benchmarks]]
+id = "chat"
+label = "Chat conversacional"
+datasets = ["sharegpt"]
+concurrency = [1, 4, 8]
+
+[[benchmarks]]
+id = "code"
+label = "Generación y edición de código"
+datasets = ["instruct_coder", "blazedit_5k"]
+concurrency = [1, 4]
+
+[[benchmarks]]
+id = "longctx"
+label = "Contexto largo / agentic"
+note = "Sesiones reales de coding agent; KV-cache aware."
+datasets = ["semianalysis_cc_traces_weka_061526"]
+concurrency = [1, 2]
+
+[[benchmarks]]
+id = "vision"
+label = "Visión"
+datasets = ["mmstar", "llava_onevision"]
+concurrency = [1, 4]
