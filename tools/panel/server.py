@@ -280,6 +280,7 @@ class API:
                 self.hub.remove(push)
 
     # ---------------------------------------------------------------- routes
+    def unquote_text(self, v): return v.strip().strip("'\"")
     def config(self) -> dict:
         ready, why = bench.aiperf_ready(self.cfg)
         ap = self.cfg.get("aiperf", {})
@@ -994,6 +995,127 @@ class API:
                 out["template"] = str(t)
         return out
 
+    # ---------------------------------------------------------------- router catalog
+    def _router_paths(self) -> tuple[Path, Path]:
+        rr = self.cfg.get("router", {})
+        md = rr.get("models_dir", "/root/ninfer-lab/router-models")
+        pr = rr.get("preset", "/root/ninfer-lab/router-preset.ini")
+        return Path(md), Path(pr)
+
+    def _parse_preset(self, path: Path) -> list[tuple[str, dict]]:
+        """Read router-preset.ini into [(section_name, {key: value})].
+
+        The order of sections is preserved so rewrites round-trip it. Missing
+        files yield an empty list so a fresh deployment shows an empty catalog.
+        """
+        if not path.is_file():
+            return []
+        sections: list[tuple[str, dict]] = []
+        cur: tuple[str, dict] | None = None
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or line.startswith(";"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                if cur is not None:
+                    sections.append(cur)
+                cur = (line[1:-1].strip(), {})
+                continue
+            if "=" not in line or cur is None:
+                continue
+            key, value = line.split("=", 1)
+            value = self.unquote_text(value)
+            cur[1][key.strip().lower()] = value
+        if cur is not None:
+            sections.append(cur)
+        return sections
+
+    def router_catalog(self) -> dict:
+        models_dir, preset_path = self._router_paths()
+        sections = self._parse_preset(preset_path)
+        ids: dict[str, dict] = {}
+        global_args: list[str] = []
+        for name, entries in sections:
+            if name == "*":
+                continue
+            ids[name] = dict(entries)
+        models = []
+        if models_dir.is_dir():
+            for entry in sorted(models_dir.iterdir()):
+                if not entry.is_dir():
+                    continue
+                artifacts = [f for f in entry.iterdir() if f.suffix == ".ninfer" and f.is_file()]
+                if not artifacts:
+                    continue
+                pid = ids.get(entry.name, {})
+                models.append({
+                    "id": entry.name,
+                    "artifact": pid.get("artifact") or pid.get("model") or str(artifacts[0]),
+                    "alias": pid.get("alias", ""),
+                    "load_on_startup": pid.get("load-on-startup", ""),
+                    "flags": {k: v for k, v in pid.items()
+                              if k not in ("model", "artifact", "alias", "load-on-startup")},
+                    "preset": entry.name in ids,
+                    "on_disk": True,
+                })
+        # Add preset-only entries that have no directory on disk.
+        for name, e in ids.items():
+            if name == "*" or not name:
+                continue
+            if any(m["id"] == name for m in models):
+                continue
+            models.append({"id": name, "artifact": e.get("artifact") or e.get("model", ""),
+                           "alias": e.get("alias", ""), "load_on_startup": e.get("load-on-startup", ""),
+                           "flags": {k: v for k, v in e.items() if k not in ("model","artifact","alias","load-on-startup")},
+                           "preset": True, "on_disk": False})
+        return {"models_dir": str(models_dir), "preset": str(preset_path),
+                "models": models,
+                "global": (sections[0][1] if (sections and sections[0][0] == "*") else {})}
+
+    def router_set_alias(self, model_id: str, alias: str) -> dict:
+        models_dir, preset_path = self._router_paths()
+        text = preset_path.read_text() if preset_path.is_file() else ""
+        sections = self._parse_preset(preset_path) if preset_path.is_file() else []
+        if not any(n == model_id for n,_ in sections):
+            # add a new section. The router cannot load a model without artifact though.
+            sections.append((model_id, {}))
+        # rebuild text: keep other lines, update alias entry in target section
+        out_lines = []; cur = None; done = False
+        for raw in text.splitlines():
+            trimmed = raw.strip()
+            if trimmed.startswith("[") and trimmed.endswith("]"):
+                cur = trimmed[1:-1].strip()
+                out_lines.append(raw)
+                continue
+            if cur == model_id and (trimmed.lower().startswith("alias") and "=" in trimmed):
+                if alias.strip():
+                    out_lines.append(f"alias = {alias.strip()}")
+                done = True
+                continue
+            out_lines.append(raw)
+        text = "\n".join(out_lines) + ("\n" if out_lines else "")
+        # if section had no alias line, insert one after header
+        if model_id in [n for n,_ in sections] and not done and alias.strip():
+            lines = text.splitlines()
+            new = []
+            for raw in lines:
+                new.append(raw)
+                if raw.strip() == f"[{model_id}]":
+                    new.append(f"alias = {alias.strip()}")
+            text = "\n".join(new) + ("\n" if new else "")
+        preset_path.write_text(text)
+        return 200, {"ok": True, "restart_required": True, "model": model_id, "alias": alias}
+
+    def router_restart(self) -> dict:
+        import subprocess
+        try:
+            out = subprocess.run(["systemctl", "restart", "ninfer-router"],
+                                  capture_output=True, text=True, timeout=20)
+            return {"ok": out.returncode == 0, "stderr": (out.stderr or "").strip()[:500],
+                    "stdout": (out.stdout or "").strip()[:200]}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:300]}
+
     def history(self, query: dict) -> dict:
         """
         A throughput time series from the jsonl (`throughput` events).
@@ -1409,6 +1531,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self.api.live())
         if path == "/api/alerts":
             return self._json(self.api.baselines.view())
+        if path == "/api/router/catalog":
+            return self._json(self.api.router_catalog())
         if path == "/api/requests":
             return self._json(self.api.requests(query))
         if path == "/api/history":
@@ -1434,6 +1558,12 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/control":
             code, payload = self.api.control(body)
             return self._json(payload, code)
+        if parsed.path == "/api/router/alias":
+            code, payload = self.api.router_set_alias(body.get("model", ""), body.get("alias", ""))
+            return self._json(payload, code)
+        if parsed.path == "/api/router/restart":
+            payload = self.api.router_restart()
+            return self._json(payload)
         if parsed.path == "/api/convert/run":
             code, payload = self.api.convert_run(body)
             return self._json(payload, code)

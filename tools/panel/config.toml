@@ -106,3 +106,10 @@ id = "vision"
 label = "Vision"
 datasets = ["mmstar", "llava_onevision"]
 concurrency = [1, 4]
+
+# ------------------------------------------------------------------------------
+# [router] — front to edit models registered in ninfer-router. The panel reads
+# and writes the preset file; changes there need a router restart to take effect.
+[router]
+models_dir = "/root/ninfer-lab/router-models"
+preset = "/root/ninfer-lab/router-preset.ini"
