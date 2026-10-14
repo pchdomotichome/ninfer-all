@@ -175,6 +175,11 @@ starts one server process per model, every model here is an Engine in the one pr
 - Serve options given on the command line apply to every model and win over the preset; a model's
   own section wins over `[*]`. Each model is configured exactly as a single-model server started
   with those options would be, except that the host, port and API key are the router's.
+- One `HttpServer` serves the whole router and it is built from the command line's options, not the
+  preset's. So an option the `HttpServer` itself consumes — `--request-log-jsonl` today — is ignored
+  when it is written only in `[*]`, even though `GET /models` shows it in the model's `status.args`.
+  Such options have to be given on the command line. See
+  [known gaps](maintainer/known-gaps.md#router-preset-options-that-the-httpserver-never-receives).
 
 A request names its model in the body's `model` field (POST) or in the `model` query parameter
 (GET); a request that names none gets the most recently used loaded model. A model that is not

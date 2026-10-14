@@ -80,6 +80,7 @@ other references own narrower contracts:
 | [Operational logging](maintainer/logging.md) | log ownership, presentation, severity and data policy |
 | [Cutting a release](maintainer/release-process.md) | the release-archive flow, the packagers and their checks |
 | [Launcher profiles](maintainer/launcher-profiles.md) | `run` and `download-model`, the serving profile per model, and the reasons behind each flag |
+| [Known gaps](maintainer/known-gaps.md) | open defects found in this fork: what, how it was found, how to see it, and what a fix touches |
 
 [CONTRIBUTORS.md](../CONTRIBUTORS.md) credits the work this repository carries from its base and
 other forks. The [conversion guide](weight-conversion.md) is the entry point for making an artifact.
