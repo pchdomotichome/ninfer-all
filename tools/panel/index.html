@@ -186,25 +186,6 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .slot-status.free{color:var(--dimmer)}
 .slot-meta{font-size:9.5px;color:var(--dim);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
-/* Model Cards */
-.models{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-top:14px}
-.model{background:linear-gradient(180deg,var(--panel2) 0%,var(--panel) 100%);border:1px solid var(--line);
-  border-radius:var(--radius);padding:14px 16px;min-width:0;box-shadow:var(--shadow-sm);transition:all .18s}
-.model:hover{border-color:rgba(56,189,248,0.3);box-shadow:var(--shadow-md)}
-.model .top{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.model .top b{font-size:13.5px;color:#fff;word-break:break-all}
-.model .meta{font:11px var(--mono);color:var(--dim);margin-top:9px;
-  display:grid;grid-template-columns:auto 1fr;gap:3px 12px;background:var(--bg-subtle);padding:8px 10px;border-radius:var(--radius-sm)}
-.model .acts{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
-
-.badge{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:14px;font:600 10.5px var(--mono);
-  border:1px solid var(--line)}
-.badge.loaded{color:var(--green);border-color:rgba(52,211,153,0.4);background:rgba(52,211,153,0.1)}
-.badge.sleeping{color:var(--amber);border-color:rgba(251,191,36,0.4);background:rgba(251,191,36,0.1)}
-.badge.unloaded{color:var(--dimmer);border-color:var(--line-subtle);background:rgba(255,255,255,0.02)}
-.badge.suspended{color:var(--blue);border-color:rgba(96,165,250,0.4);background:rgba(96,165,250,0.1)}
-.badge.busy{color:var(--red);border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.1)}
-
 /* Gráficas */
 .charts{display:grid;gap:14px;grid-template-columns:1fr 1fr;margin-top:14px}
 @media(max-width:1000px){.charts{grid-template-columns:1fr}}
@@ -290,6 +271,41 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .model-row .mt{color:var(--dim);font-size:11px;white-space:nowrap}
 .model-row .acts{display:flex;gap:6px}
 .model-row .acts button{padding:3px 9px;font-size:11px}
+/* Variante rica (Modelos/Control): estrella a la izquierda, engranaje a la derecha */
+.model-row.rich{grid-template-columns:16px 9px minmax(0,1fr) auto auto;gap:12px}
+.model-row.rich .acts{gap:5px}
+.model-row.rich .iconbtn{padding:2px;flex:none}
+
+/* Botones de icono: estrella y engranaje */
+.iconbtn{background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);
+  color:var(--dimmer);padding:3px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;
+  transition:color .12s,background .12s}
+.iconbtn:hover{color:var(--teal);background:rgba(56,189,248,0.08)}
+.iconbtn svg{display:block}
+.starbtn.on{color:var(--amber)}
+.starbtn.on svg{fill:currentColor}
+
+/* Quick load (Dashboard): chips de favoritos, como Quartermaster */
+.quick{padding:12px 18px;border-bottom:1px solid var(--line-subtle)}
+.quick-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;
+  color:var(--text-muted);margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.quick-label::after{content:"";flex:1;height:1px;background:var(--line-subtle)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:999px;padding:5px 12px;font:600 12px var(--mono);color:var(--text-muted);cursor:pointer;
+  transition:all .14s}
+.chip:hover{border-color:rgba(56,189,248,0.4);color:#fff}
+.chip.on{color:#fff;border-color:rgba(52,211,153,0.45);background:rgba(52,211,153,0.08)}
+.chip .dot{flex:none}
+
+/* Aviso honesto cuando el valor viene de un archivo, no de un control */
+.filenote{display:flex;gap:10px;align-items:flex-start;margin-top:16px;padding:10px 12px;
+  border:1px solid rgba(251,191,36,0.3);border-radius:var(--radius-sm);background:rgba(251,191,36,0.06);
+  font:12px var(--sans);color:var(--text-muted);line-height:1.5}
+.filenote code{color:var(--amber);font-family:var(--mono)}
+.cfg-args{font:11.5px var(--mono);background:var(--bg-subtle);border:1px solid var(--line-subtle);
+  border-radius:var(--radius-sm);padding:10px 12px;white-space:pre-wrap;word-break:break-all;
+  color:var(--text-muted);max-height:150px;overflow:auto;margin-top:8px}
 .slots-host:empty{display:none}
 section.tight{margin:0}
 
@@ -328,7 +344,7 @@ section.tight{margin:0}
   <nav id="nav">
     <button data-pg="dash" class="active"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>Dashboard</button>
     <button data-pg="bench"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Benchmark</button>
-    <button data-pg="control"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Control</button>
+    <button data-pg="control"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Modelos</button>
     <button data-pg="convert"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Convert</button>
   </nav>
 </header>
@@ -388,6 +404,7 @@ section.tight{margin:0}
 
       <section id="modelsec" class="tight">
         <div class="sechead"><h2>Modelos</h2><span class="note" id="modelnote"></span></div>
+        <div class="quick" id="quickload" hidden></div>
         <div class="model-rows" id="modelrows"></div>
       </section>
     </div>
@@ -451,7 +468,7 @@ section.tight{margin:0}
         <span class="spacer"></span>
         <span class="note" id="ctl-upd"></span>
       </div>
-      <div id="ctl-body" style="padding:15px"></div>
+      <div id="ctl-body" style="padding:0"></div>
     </section>
 
     <section id="ctl-recipe">
@@ -566,6 +583,19 @@ section.tight{margin:0}
       </div>
     </div>
   </div>
+
+  <!-- Config de un modelo. Muestra el árbol de lanzamiento REAL del router
+       (status.args), no un formulario: esos flags viven en router-preset.ini y se
+       editan a mano. Un modal que fingiera guardar sería peor que este aviso. -->
+  <div id="modal-cfg" class="modal-backdrop" style="display:none">
+    <div class="modal-box" style="width:660px;max-width:94vw">
+      <div class="modal-head">
+        <h3><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> <span id="modal-cfg-title">Config del modelo</span></h3>
+        <button id="modal-cfg-close" style="padding:4px 9px">✕</button>
+      </div>
+      <div class="modal-body" id="modal-cfg-body"></div>
+    </div>
+  </div>
 </main>
 
 <script src="/vendor-chart.umd.js"></script>
@@ -573,7 +603,7 @@ section.tight{margin:0}
 const $ = s => document.querySelector(s);
 const state = { cfg:null, runs:[], open:new Set(), selected:new Set(), more:false, live:false, job:null,
                  page:1, size:10, total:0, convert:null, download:null, probe:null, win:'5m', hist:[],
-                 charts:{}, series:{}};
+                 histLoaded:false, series:{counters:{}, up:{}}, charts:{}, reqs:[], ctlLive:null};
 const COLS = [
   // Las que hacen falta para decidir, siempre visibles.
   {k:'model',      t:'modelo',       l:true,  f:r => r.model},
@@ -1142,48 +1172,154 @@ function modelArgs(m){
            vision: has('--vision') };
 }
 
+// ── Favoritos → quick-load del Dashboard ───────────────────────────────────
+// Sin backend: localStorage, por navegador. Cuando el panel tenga config
+// persistente esto se muda ahí y pasa a ser compartido entre navegadores.
+const FAV_KEY = 'ninfer.favs';
+let favs = new Set();
+try{ favs = new Set(JSON.parse(localStorage.getItem(FAV_KEY) || '[]')); }catch(e){}
+function favSave(){ try{ localStorage.setItem(FAV_KEY, JSON.stringify([...favs])); }catch(e){} }
+
+// Estrella de favorito: hueca en gris, rellena y ámbar cuando está marcada.
+const SVG_STAR = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';// Engranaje de verdad (el mismo trazo que la cabecera del modal), no un "sol".
+const SVG_GEAR = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+
 // Una fila por modelo, no una card. El cargado primero; el resto es catálogo.
-function modelRows(d, req){
+// `rich` agrega la estrella de favorito y el engranaje de config: es la vista de
+// la pestaña Modelos. La del Dashboard va sin ellas, sólo acciones de carga.
+function buildModelRow(m, d, rich){
+  const st = m.status?.value || 'unloaded';
+  const ar = modelArgs(m);
+  const dotCls = st==='loaded'?'ok':st==='loading'?'warn':st==='sleeping'?'warn'
+    : st==='suspended'?'blue':'off';
+  const running = ((d.load && !d.load.error) ? d.load.requests : {}).running || 0;
+  const busy = running > 0 && st === 'loaded';
+  const act = st==='loaded'
+    ? `<button data-act="sleep" data-model="${esc(m.id)}" ${busy?'disabled':''} title="${busy?'Hay requests en vuelo':''}">Dormir</button>
+       <button data-act="unload" data-model="${esc(m.id)}" class="danger">Descargar</button>`
+    : st==='sleeping' ? `<button data-act="load" data-model="${esc(m.id)}">Despertar</button>`
+    : st==='suspended' ? `<button data-act="resume" data-model="${esc(m.id)}">Reanudar</button>`
+    : st==='loading' ? `<button disabled>cargando…</button>`
+    : `<button data-act="load" data-model="${esc(m.id)}">Cargar</button>`;
+  const star = rich ? `<button class="iconbtn starbtn${favs.has(m.id)?' on':''}" data-fav="${esc(m.id)}"
+      title="${favs.has(m.id)?'Quitar del quick-load del Dashboard':'Agregar al quick-load del Dashboard'}">${SVG_STAR}</button>` : '';
+  const gear = rich ? `<button class="iconbtn" data-cfg="${esc(m.id)}"
+      title="Config del modelo: flags de lanzamiento">${SVG_GEAR}</button>` : '';
+  const meta = `ctx ${ar.ctx??'—'}${ar.spec?` · ${ar.spec}`:''}${ar.vision?' · vision':''}`;
+  return `<div class="model-row${rich?' rich':''} ${st!=='unloaded'?'live':''}">
+    ${star}
+    <span class="dot ${dotCls}"></span>
+    <span class="nm" title="${esc(m.id)}">${esc(m.id)}</span>
+    <span class="mt">${meta}</span>
+    <span class="acts">${act}${gear}</span>
+  </div>`;
+}
+
+function modelRows(d, req, rich){
   const models = (d.models?.data)||[];
   if (!models.length) return '<div class="empty" style="padding:18px">El servidor no declara modelos.</div>';
   const order = {loaded:0, loading:1, sleeping:2, suspended:3, unloaded:4};
   const rows = [...models].sort((a,b)=>
     (order[a.status?.value]??9)-(order[b.status?.value]??9) || a.id.localeCompare(b.id));
-  return rows.map(m=>{
-    const st = m.status?.value || 'unloaded';
-    const ar = modelArgs(m);
-    const dotCls = st==='loaded'?'ok':st==='loading'?'warn':st==='sleeping'?'warn':st==='suspended'?'blue':'off';
-    const busy = (req.running||0) > 0 && st === 'loaded';
-    const act = st==='loaded'
-      ? `<button data-act="sleep" data-model="${esc(m.id)}" ${busy?'disabled':''} title="${busy?'Hay requests en vuelo':''}">Dormir</button>
-         <button data-act="unload" data-model="${esc(m.id)}" class="danger">Descargar</button>`
-      : st==='sleeping' ? `<button data-act="load" data-model="${esc(m.id)}">Despertar</button>`
-      : st==='suspended' ? `<button data-act="resume" data-model="${esc(m.id)}">Reanudar</button>`
-      : st==='loading' ? `<button disabled>cargando…</button>`
-      : `<button data-act="load" data-model="${esc(m.id)}">Cargar</button>`;
-    const meta = `ctx ${ar.ctx??'—'}${ar.spec?` · ${ar.spec}`:''}${ar.vision?' · vision':''}`;
-    return `<div class="model-row ${st!=='unloaded'?'live':''}">
-      <span class="dot ${dotCls}"></span>
-      <span class="nm" title="${esc(m.id)}">${esc(m.id)}</span>
-      <span class="mt">${meta}</span>
-      <span class="acts">${act}</span>
-    </div>`;
-  }).join('');
+  return rows.map(m=>buildModelRow(m, d, rich)).join('');
 }
 
-function wireModelActions(){
-  $('#modelrows').querySelectorAll('button[data-act]').forEach(b=>{
+// Quick-load del Dashboard: los favoritos marcados en la pestaña Modelos.
+function renderQuickLoad(d){
+  const box = $('#quickload');
+  const fav = ((d.models?.data)||[]).filter(m=>favs.has(m.id));
+  if (!fav.length){ box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  box.innerHTML = `<div class="quick-label">Quick load</div><div class="chips">` +
+    fav.map(m=>{
+      const st = m.status?.value || 'unloaded';
+      const on = st==='loaded' || st==='sleeping' || st==='suspended';
+      const dot = st==='loaded' ? 'ok' : st==='sleeping' ? 'warn'
+        : st==='suspended' ? 'blue' : 'off';
+      return `<button class="chip${on?' on':''}" data-act="${on?'unload':'load'}"
+          data-model="${esc(m.id)}" title="${on?'Descargar':'Cargar'} ${esc(m.id)}">
+          <span class="dot ${dot}"></span>${esc(m.id)}${st==='loaded'?' · activo':''}</button>`;
+    }).join('') + '</div>';
+}
+
+// Un solo wiring para las tres tablas de modelos (dashboard, quick-load, control):
+// `data-*` en el botón, no la posición en el DOM.
+function wireModelRows(host, d){
+  host.querySelectorAll('button[data-act]').forEach(b=>{
     b.onclick = async () => {
       b.disabled = true;
       try{
         const r = await api('/api/control', {method:'POST',
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify({action:b.dataset.act, model:b.dataset.model})});
-        if (r.error) flash(r.error.startsWith('{') ? r.error : 'model_busy', true);
+        if (r.error) flash(String(r.error).slice(0,160), true);
       }catch(e){ flash(e.message, true); }
-      loadLive();
+      if (host.id === 'ctl-rows'){
+        // Re-pedir /api/live: si se re-renderiza con el payload viejo la fila
+        // seguiría diciendo "Dormir" sobre un modelo que ya duerme. No se llama
+        // loadControl() completo porque resetearía el formulario de recipes.
+        const live = await api('/api/live').catch(()=>null);
+        if (live){ state.ctlLive = live; renderCtlRows(live); }
+      } else loadLive();
     };
   });
+  host.querySelectorAll('button[data-fav]').forEach(b=>{
+    b.onclick = () => {
+      const id = b.dataset.fav;
+      if (favs.has(id)) favs.delete(id); else favs.add(id);
+      favSave();
+      renderCtlRows(state.ctlLive);   // barato: no re-pide /api/live
+    };
+  });
+  host.querySelectorAll('button[data-cfg]').forEach(b=>{
+    b.onclick = () => {
+      const m = ((d.models?.data)||[]).find(x=>x.id===b.dataset.cfg);
+      if (m) openModelCfg(m);
+    };
+  });
+}
+
+// Config de un modelo: los flags reales con los que el router lo lanzaría.
+// Es de sóla lectura a propósito — el panel lee router-preset.ini, no lo escribe —
+// y el aviso de abajo lo dice, en vez de fingir un botón "Guardar".
+function openModelCfg(m){
+  const ar = modelArgs(m);
+  const args = (m.status?.args)||[];
+  const res = m.residency || {};
+  const stDot = m.status?.value==='loaded' ? 'ok' : m.status?.value==='sleeping' ? 'warn'
+    : m.status?.value==='suspended' ? 'blue' : 'off';
+  // Un Map por flag: --device viene dos veces (default del preset + CLI) y
+  // duplicarlo sería ruido. host/port son del proceso, no del modelo.
+  const map = new Map();
+  for (let i=0;i<args.length;i++){
+    const a = args[i];
+    if (!a.startsWith('--') || a==='--host' || a==='--port') continue;
+    const next = args[i+1];
+    const hasVal = next!=null && !next.startsWith('--');
+    const prev = map.get(a);
+    map.set(a, (prev ? prev + ', ' : '') + (hasVal ? next : 'sí'));
+    if (hasVal) i++;
+  }
+  $('#modal-cfg-title').textContent = 'Config · ' + m.id;
+  $('#modal-cfg-body').innerHTML = `
+    <dl class="kv">
+      <dt>estado</dt><dd><span class="dot ${stDot}" style="display:inline-block;margin-right:6px"></span>${esc(m.status?.value || '—')}</dd>
+      <dt>contexto</dt><dd>${ar.ctx ?? '—'}</dd>
+      <dt>spec decode</dt><dd>${ar.spec ?? 'off'}</dd>
+      <dt>residencia</dt><dd>${esc(res.state || '—')}</dd>
+      <dt>GPU</dt><dd>${esc(modelArgs(m).device ?? '—')}</dd>
+      ${[...map.entries()].map(([k,v])=>
+        `<dt style="color:var(--teal)">${esc(k)}</dt><dd style="color:var(--text)">${esc(v)}</dd>`).join('')}
+    </dl>
+    <div class="quick-label" style="margin-top:16px">Comando de lanzamiento</div>
+    <div class="cfg-args">${esc(args.join(' '))}</div>
+    <div class="filenote">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" style="flex:none;margin-top:1px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div>Estos flags vienen de <code>router-preset.ini</code> y del catálogo de
+      <code>--models-dir</code>. El panel los lee, no los escribe: para cambiarlos hay
+      que editar ese archivo y <b>reiniciar el router</b> — no hay hot-reload del catálogo.</div>
+    </div>`;
+  $('#modal-cfg').style.display = 'flex';
 }
 
 async function loadLive(){
@@ -1280,10 +1416,12 @@ async function loadLive(){
   $('#tiles').innerHTML = sparkTile + (loadOk ? tiles : '') + gpuTiles;
   $('#livenote').textContent = loadOk ? '' : 'sin modelo cargado — cargá uno para ver ocupación y KV';
   $('#slots-host').innerHTML = slotsHtml(d, occ);
-  $('#modelrows').innerHTML = modelRows(d, req);
+  $('#modelrows').innerHTML = modelRows(d, req, false);
   $('#modelnote').textContent = `${(d.models?.data||[]).length} en el catálogo`;
+  renderQuickLoad(d);
   $('#liveupd').textContent = 'actualizado ' + new Date().toLocaleTimeString('es-AR',{hour12:false});
-  wireModelActions();
+  wireModelRows($('#modelrows'), d);
+  wireModelRows($('#quickload'), d);
 }
 function flash(msg, bad){
   $('#banner').innerHTML = `<div class="${bad?'err':'ok-msg'}">${esc(msg)}</div>`;
@@ -1504,50 +1642,44 @@ function detailReq(r){
 }
 
 // ---------------------------------------------------------------- control
+// Re-render barato: sólo las filas, sin volver a pedir /api/live ni a recalcular
+// el formulario de recipes (que perdería lo que el usuario estuviera escribiendo).
+function renderCtlRows(d){
+  const host = $('#ctl-rows');
+  if (!host || !d || !d.online) return;
+  host.innerHTML = modelRows(d, null, true);
+  const nFav = ((d.models?.data)||[]).filter(m=>favs.has(m.id)).length;
+  $('#ctl-note').textContent = `${(d.models?.data||[]).length} modelos` +
+    (nFav ? ` · ${nFav} favoritos` : '');
+  wireModelRows(host, d);
+}
+
 async function loadControl(){
   const body = $('#ctl-body');
   try{
-    const [e, h] = await Promise.all([
-      api('/api/engine'),
+    // /api/live en vez de /api/engine: status.args trae los flags del modelo
+    // (ctx, spec, draft) y la misma fuente alimenta el Dashboard, así que hay
+    // una sola renderer de filas en vez de dos.
+    const [h, live] = await Promise.all([
       api('/api/help').catch(()=>({flags:[]})),
+      api('/api/live').catch(()=>({online:false, url:'', models:{data:[]}})),
     ]);
-    const cards = e.catalog.map(m=>{
-      const st = m.status || 'unloaded';
-      const badge = ({loaded:'loaded',sleeping:'sleeping',suspended:'suspended',
-                      unloaded:'unloaded',loading:'loading'}[st])||'unloaded';
-      const mid = esc(m.id);
-      let acts;
-      if (st==='loaded') acts =
-        `<button data-act="sleep" data-model="${mid}">Dormir</button>
-         <button data-act="suspend" data-model="${mid}">Suspend</button>
-         <button data-act="unload" data-model="${mid}" style="color:var(--red);border-color:#4a2424">Descargar</button>`;
-      else if (st==='sleeping') acts =
-        `<button data-act="load" data-model="${mid}">Despertar</button>`;
-      else if (st==='suspended') acts =
-        `<button data-act="resume" data-model="${mid}">Reanudar</button>`;
-      else acts = `<button data-act="load" data-model="${mid}">Cargar</button>`;
-      return `<div class="model">
-        <div class="top"><b>${mid}</b>
-          <span class="badge ${badge}">${st}</span></div>
-        <div class="meta">
-          <span>contexto</span><span>${m.context??'—'}</span>
-        </div>
-        <div class="acts">${acts}</div>
-      </div>`;
-    }).join('') || '<div class="empty">El servidor no responde o no declara modelos.</div>';
-    body.innerHTML = `<div class="models" style="margin-top:0">${cards}</div>`;
-    body.querySelectorAll('button[data-act]').forEach(b=>b.onclick=async()=>{
-      // data-model explícito: no depender de la estructura del DOM para saber
-      // sobre qué modelo se actúa.
-      const act = b.dataset.act, model = b.dataset.model;
-      try{
-        const r = await api('/api/control',{method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({action:act,model})});
-        if (r.error) flash(String(r.error).slice(0,160), true);
-      }catch(err){ flash(err.message,true); }
-      loadControl();
-    });
+    state.ctlLive = live;
+    body.innerHTML = '<div class="model-rows" id="ctl-rows"></div>';
+    const host = $('#ctl-rows');
+    const n = (live.models?.data||[]).length;
+    if (!live.online){
+      host.className = 'empty';
+      host.style.maxHeight = 'none';
+      host.textContent = `El servidor ${live.url || ''} no responde.`;
+      $('#ctl-note').textContent = 'sin conexión';
+    } else {
+      host.innerHTML = modelRows(live, null, true);
+      const nFav = ((live.models?.data)||[]).filter(m=>favs.has(m.id)).length;
+      $('#ctl-note').textContent = `${n} modelos` + (nFav ? ` · ${nFav} favoritos` : '');
+      $('#ctl-upd').textContent = 'actualizado ' + new Date().toLocaleTimeString('es-AR',{hour12:false});
+      wireModelRows(host, live);
+    }
     // recipe form: dropdown de artifacts + flags
     if (h.flags && h.flags.length){
       $('#rec-note').textContent = `${h.flags.length} flags leídas de ${h.binary}`;
@@ -1563,14 +1695,14 @@ async function loadControl(){
     // endpoint para agentes: base url + modelo activo del catálogo
     const base = state.cfg?.endpoint?.base_url || '';
     if (base){
-      const loaded = e.catalog.filter(m=>m.status==='loaded').map(m=>m.id);
-      const model = loaded.length ? loaded.join(', ') : (e.catalog[0]?.id || '');
+      const loaded = liveModels(live).map(m=>m.id);
+      const model = loaded.length ? loaded.join(', ') : ((live.models?.data||[])[0]?.id || '');
       const key = state.cfg.endpoint.api_key || '(sin api key)';
       $('#ep-kv').innerHTML = `
         <dt>base_url</dt><dd id="ep-base">${esc(base)}</dd>
         <dt>model</dt><dd id="ep-model">${esc(model)}</dd>
         <dt>api_key</dt><dd>${esc(key)}</dd>
-        <dt>modelos</dt><dd>${e.catalog.length} en catálogo</dd>`;
+        <dt>modelos</dt><dd>${(live.models?.data||[]).length} en catálogo</dd>`;
       const activeModel = model.split(',')[0].trim() || 'qwen35-9b';
       const epSnippets = {
         curl: `# OpenAI-compatible cURL\n` +
@@ -2002,6 +2134,9 @@ async function boot(){
   $('#c-hf').onclick = hfOpen;
   $('#modal-hf-close').onclick = hfClose;
   $('#modal-hf').onclick = (e) => { if (e.target.id === 'modal-hf') hfClose(); };
+  // Config de modelo (solo lectura; ver openModelCfg)
+  $('#modal-cfg-close').onclick = () => { $('#modal-cfg').style.display = 'none'; };
+  $('#modal-cfg').onclick = (e) => { if (e.target.id === 'modal-cfg') $('#modal-cfg').style.display = 'none'; };
   $('#hf-q').addEventListener('input', e => {
     clearTimeout(hfTimer);
     const q = e.target.value.trim();
