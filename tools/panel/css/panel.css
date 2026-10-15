@@ -261,7 +261,7 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .ec-metrics{display:flex;flex-wrap:wrap;gap:10px 24px;padding:12px 14px}
 .now-m .sub{display:block;font:10px var(--mono);color:var(--dimmer);margin-top:4px}
 
-/* ── Banda "Ahora" ────────────────────────────────────────────────────── */
+/* ── The "now" band ────────────────────────────────────────────────────── */
 .now-metrics{display:flex;flex-wrap:wrap;gap:12px 28px;padding:14px 18px}
 .now-m{min-width:104px}
 .now-m .k{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)}

@@ -37,7 +37,7 @@ function buildModelRow(m, d, rich){
        <button data-act="unload" data-model="${esc(m.id)}" class="danger">Unload</button>`
     : st==='sleeping' ? `<button data-act="load" data-model="${esc(m.id)}">Wake</button>`
     : st==='suspended' ? `<button data-act="resume" data-model="${esc(m.id)}">Resume</button>`
-    : st==='loading' ? `<button disabled>cargando…</button>`
+    : st==='loading' ? `<button disabled>loading…</button>`
     : `<button data-act="load" data-model="${esc(m.id)}">Load</button>`;
   const star = rich ? `<button class="iconbtn starbtn${favs.has(m.id)?' on':''}" data-fav="${esc(m.id)}"
       title="${favs.has(m.id)?'Remove from the Dashboard quick load':'Add to the Dashboard quick load'}">${SVG_STAR}</button>` : '';
@@ -142,9 +142,9 @@ export function openModelCfg(m){
   $('#modal-cfg-body').innerHTML = `
     <dl class="kv">
       <dt>state</dt><dd><span class="dot ${stDot}" style="display:inline-block;margin-right:6px"></span>${esc(m.status?.value || '—')}</dd>
-      <dt>contexto</dt><dd>${ar.ctx ?? '—'}</dd>
+      <dt>context</dt><dd>${ar.ctx ?? '—'}</dd>
       <dt>spec decode</dt><dd>${ar.spec ?? 'off'}</dd>
-      <dt>residencia</dt><dd>${esc(res.state || '—')}</dd>
+      <dt>residency</dt><dd>${esc(res.state || '—')}</dd>
       <dt>GPU</dt><dd>${esc(modelArgs(m).device ?? '—')}</dd>
       ${[...map.entries()].map(([k,v])=>
         `<dt style="color:var(--teal)">${esc(k)}</dt><dd style="color:var(--text)">${esc(v)}</dd>`).join('')}

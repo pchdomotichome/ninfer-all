@@ -151,7 +151,7 @@ function renderRailModels(d, rates){
       <span class="sep">|</span>
       <span style="color:${r.busy?'var(--teal)':'var(--dimmer)'}">${r.busy||0} in flight</span>
       ${on ? `<button data-act="sleep" data-model="${esc(mid)}">Sleep</button>`
-           : `<button data-act="load" data-model="${esc(mid)}">Despertar</button>`}
+           : `<button data-act="load" data-model="${esc(mid)}">Wake</button>`}
     </div>`;
   }).join('');
   wireModelRows($('#rail-models'), d);
@@ -195,7 +195,7 @@ function renderRail(d, gpu, loadOk, rates){
   renderRailModels(d, rates);
   const ub = $('#rail-unload');
   if (ub) ub.onclick = async () => {
-    ub.disabled = true; ub.textContent = 'descargando…';
+    ub.disabled = true; ub.textContent = 'downloading…';
     for (const m of live){
       try{ await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({action:'unload',model:m.id})}); }catch(e){}
@@ -299,7 +299,7 @@ function renderEngineCards(d, rates){
         <span class="ec-state">${esc({loaded:'loaded',sleeping:'sleeping',suspended:'suspended on host',loading:'loading'}[e.state]||e.state)}</span>
         <span class="spacer"></span>
         ${on ? `<button data-act="sleep" data-model="${esc(mid)}">Sleep</button>`
-             : `<button data-act="load" data-model="${esc(mid)}">Despertar</button>`}
+             : `<button data-act="load" data-model="${esc(mid)}">Wake</button>`}
         <button class="iconbtn" data-cfg="${esc(mid)}" title="Model config">${SVG_GEAR}</button>
       </div>
       <div class="ec-metrics">
@@ -311,7 +311,7 @@ function renderEngineCards(d, rates){
           ${ctxCap?`<div class="progress"><i style="width:${ctxPct.toFixed(0)}%"></i></div>`:''}</div>
         <div class="now-m"><span class="k">lanes</span><b>${req.running??0}/${cap.max_concurrency??'—'}</b>
           ${cap.max_concurrency?`<div class="progress"><i style="width:${Math.min(100,(req.running||0)/cap.max_concurrency*100).toFixed(0)}%"></i></div>`:''}</div>
-        <div class="now-m"><span class="k">en cola</span><b style="color:${(req.waiting||0)>0?'var(--amber)':'#fff'}">${req.waiting??0}</b></div>
+        <div class="now-m"><span class="k">queued</span><b style="color:${(req.waiting||0)>0?'var(--amber)':'#fff'}">${req.waiting??0}</b></div>
         <div class="now-m"><span class="k">${r.tg>0.5?'generating':'last gen'}</span>
           <b style="color:${r.tg>0.5?'var(--teal)':'#fff'}">${fmtRate(r.tg, r.lastTps, '').trim()} <small>tok/s</small></b></div>
         <div class="now-m"><span class="k">${r.pg>0.5?'prefilling':'last prefill'}</span>

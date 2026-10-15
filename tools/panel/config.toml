@@ -89,7 +89,7 @@ sweep_flags = ["--spec mtp", "--draft-tokens 3", "--no-spec"]
 
 [[benchmarks]]
 id = "chat"
-label = "Chat conversacional"
+label = "Conversational chat"
 datasets = ["sharegpt"]
 concurrency = [1, 4, 8]
 
@@ -101,7 +101,7 @@ concurrency = [1, 4]
 
 [[benchmarks]]
 id = "longctx"
-label = "Contexto largo / agentic"
+label = "Long context / agentic"
 note = "Sesiones reales de coding agent; KV-cache aware."
 datasets = ["semianalysis_cc_traces_weka_061526"]
 concurrency = [1, 2]

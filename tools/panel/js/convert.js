@@ -71,7 +71,7 @@ export async function hfSearch(q){
 
 async function hfPick(encModel){
   const model = decodeURIComponent(encModel);
-  $('#hf-status').textContent = 'cargando GGUFs de ' + model + '…';
+  $('#hf-status').textContent = 'loading GGUFs from ' + model + '…';
   let g;
   try{ g = await api('/api/convert/ggufs?model=' + encodeURIComponent(model)); }
   catch(e){ $('#hf-status').textContent = e.message; return; }
@@ -207,7 +207,7 @@ async function pollDownload(){
   if (badge && st.status==='running') badge.innerHTML = `⬇ ${st.pct}%`;
   if (st.status==='running'){
     $('#hf-status').textContent =
-      `descargando… ${st.pct}% (${fmtSize(st.done)} / ${fmtSize(st.total)})`;
+      `downloading… ${st.pct}% (${fmtSize(st.done)} / ${fmtSize(st.total)})`;
     setTimeout(pollDownload, 1000);
     return;
   }
@@ -240,19 +240,19 @@ export async function inspectArtifact(){
     const comps = Object.entries(r.components||{}).map(([n,c])=>{
       const cfg=c.config||{};
       return `<div class="dgroup"><h4>${esc(n)}</h4><dl class="kv">
-        <span>arquitectura</span><span>${esc((cfg.architectures||[]).join(', ')||'—')}</span>
-        <span>capas</span><span>${cfg.num_hidden_layers??'—'}</span>
+        <span>architecture</span><span>${esc((cfg.architectures||[]).join(', ')||'—')}</span>
+        <span>layers</span><span>${cfg.num_hidden_layers??'—'}</span>
         <span>hidden</span><span>${cfg.hidden_size??'—'}</span>
         <span>vocab</span><span>${cfg.vocab_size??'—'}</span>
-        <span>ctx nativo</span><span>${cfg.max_position_embeddings??'—'}</span>
+        <span>native ctx</span><span>${cfg.max_position_embeddings??'—'}</span>
       </dl></div>`;
     }).join('');
     box.innerHTML = `<div class="detailbox" style="width:100%;max-width:none">
       <div class="dgroup"><h4>Artifact</h4><dl class="kv">
-        <span>nombre</span><span>${esc(r.name||'—')}</span>
+        <span>name</span><span>${esc(r.name||'—')}</span>
         <span>version</span><span>${r.version}</span>
-        <span>peso</span><span>${fmtSize(r.file_bytes)}</span>
-        <span>tensores</span><span>${r.tensors}</span>
+        <span>size</span><span>${fmtSize(r.file_bytes)}</span>
+        <span>tensors</span><span>${r.tensors}</span>
         <span>formats</span><span>${esc(Object.entries(r.formats||{}).map(([k,v])=>k+': '+v).join(', '))}</span>
       </dl></div>
       ${comps}

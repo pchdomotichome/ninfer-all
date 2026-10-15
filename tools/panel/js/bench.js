@@ -26,9 +26,9 @@ const COLS = [
   {k:'effective_concurrency',t:'c_ef',more:true,d:2,f:r => r.effective_concurrency},
   {k:'req_per_s',  t:'req/s',  more:true, d:2, f:r => r.req_per_s},
   {k:'error_rate', t:'err %',  more:true, d:2, f:r => r.error_rate},
-  {k:'duration_s', t:'seg',    more:true, d:1, f:r => r.duration_s},
+  {k:'duration_s', t:'sec',    more:true, d:1, f:r => r.duration_s},
   {k:'request_count_target',t:'n',more:true,d:0,f:r => r.request_count_target},
-  {k:'output_tokens_mean',t:'osl obj',more:true,d:0,f:r => r.output_tokens_mean},
+  {k:'output_tokens_mean',t:'osl tgt',more:true,d:0,f:r => r.output_tokens_mean},
 ];
 let sortK='ts', sortDir=1;
 function updateCompareBtn(){
@@ -58,7 +58,7 @@ export function showCompareModal(){
   const metrics = [
     { label: 'Model', a: rA.model, b: rB.model, type: 'str' },
     { label: 'Spec-Decode', a: rA.server?.spec_backend || 'off', b: rB.server?.spec_backend || 'off', type: 'str' },
-    { label: 'Concurrencia', a: rA.concurrency, b: rB.concurrency, type: 'num', d: 0 },
+    { label: 'Concurrency', a: rA.concurrency, b: rB.concurrency, type: 'num', d: 0 },
     { label: 'Throughput (gen tok/s)', a: rA.out_tps_avg, b: rB.out_tps_avg, type: 'num', higher_is_better: true },
     { label: 'Prefill (tok/s)', a: rA.prefill_tps, b: rB.prefill_tps, type: 'num', higher_is_better: true },
     { label: 'Latencia p95 (ms)', a: rA.latency_p95, b: rB.latency_p95, type: 'num', higher_is_better: false },
@@ -175,7 +175,7 @@ function renderRows(){
     empty.innerHTML = sinFiltros
       ? `<b>No runs yet</b>Benchmarks are archived here.<br>
          <span class="hint">Pick a profile and a dataset above and press
-         <code>Correr</code>.</span>`
+         <code>Run</code>.</span>`
       : `<b>No runs match these filters</b>
          <span class="hint">Try dropping a filter, or
          <a href="#" id="limpiar" style="color:var(--teal)">clear all</a>.</span>`;
@@ -260,11 +260,11 @@ function detailRow(r){
     <div class="dgroup"><h4>Server</h4><dl class="kv">
       <dt>engine</dt><dd>${esc(s.binary||'—')}</dd>
       <dt>model</dt><dd>${esc(s.model||'—')}</dd>
-      <dt>carriles</dt><dd>${s.slots??'—'}</dd>
-      <dt>contexto</dt><dd>${s.max_context??'—'}</dd>
+      <dt>lanes</dt><dd>${s.slots??'—'}</dd>
+      <dt>context</dt><dd>${s.max_context??'—'}</dd>
       <dt>spec</dt><dd>${!s.binary ? '<span class="muted">—</span>'
         : esc(specKey(s)||'off')}</dd>
-      <dt>cuant</dt><dd>${esc(s.quant||'—')}</dd>
+      <dt>quant</dt><dd>${esc(s.quant||'—')}</dd>
     </dl></div>
     <div class="dgroup"><h4>Capacity & spec flags</h4>
       <pre>${esc(flags || '(none)')}</pre></div>
@@ -272,9 +272,9 @@ function detailRow(r){
       <dt>acceptance length</dt><dd>${num(r.spec_decode_acceptance_length,3)}</dd>
       <dt>weighted by token</dt><dd>${num(r.spec_decode_token_weighted_acceptance_length,3)}</dd>
       <dt>draft acceptance</dt><dd>${num(r.spec_decode_draft_acceptance_rate,1)}%</dd>
-      <dt>acc/verificado</dt><dd>${num(r.spec_decode_accepted_per_verified,3)}</dd>
+      <dt>acc/verified</dt><dd>${num(r.spec_decode_accepted_per_verified,3)}</dd>
       <dt>drafts</dt><dd>${num(r.spec_decode_draft_tokens,0)} → ${num(r.spec_decode_accepted_draft_tokens,0)}</dd>
-      <dt>rondas</dt><dd>${num(r.spec_decode_steps,0)}</dd>
+      <dt>rounds</dt><dd>${num(r.spec_decode_steps,0)}</dd>
     </dl>
     ${hist?`<div class="hist">${hist.map(([k,v])=>
       `<div style="height:${(v/maxh*100).toFixed(1)}%" title="position ${k}: ${v}"><span>${k}</span></div>`).join('')}
@@ -283,11 +283,11 @@ function detailRow(r){
     </div>
     <div class="dgroup"><h4>Load</h4><dl class="kv">
       <dt>dataset</dt><dd>${esc(r.dataset)}</dd>
-      <dt>concurrencia</dt><dd>${r.concurrency}</dd>
+      <dt>concurrency</dt><dd>${r.concurrency}</dd>
       <dt>requests</dt><dd>${num(r.request_count_target,0)}</dd>
-      <dt>osl objetivo</dt><dd>${num(r.output_tokens_mean,0)}</dd>
+      <dt>target osl</dt><dd>${num(r.output_tokens_mean,0)}</dd>
       <dt>isl / osl real</dt><dd>${num(r.isl_avg,1)} / ${num(r.osl_avg,1)}</dd>
-      <dt>errores</dt><dd>${num(r.error_rate,2)}%</dd>
+      <dt>error rate</dt><dd>${num(r.error_rate,2)}%</dd>
       <dt>tokenizer</dt><dd>${esc(r.tokenizer||'—')}</dd>
       <dt>aiperf</dt><dd>${esc(r.aiperf_version||'—')}</dd>
       <dt>ninfer git</dt><dd>${esc(r.ninfer_git||'—')}</dd>

@@ -14,11 +14,11 @@ const REQ_COLS = [
   {k:'acceptance_avg', t:'acc len', d:2},
   {k:'draft_rate', t:'draft %', d:1},
   // on demand
-  {k:'protocol', t:'protocolo', more:true, l:true},
+  {k:'protocol', t:'protocol', more:true, l:true},
   {k:'prefill_tokens', t:'prefill tok', more:true, d:0},
   {k:'finish', t:'finish', more:true, l:true},
   {k:'draft_window', t:'draft win', more:true, d:0},
-  {k:'accepted_tokens', t:'aceptados', more:true, d:0},
+  {k:'accepted_tokens', t:'accepted', more:true, d:0},
   {k:'drafted_tokens', t:'drafteados', more:true, d:0},
 ];
 let reqMore = false;
@@ -155,7 +155,7 @@ function detailReq(r){
       <div class="dgroup"><h4>Request</h4><dl class="kv">
         <dt>time</dt><dd>${esc(new Date(r.ts_ms).toLocaleTimeString('en-US',{hour12:false}))}</dd>
         <dt>model</dt><dd>${esc(r.model||'—')}</dd>
-        <dt>protocolo</dt><dd>${esc(r.protocol||'—')}</dd>
+        <dt>protocol</dt><dd>${esc(r.protocol||'—')}</dd>
         <dt>finish</dt><dd>${esc(r.finish||'—')}</dd>
       </dl></div>
       <div class="dgroup"><h4>Timings</h4><dl class="kv">
@@ -167,8 +167,8 @@ function detailReq(r){
       <div class="dgroup"><h4>Spec-decode</h4><dl class="kv">
         <dt>backend</dt><dd>${esc(r.spec_backend||'—')}</dd>
         <dt>draft window</dt><dd>${r.draft_window??'—'}</dd>
-        <dt>aceptados</dt><dd>${num(r.accepted_tokens,0)} de ${num(r.drafted_tokens,0)}</dd>
-        <dt>acc promedio</dt><dd>${num(r.acceptance_avg,2)}</dd>
+        <dt>accepted</dt><dd>${num(r.accepted_tokens,0)} of ${num(r.drafted_tokens,0)}</dd>
+        <dt>mean acc</dt><dd>${num(r.acceptance_avg,2)}</dd>
         <dt>draft rate</dt><dd>${num(r.draft_rate,1)}%</dd>
       </dl>
       ${hist.length?`<div class="hist">${hist.map((v,pos)=>
