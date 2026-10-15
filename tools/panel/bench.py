@@ -181,8 +181,38 @@ def server_snapshot(url: str) -> dict:
     if argv:
         snap["binary"] = Path(argv[0]).name
         snap["argv"] = argv
+    # In router mode the process argv has no --spec: those flags live in the
+    # preset section of the model being run, and only the loaded model's own
+    # argument vector carries them. Reading the process argv alone labels every
+    # router run as "no spec-decode" even when the engine was drafting.
+    model_argv = loaded_model_argv(url, props.get("model_alias") or
+                                   Path(props.get("model_path", "")).name)
+    if model_argv:
+        snap["model_argv"] = model_argv
+        snap.update(spec_config(model_argv))
+    elif argv:
         snap.update(spec_config(argv))
     return snap
+
+
+def loaded_model_argv(url: str, model: str) -> list[str]:
+    """
+    The argument vector the router built for one model, or [] when it is not a router.
+
+    GET /models answers with the effective argv per catalog entry, which is where
+    a router keeps --spec and --draft-tokens.
+    """
+    if not model:
+        return []
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/models", timeout=5) as fh:
+            models = json.loads(fh.read()).get("data") or []
+    except (OSError, ValueError, urllib.error.URLError):
+        return []
+    for entry in models:
+        if (entry.get("id") or "") == model:
+            return (entry.get("status") or {}).get("args") or []
+    return []
 
 
 # --------------------------------------------------------------------------- run spec

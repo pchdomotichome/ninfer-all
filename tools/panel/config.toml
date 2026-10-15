@@ -39,6 +39,9 @@ datasets_dir = "/root/AIPerf/datasets"
 hf_cache = "/root/AIPerf/hf"
 # Per-model tokenizer from the router. Without an entry here the above default
 # which is only correct if the model belongs to that family (bug 2026-10-11).
+# Without an entry the form falls back to `tokenizer` above, which is only
+# correct for the Qwen3.5 family: a model from another family then silently
+# measures with the wrong tokenizer.
 [aiperf.tokenizers]
 qwen35-9b = "/mnt/models_local/ninfer/checkpoints/qwen35-9b"
 apex35b-mtp = "/mnt/models_local/ninfer/checkpoints/qwen36-35b-config"
@@ -46,6 +49,8 @@ qwen36-35b-a3b = "/mnt/models_local/ninfer/checkpoints/qwen36-35b-config"
 qwen36-35b-a3b-compact = "/mnt/models_local/ninfer/checkpoints/qwen36-35b-config"
 qwen38-27b-iq3s = "/mnt/models_local/ninfer/checkpoints/qwen38-config"
 qwen38-27b-iq3xxs = "/mnt/models_local/ninfer/checkpoints/qwen38-config"
+saluki27b = "/mnt/models_local/ninfer/checkpoints/qwen38-config"
+gemma4-26b = "/mnt/models_local/ninfer/checkpoints/gemma4-26b-it"
 
 [convert]
 # tools/convert: GGUF o safetensors -> .ninfer

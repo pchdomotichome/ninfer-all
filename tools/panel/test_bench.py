@@ -7,6 +7,7 @@ a half-written line, a missing spec-decode pool, and that argv keeps
 """
 from __future__ import annotations
 
+import io
 import json
 import sys
 import shutil
@@ -160,6 +161,33 @@ def test_spec_config_normaliza_los_dos_motores():
 
     assert spec_config(["ninfer-serve", "m.ninfer"])["spec_backend"] == "none"
     assert spec_config(["ninfer-serve", "m.ninfer"])["draft_depth"] is None
+
+
+def test_router_toma_el_spec_del_modelo_y_no_del_proceso():
+    """In router mode the process argv has no --spec: it is in the model's section.
+
+    Reading only the process argv labelled every router run "no spec-decode"
+    while the engine was drafting, which made a real MTP/3 run look like a
+    baseline (2026-10-14).
+    """
+    process = ["ninfer-serve", "--models-dir", "/lab/router-models",
+               "--models-preset", "/lab/router-preset.ini", "--models-max", "1"]
+    assert spec_config(process)["spec_backend"] == "none"
+
+    model_argv = process + ["--spec", "mtp", "--draft-tokens", "3", "--device", "1"]
+    snap = spec_config(model_argv)
+    assert snap["spec_backend"] == "mtp" and snap["draft_depth"] == 3
+
+    entries = [{"id": "saluki27b", "status": {"args": model_argv}}]
+    real = bench.urllib.request.urlopen
+    bench.urllib.request.urlopen = lambda *a, **k: io.BytesIO(
+        json.dumps({"data": entries}).encode())
+    try:
+        assert bench.loaded_model_argv("http://127.0.0.1:9081", "saluki27b") == model_argv
+        assert bench.loaded_model_argv("http://127.0.0.1:9081", "otro") == []
+        assert bench.loaded_model_argv("http://127.0.0.1:9081", "") == []
+    finally:
+        bench.urllib.request.urlopen = real
 
 
 def test_ingesta_trae_el_retrato_del_servidor():
