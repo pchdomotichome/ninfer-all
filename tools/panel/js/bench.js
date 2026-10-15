@@ -446,6 +446,12 @@ export async function loadEngine(){
       $('#f-tok').value = map[sel.value] || state.cfg?.aiperf?.tokenizer || '';
     };
     sel.onchange = syncTok; syncTok();
+    // The version badge said "v3 · sm_86" while the server reported something
+    // else entirely; it now shows what the binary actually is.
+    if (e.build && (e.build.version || e.build.arch)){
+      const chip = $('#hdr-ver');
+      if (chip) chip.textContent = [e.build.version, e.build.arch].filter(Boolean).join(' · ');
+    }
   }catch(err){ /* server down: the live tab says so */ }
 }
 

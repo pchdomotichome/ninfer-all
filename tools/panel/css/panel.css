@@ -212,8 +212,7 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .code-tab{background:transparent;border:none;color:var(--dim);font:600 11px var(--mono);padding:4px 10px;border-radius:4px;cursor:pointer}
 .code-tab.active{background:var(--panel3);color:var(--teal)}
 
-/* ── Rail fijo: header + rail comparten el sticky ─────────────────────── */
-.topwrap{position:sticky;top:0;z-index:20}
+/* ── Rail fijo: header + rail comparten el sticky ─────────────────────── */.topwrap{position:sticky;top:0;z-index:20}
 .topwrap header{position:static}
 .rail{background:rgba(16,22,34,0.94);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
   border-bottom:1px solid var(--line-subtle);font:12px var(--mono);white-space:nowrap}
@@ -222,8 +221,9 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 /* One line per loaded model: the same field set for every one, which is
    what makes one line comparable to another. */
 .rail-model{display:flex;align-items:center;gap:16px;padding:0 24px;height:30px;
-  border-top:1px solid var(--line-subtle);color:var(--text-muted)}
-.rail-model .nm{color:#fff;font-weight:600;min-width:190px}
+  border-top:1px solid var(--line-subtle);color:var(--text-muted);overflow-x:auto}
+.rail-model .nm{color:#fff;font-weight:600;min-width:190px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rail-model .dim2{color:var(--dimmer)}
 .rail-model button{padding:2px 8px;font-size:10.5px;flex:none}
 .rail-model .sep{color:var(--dimmer)}
@@ -231,6 +231,11 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .rail .lbl{color:var(--text-muted);font-weight:700;font-size:10px;text-transform:uppercase;letter-spacing:.7px}
 .rail .val{color:#fff;font-variant-numeric:tabular-nums}
 .rail .val .dim{color:var(--dim)}
+/* Numbers must not jump when metrics refresh: the rail and the tiles all show
+   live figures. */
+.rail .val,.tile .v,.tile .s,td,.router-id,.router-art{font-variant-numeric:tabular-nums}
+/* Firefox and modern engines get their own thin scrollbar; webkit keeps .scroll-y's above. */
+.scroll-y,pre,.model-rows,.router-rows{scrollbar-width:thin;scrollbar-color:var(--line) transparent}
 .rail .push{flex:1}
 .gauge{width:100px;height:6px;border-radius:3px;background:rgba(255,255,255,0.07);overflow:hidden;flex:none}
 .gauge i{display:block;height:100%;background:var(--teal);transition:width .4s}

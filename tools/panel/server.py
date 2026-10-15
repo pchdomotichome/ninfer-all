@@ -257,6 +257,8 @@ class API:
         self.hub_lock = threading.Lock()
         self._gpu_ts = 0.0
         self._gpu_cache: dict = {"online": False}
+        self._build_ts = 0.0
+        self._build_cache: tuple = ("", {})
         self.baselines = Baselines(Path(cfg["panel"].get("state_file") or
                                         (HERE / "panel-state.json")))
         self.baselines.start(cfg["ninfer"]["url"])
@@ -322,7 +324,8 @@ class API:
             with urllib.request.urlopen(url.rstrip("/") + "/models", timeout=5) as fh:
                 data = json.loads(fh.read())
         except (OSError, ValueError, urllib.error.URLError):
-            return {"url": url, "online": False, "loaded": [], "catalog": []}
+            return {"url": url, "online": False, "loaded": [], "catalog": [],
+                    "build": ""}
         models = [m for m in (data.get("data") or []) if m.get("id")]
         loaded = [m["id"] for m in models if (m.get("object") or "") != "model-unloaded"]
         catalog = []
@@ -345,7 +348,42 @@ class API:
                 loaded.append(mid)
             catalog.append({"id": mid, "status": state,
                             "context": m.get("max_model_len")})
-        return {"url": url, "online": True, "loaded": loaded, "catalog": catalog}
+        return {"url": url, "online": True, "loaded": loaded, "catalog": catalog,
+                "build": self.engine_build(url)}
+
+    # ---------------------------------------------------------------- build identity
+    def engine_build(self, url: str) -> dict:
+        """
+        What the server says it is, from /props, cached for a minute.
+
+        The badge used to be a fixed "v3 · sm_86", which described the artifact
+        format rather than the binary actually serving: /props reports the real
+        build (for example ninfer 0.12.0-rtx3090). Cached because /props costs a
+        round trip and this only feeds a header chip.
+        """
+        url = url.rstrip("/")
+        now = time.time()
+        if self._build_ts and now - self._build_ts < 60.0 and self._build_cache[0] == url:
+            return self._build_cache[1]
+        out = {"version": "", "arch": "", "alias": "", "model": ""}
+        try:
+            with urllib.request.urlopen(url + "/props", timeout=5) as fh:
+                props = json.loads(fh.read())
+        except (OSError, ValueError, urllib.error.URLError):
+            self._build_ts, self._build_cache = 0.0, (url, out)
+            return out
+        build = str(props.get("build_info") or "")
+        # "ninfer 0.12.0-rtx3090+v0.6.0-...-dirty" -> version 0.12.0, arch RTX3090
+        out = {"version": "", "arch": "", "alias": props.get("model_alias") or "",
+               "model": Path(props.get("model_path", "")).name}
+        head = build.split("+", 1)[0].split()          # "ninfer", "0.12.0-rtx3090"
+        if len(head) > 1 and "-" in head[1]:
+            version, arch = head[1].rsplit("-", 1)
+            out["version"], out["arch"] = version, arch.upper()
+        elif len(head) > 1:
+            out["version"] = head[1]
+        self._build_ts, self._build_cache = now, (url, out)
+        return out
 
     def convert_recipes(self) -> dict:
         """
