@@ -37,6 +37,11 @@ export async function loadControl(){
       $('#r-artifact').innerHTML = '<option value="">— pick an artifact —</option>' +
         files.artifacts.map(a=>`<option value="${esc(a.path)}">
           ${esc(a.path.split('/').pop())} (${fmtSize(a.size)})</option>`).join('');
+      // Picking an artifact is the event that drives the whole form: it decides
+      // which components exist, hence which flags, hence the preset preview.
+      $('#r-artifact').onchange = e => loadArtifactRecipe(e.target.value);
+      $('#r-save').onclick = () => savePreset(false);
+      $('#r-launch').onclick = () => savePreset(true);
       renderRecipeFlags(h.flags);
     } else {
       $('#r-flags').innerHTML = '<div class="err">Could not read the binary\'s --help.</div>';
@@ -100,22 +105,49 @@ export async function loadControl(){
   }
 }
 
+// ── Recipe form: artifact -> recipe -> flags -> preset preview -> save ───────
+// The artifact is the input: it knows which components it carries, and those
+// decide which flags the launch needs. Nothing here is hardcoded per model.
+
+const RECIPE_DEFAULTS = { '--kv-capacity':'32768', '--max-context':'32768',
+                          '--max-concurrency':'2' };
+
+/**
+ * Flags an artifact's components require: vision and/or a spec backend.
+ * The draft depth is not in the artifact, so these are the lab's defaults for
+ * each backend; the form is there to change them.
+ */
+function flagsFromComponents(comps){
+  const flags = {};
+  if (comps.vision) flags['--vision'] = 'true';
+  if (comps.mtp) {
+    flags['--spec'] = 'mtp';
+    flags['--draft-tokens'] = '3';
+  } else if (comps.dflash2) {
+    flags['--spec'] = 'dflash2';
+    flags['--draft-tokens'] = '4';
+  }
+  return flags;
+}
+
 function renderRecipeFlags(flags){
   // 154 flags at once is noise: the relevant ones first, the rest under "more".
   // They are grouped by category from the flag's prefix (model, context,
   // spec-decode, etc.) so the form stays navigable.
   const GROUPS = [
     {name:'model', re:/^--(model-id|models|chat-template|mmproj|vision|expert)/},
-    {name:'contexto y kv', re:/^--(max-context|kv-|host-|device-|prefill|context-)/},
+    {name:'context and kv', re:/^--(max-context|kv-|host-|device-|prefill|context-)/},
     {name:'spec-decode', re:/^--(spec|draft|lm-head|adaptive|ngram|verbose|mtp)/},
     {name:'execution', re:/^--(max-concurrency|max-pending|sleep-idle|unload-idle|model-suspend|no-models)/},
-    {name:'salida y api', re:/^--(api-key|host|port|cors|no-webui|response|revision)/},
+    {name:'output and api', re:/^--(api-key|host|port|cors|no-webui|response|revision)/},
   ];
-  const byFlag = Object.fromEntries(flags.map(f=>[f.flag, f]));
-  const vals = { '--spec':'mtp','--draft-tokens':'3','--kv-capacity':'32768',
-    '--max-context':'32768','--max-concurrency':'2' };
+  // Keep whatever is already in the form: loadControl() re-renders after a
+  // launch, and wiping the inputs there would silently discard the recipe.
+  const keep = new Map([...$('#r-flags').querySelectorAll('input[data-flag]')]
+    .map(i => [i.dataset.flag, i.value]));
   const mk = f => `<label class="f" style="margin-bottom:6px">${esc(f.flag.slice(2))}
-    <input data-flag="${esc(f.flag)}" value="${esc(vals[f.flag] ?? '')}"
+    <input data-flag="${esc(f.flag)}"
+      value="${esc(keep.has(f.flag) ? keep.get(f.flag) : (RECIPE_DEFAULTS[f.flag] ?? ''))}"
       placeholder="${esc((f.desc||'').slice(0,60))}"></label>`;
   let html = '';
   for(const g of GROUPS){
@@ -130,17 +162,147 @@ function renderRecipeFlags(flags){
       </div></details>`;
   }
   $('#r-flags').innerHTML = html;
-  const preview = () => {
-    const lines = [];
-    const seen = new Set();
-    $('#r-flags').querySelectorAll('input[data-flag]').forEach(i=>{
-      const v = i.value.trim();
-      if (!v || seen.has(i.dataset.flag)) return;  // a flag can exist twice in --help
-      seen.add(i.dataset.flag);
-      lines.push(`${i.dataset.flag} = ${v}`);
-    });
-    $('#r-preview').textContent = lines.join('\n') || '(no flags)';
-  };
-  $('#r-flags').addEventListener('input', preview); preview();
+  $('#r-flags').oninput = renderPresetPreview;
+  renderPresetPreview();
+}
+
+/** The values of the form, as preset entries: "spec = mtp", not "--spec mtp". */
+function recipeFlags(){
+  const out = {};
+  $('#r-flags').querySelectorAll('input[data-flag]').forEach(i=>{
+    const v = i.value.trim();
+    if (v) out[i.dataset.flag.replace(/^--/, '')] = v;
+  });
+  return out;
+}
+
+/**
+ * The preview is the literal preset section that Save would write, so what is
+ * on screen is what lands in router-preset.ini, not a paraphrase of it.
+ */
+function renderPresetPreview(){
+  const pre = $('#r-preview');
+  if (!pre) return;
+  const artifact = state.recipeArtifact || $('#r-artifact')?.value || '';
+  const flags = recipeFlags();
+  if (!artifact){
+    pre.textContent = '(pick an artifact to see its recipe)';
+    return;
+  }
+  const id = state.recipeModel || artifact.split('/').pop().replace(/\.ninfer$/, '');
+  const lines = [`[${id}]`, `artifact = ${artifact}`];
+  for(const [k,v] of Object.entries(flags)) lines.push(`${k} = ${v}`);
+  pre.textContent = lines.join('\n');
+  return id;
+}
+
+/** Load an artifact, read its components, and fill the form from them. */
+async function loadArtifactRecipe(path){
+  state.recipeModel = null;
+  state.recipeArtifact = path;
+  if (!path){ renderPresetPreview(); return; }
+  let info;
+  try{
+    info = await api(`/api/convert/inspect?path=${encodeURIComponent(path)}`);
+  }catch(e){
+    $('#r-recipe').textContent = `could not read the artifact: ${e.message}`;
+    renderPresetPreview();
+    return;
+  }
+  const comps = info.components || {};
+  const names = Object.keys(comps);
+  $('#r-recipe').textContent =
+    `${info.name || path.split('/').pop()} · components: ${names.join(', ') || 'none'}`;
+  // If the router already serves this artifact, that entry is the truth: the
+  // form mirrors it exactly, so Save without edits is a no-op. Only an artifact
+  // outside the catalog gets the values derived from its components.
+  let hit = null;
+  try{
+    const cat = await api('/api/router/catalog');
+    hit = (cat.models||[]).find(m =>
+      m.artifact === path || m.artifact_real === path ||
+      (m.artifact||'').split('/').pop() === path.split('/').pop()) || null;
+  }catch(e){ /* the catalog is optional context, not a blocker */ }
+
+  const wanted = hit ? hit.flags || {}
+                    : {...RECIPE_DEFAULTS, ...flagsFromComponents(comps)};
+  $('#r-flags').querySelectorAll('input[data-flag]').forEach(i=>{
+    const v = wanted[i.dataset.flag.replace(/^--/, '')];
+    i.value = v == null ? '' : v;
+  });
+  if (hit){
+    state.recipeModel = hit.id;
+    state.recipeFlags0 = { ...(hit.flags || {}) };
+    // Keep the catalog's artifact path (the symlink under --models-dir): that is
+    // what the existing sections use, and rewriting it to the real path would be
+    // a silent change of convention.
+    state.recipeArtifact = hit.artifact || path;
+    $('#rec-note').textContent = `editing ${hit.id} (alias: ${hit.alias || 'none'})`;
+  } else {
+    state.recipeFlags0 = {};
+    $('#rec-note').textContent = 'artifact not in the router catalog; Save will add it';
+  }
+  renderPresetPreview();
+}
+
+/** Poll the catalog until the router answers again after a restart. */
+async function waitForRouter(timeoutMs){
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline){
+    try{
+      // /api/live answers 200 even when the engine is down; its own `online`
+      // flag is what says the router is serving.
+      const r = await fetch('/api/live');
+      const body = r.ok ? await r.json() : null;
+      if (body?.online) return true;
+    }catch(e){ /* not up yet */ }
+    await new Promise(res => setTimeout(res, 500));
+  }
+  return false;
+}
+
+async function savePreset(thenLaunch){
+  const artifact = state.recipeArtifact || $('#r-artifact').value;
+  if (!artifact){ flash('Pick an artifact first.', true); return; }
+  const body = { artifact, flags: recipeFlags() };
+  const id = state.recipeModel || artifact.split('/').pop().replace(/\.ninfer$/, '');
+  body.model = id;
+  // A restart unloads every model, so only do it when the flags really differ
+  // from what the preset already has.
+  const before = (state.recipeFlags0 || {});
+  const changed = JSON.stringify(Object.entries(body.flags).sort())
+               !== JSON.stringify(Object.entries(before).sort());
+  let r;
+  try{
+    r = await api('/api/router/save', { method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+  }catch(e){
+    flash('Preset not saved: ' + e.message, true);
+    return;
+  }
+  flash(`Preset saved for ${id}. ` +
+    (changed ? 'Restart the router to apply it.' : 'No change.'), false);
+  if (!thenLaunch) return;
+  // The router read the preset at startup, so launching before a restart would
+  // load the model with the OLD flags: restart first, then load.
+  if (changed){
+    try{
+      const rs = await api('/api/router/restart', { method:'POST',
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify({}) });
+      if (!rs.ok){ flash('Saved, but the restart failed: ' + (rs.error||rs.stderr||'?'), true); return; }
+      // systemctl returns as soon as the unit is up; the socket is not serving
+      // yet, and a load sent now gets a connection refused (502 through here).
+      await waitForRouter(30000);
+    }catch(e){ flash('Saved, but the restart failed: ' + e.message, true); return; }
+  }
+  try{
+    await api('/api/control', { method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ action:'load', model:id }) });
+    flash(`Saved and launched ${id}${changed ? ' with the new flags' : ''}.`, false);
+    loadControl();
+  }catch(e){
+    flash('Saved, but the launch failed: ' + e.message, true);
+  }
 }
 

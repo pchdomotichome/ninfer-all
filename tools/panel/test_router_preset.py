@@ -40,6 +40,7 @@ class Stub:
     def _router_paths(self):
         return Path(self.preset).parent, Path(self.preset)
 
+    _parse_preset = staticmethod(API._parse_preset)
     _split_preset = staticmethod(API._split_preset)
     _join_preset = staticmethod(API._join_preset)
     _router_write_model = API._router_write_model
@@ -63,6 +64,32 @@ def test_edit_alias_keeps_every_other_line():
         assert "[*]" in text and "device = 1" in text
         assert "[beta]" in text and "artifact = /models/beta.ninfer" in text
         assert "alias = first" not in text
+
+
+def test_flag_order_is_preserved():
+    """A save that changes nothing must produce the same lines, in the same order.
+
+    The file is edited by hand too; reshuffling it makes every real diff noisy.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        preset = Path(tmp) / "router-preset.ini"
+        preset.write_text(PRESET)
+        stub = Stub(preset)
+        stub._router_write_model("alpha", "/models/alpha.ninfer", "first",
+                             {"spec": "mtp", "draft-tokens": "3"})
+        assert preset.read_text() == PRESET, "an unchanged save must be byte-identical"
+
+
+def test_new_key_lands_at_the_end():
+    with tempfile.TemporaryDirectory() as tmp:
+        preset = Path(tmp) / "router-preset.ini"
+        preset.write_text(PRESET)
+        Stub(preset)._router_write_model("alpha", "/models/alpha.ninfer", "first",
+                                         {"spec": "mtp", "draft-tokens": "3",
+                                          "vision": "true"})
+        body = preset.read_text().split("[alpha]\n", 1)[1].split("[", 1)[0]
+        keys = [ln.split("=", 1)[0].strip() for ln in body.splitlines() if "=" in ln]
+        assert keys.index("vision") == len(keys) - 1, keys
 
 
 def test_new_section_is_appended():

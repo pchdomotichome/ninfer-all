@@ -403,7 +403,6 @@ class API:
                 cwd=str(HERE.parent.parent))
         except (OSError, subprocess.SubprocessError) as err:
             return 500, {"error": str(err)[:200]}
-        print(f"DEBUG inspect: rc={out.returncode} stdout_len={len(out.stdout)} stderr_len={len(out.stderr)}", file=sys.stderr)
         if out.returncode != 0:
             return 502, {"error": (out.stderr or out.stdout).strip()[:400]}
         try:
@@ -1117,21 +1116,38 @@ class API:
         """
         path = self._router_paths()[1]
         text = path.read_text() if path.is_file() else ""
-        block: list[str] = []
-        if artifact:
-            block.append(f"artifact = {artifact}")
-        if alias:
-            block.append(f"alias = {alias}")
-        if load_on_startup not in (None, ""):
-            block.append(f"load-on-startup = {load_on_startup}")
-        for key, value in (flags or {}).items():
-            block.append(f"{key} = {value}")
         chunks = self._split_preset(text)
-        for i, (name, _lines) in enumerate(chunks):
+        existing: list[str] = []
+        for name, lines in chunks:
             if name == model_id:
-                chunks[i] = (name, block)
+                existing = lines
                 break
+        block: list[str] = []
+        entries: dict[str, str] = {}          # key -> value, in the section's own order
+        for line in existing:
+            if "=" in line:
+                key, value = line.split("=", 1)
+                entries[key.strip().lower()] = value.strip()
+        if artifact:
+            entries["artifact"] = artifact
+        if alias:
+            entries["alias"] = alias
+        if load_on_startup not in (None, ""):
+            entries["load-on-startup"] = load_on_startup
+        for key, value in (flags or {}).items():
+            entries[key] = value        # a new key lands at the end, as a human would write it
+        for key, value in entries.items():
+            block.append(f"{key} = {value}")
+        index = next((i for i, (n, _) in enumerate(chunks) if n == model_id), None)
+        # Blank line between sections: the file's own style. Without it a save
+        # would reflow every section after the one being edited.
+        if index is not None and index < len(chunks) - 1:
+            block.append("")
+        if index is not None:
+            chunks[index] = (model_id, block)
         else:
+            if chunks and any(ln.strip() for ln in chunks[-1][1]):
+                chunks[-1][1].append("")
             chunks.append((model_id, block))
         path.write_text(self._join_preset(chunks))
 
@@ -1171,9 +1187,15 @@ class API:
                 link.symlink_to(src)
             artifact = str(link)
         flags = {k: v for k, v in (body.get("flags") or {}).items() if k}
-        alias = (body.get("alias") or "").strip()
-        load = (body.get("load_on_startup") or "").strip()
-        self._router_write_model(model_id, artifact, alias, flags, load)
+        # A key absent from the body keeps its stored value: a form that only edits
+        # flags must not silently erase the alias or load-on-startup.
+        def keep(key: str) -> str:
+            if key in body:
+                return str(body.get(key) or "").strip()
+            return str((cur or {}).get(key.replace("_", "-"), "") or "").strip()
+
+        self._router_write_model(model_id, artifact, keep("alias"), flags,
+                                 keep("load_on_startup"))
         return 200, {"ok": True, "restart_required": True, "model": model_id}
 
     def router_delete_model(self, body: dict) -> tuple:
@@ -1407,8 +1429,11 @@ class API:
             payload = json.dumps({}).encode()
         req = urllib.request.Request(target, data=payload, method="POST",
                                      headers={"Content-Type": "application/json"})
+        # Loading and unloading swap weights through the host: a 15 GB model took
+        # ~35 s to unload, and a client-side timeout here looks to the user like
+        # the action never ran, while the engine keeps working on it.
         try:
-            with urllib.request.urlopen(req, timeout=30) as fh:
+            with urllib.request.urlopen(req, timeout=300) as fh:
                 return 200, json.loads(fh.read())
         except urllib.error.HTTPError as err:
             # 409 model_busy is a valid answer: the model has requests in flight and cannot
