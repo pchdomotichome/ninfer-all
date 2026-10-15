@@ -4,7 +4,7 @@ import { loadConvertFiles, syncDelCtl } from './convert.js';
 const COLS = [
   // The ones needed to decide, always on screen.
   {k:'model',      t:'model',       l:true,  f:r => r.model},
-  {k:'engine',     t:'motor',        l:true,  f:r => (r.server?.binary)||'—'},
+  {k:'engine',     t:'engine',       l:true,  f:r => (r.server?.binary)||'—'},
   {k:'spec',       t:'spec',         l:true,  f:r => r.server?.spec_backend
       ? r.server.spec_backend + (r.server.draft_depth ? '/'+r.server.draft_depth : '') : 'none'},
   {k:'dataset',    t:'dataset',      l:true,  f:r => r.dataset},
@@ -56,7 +56,7 @@ export function showCompareModal(){
   };
 
   const metrics = [
-    { label: 'Modelo', a: rA.model, b: rB.model, type: 'str' },
+    { label: 'Model', a: rA.model, b: rB.model, type: 'str' },
     { label: 'Spec-Decode', a: rA.server?.spec_backend || 'off', b: rB.server?.spec_backend || 'off', type: 'str' },
     { label: 'Concurrencia', a: rA.concurrency, b: rB.concurrency, type: 'num', d: 0 },
     { label: 'Throughput (gen tok/s)', a: rA.out_tps_avg, b: rB.out_tps_avg, type: 'num', higher_is_better: true },
@@ -258,7 +258,7 @@ function detailRow(r){
   const flags = pairs.filter(p=>!p.startsWith('--model')).join('  ');
   return `<tr class="detail"><td colspan="99"><div class="detailbox">
     <div class="dgroup"><h4>Server</h4><dl class="kv">
-      <dt>motor</dt><dd>${esc(s.binary||'—')}</dd>
+      <dt>engine</dt><dd>${esc(s.binary||'—')}</dd>
       <dt>model</dt><dd>${esc(s.model||'—')}</dd>
       <dt>carriles</dt><dd>${s.slots??'—'}</dd>
       <dt>contexto</dt><dd>${s.max_context??'—'}</dd>
@@ -267,7 +267,7 @@ function detailRow(r){
       <dt>cuant</dt><dd>${esc(s.quant||'—')}</dd>
     </dl></div>
     <div class="dgroup"><h4>Capacity & spec flags</h4>
-      <pre>${esc(flags || '(ninguna)')}</pre></div>
+      <pre>${esc(flags || '(none)')}</pre></div>
     <div class="dgroup"><h4>Spec-decode</h4><dl class="kv">
       <dt>acceptance length</dt><dd>${num(r.spec_decode_acceptance_length,3)}</dd>
       <dt>weighted by token</dt><dd>${num(r.spec_decode_token_weighted_acceptance_length,3)}</dd>
@@ -307,8 +307,8 @@ function renderPager(d){
   const btn = (label, page, dis) => `<button data-p="${page}" ${dis?'disabled':''}>${label}</button>`;
   el.innerHTML = `
     <span>page <b style="color:var(--text)">${d.page}</b> of ${d.pages}</span>
-    ${btn('‹ anterior', d.page-1, d.page<=1)}
-    ${btn('siguiente ›', d.page+1, d.page>=d.pages)}
+    ${btn('‹ previous', d.page-1, d.page<=1)}
+    ${btn('next ›', d.page+1, d.page>=d.pages)}
     <span class="spacer" style="flex:1"></span>
     <span>per page</span>
     <select id="pg-size">
@@ -340,7 +340,7 @@ export async function load(){
 function fillFilter(sel, key, get){
   const el=$(sel), cur=el.value;
   const vals=[...new Set(state.runs.map(get).filter(Boolean))].sort();
-  el.innerHTML = '<option value="">'+({profile:'todos',engine:'cualquier motor',
+  el.innerHTML = '<option value="">'+({profile:'all',engine:'any engine',
     spec:'cualquier spec',dataset:'cualquier dataset'}[key])+'</option>'+
     vals.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');
   el.value = cur;

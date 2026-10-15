@@ -97,7 +97,7 @@ function renderSpecPos(){
   }).join('') + `</div>`;
   const perStep = rounds ? accepted/rounds : 0;
   note.textContent = `${key} · ${use.length} req · ${perStep.toFixed(2)} tok/round`
-    + (drafted ? ` · ${(accepted/drafted*100).toFixed(0)}% de los drafts` : '');
+    + (drafted ? ` · ${(accepted/drafted*100).toFixed(0)}% of drafts` : '');
 }
 
 // A frozen jsonl reads as a live one: the "last gen" figures are fixed and look

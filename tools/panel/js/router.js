@@ -12,6 +12,12 @@ import { $, esc, api, flash } from './core.js';
 let dirty = false;
 let flagHints = [];
 
+// api(path, opts) is fetch's signature, not (method, path, body). Every write
+// here went through the wrong one, so it fetched the URL "POST".
+const post = (path, body) =>
+  api(path, {method:'POST', headers:{'Content-Type':'application/json'},
+              body:JSON.stringify(body || {})});
+
 export async function loadRouter() {
   const [cat, helps] = await Promise.all([
     fetch('/api/router/catalog').then(r => r.json()).catch(() => ({ models: [] })),
@@ -85,7 +91,7 @@ function parseFlags(text) {
 }
 
 async function writeModel(id, body) {
-  const r = await api('POST', '/api/router/save', { model: id, ...body });
+  const r = await post('/api/router/save', { model: id, ...body });
   if (r.ok) { dirty = true; flash(`${id} saved (restart required).`, false); await loadRouter(); }
   else flash(r.error || 'save failed', true);
 }
@@ -93,7 +99,7 @@ async function writeModel(id, body) {
 function wire(host) {
   host.querySelectorAll('input[data-alias]').forEach(inp => {
     inp.addEventListener('change', async () => {
-      const r = await api('POST', '/api/router/alias',
+      const r = await post('/api/router/alias',
         { model: inp.dataset.alias, alias: inp.value });
       if (r.ok) { dirty = true; refreshRestartNote(); flash('Alias saved (restart required).', false); }
       else flash(r.error || 'alias save failed', true);
@@ -110,7 +116,7 @@ function wire(host) {
       if (!confirm(`Delete ${id} from the catalog?`)) return;
       const delLink = confirm('Also remove its symlink in --models-dir?\n' +
         'The artifact it points at is never touched.');
-      const r = await api('POST', '/api/router/delete', { model: id, delete_link: delLink });
+      const r = await post('/api/router/delete', { model: id, delete_link: delLink });
       if (r.ok) { dirty = true; flash(`${id} deleted (restart required).`, false); await loadRouter(); }
       else flash(r.error || 'delete failed', true);
     });
@@ -174,7 +180,7 @@ function wireRestart() {
   btn.dataset.bound = '1';
   btn.addEventListener('click', async () => {
     if (!confirm('Restart ninfer-router? Brief downtime, loaded models unload.')) return;
-    const r = await api('POST', '/api/router/restart', {});
+    const r = await post('/api/router/restart');
     if (r.ok) { dirty = false; refreshRestartNote(); flash('Router restarted.', false); await loadRouter(); }
     else flash('Restart failed: ' + (r.error || r.stderr || 'unknown'), true);
   });

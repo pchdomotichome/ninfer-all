@@ -150,7 +150,7 @@ function renderRailModels(d, rates){
       <span title="tok/s de prefill${r.pg>0.5?' (en vivo)':''}">PG ${fmtRate(r.pg, r.lastPrefill, 'tok/s')}</span>
       <span class="sep">|</span>
       <span style="color:${r.busy?'var(--teal)':'var(--dimmer)'}">${r.busy||0} in flight</span>
-      ${on ? `<button data-act="sleep" data-model="${esc(mid)}">Dormir</button>`
+      ${on ? `<button data-act="sleep" data-model="${esc(mid)}">Sleep</button>`
            : `<button data-act="load" data-model="${esc(mid)}">Despertar</button>`}
     </div>`;
   }).join('');
@@ -191,7 +191,7 @@ function renderRail(d, gpu, loadOk, rates){
     <span class="item"><span class="lbl">in flight</span>
       <span class="val" style="color:${(req.running||0)>0?'var(--teal)':'var(--dim)'}">${req.running??0}</span></span>
     <span class="push"></span>
-    ${live.length?`<button id="rail-unload" style="padding:3px 10px;font-size:11px">Descargar todo</button>`:''}`;
+    ${live.length?`<button id="rail-unload" style="padding:3px 10px;font-size:11px">Unload all</button>`:''}`;
   renderRailModels(d, rates);
   const ub = $('#rail-unload');
   if (ub) ub.onclick = async () => {
@@ -298,7 +298,7 @@ function renderEngineCards(d, rates){
         <b>${esc(mid)}</b>
         <span class="ec-state">${esc({loaded:'loaded',sleeping:'sleeping',suspended:'suspended on host',loading:'loading'}[e.state]||e.state)}</span>
         <span class="spacer"></span>
-        ${on ? `<button data-act="sleep" data-model="${esc(mid)}">Dormir</button>`
+        ${on ? `<button data-act="sleep" data-model="${esc(mid)}">Sleep</button>`
              : `<button data-act="load" data-model="${esc(mid)}">Despertar</button>`}
         <button class="iconbtn" data-cfg="${esc(mid)}" title="Model config">${SVG_GEAR}</button>
       </div>
@@ -445,7 +445,7 @@ export async function loadLive(){
     const uCol = g.util>=90?'var(--red)':g.util>=60?'var(--amber)':'var(--blue)';
     return `<div class="tile">
       <div class="k">GPU ${g.index}</div>
-      <div class="v" style="color:${uCol}">${g.util.toFixed(0)}<small>% carga</small></div>
+      <div class="v" style="color:${uCol}">${g.util.toFixed(0)}<small>% load</small></div>
       <div class="s"><span class="c-temp" style="font-weight:600">${g.temp_c.toFixed(0)}°C</span> · <span class="c-pow" style="font-weight:600">${g.power_w.toFixed(0)}W</span></div>
       <div class="bar-row"><span class="bl">VRAM</span>
         <span class="bv" style="color:${vramCol}">${(g.mem_used_mib/1024).toFixed(1)}/${(g.mem_total_mib/1024).toFixed(0)} GiB</span></div>
