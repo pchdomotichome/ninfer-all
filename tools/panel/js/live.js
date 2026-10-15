@@ -3,8 +3,8 @@ import { modelArgs, modelRows, renderQuickLoad, wireModelRows, SVG_GEAR } from '
 
 const LIVE_TILES = [
   {k:'running', label:'running', max:'max_concurrency'},
-  {k:'admitted', label:'admitidos', max:'max_admitted_requests'},
-  {k:'waiting', label:'en cola', max:null},
+  {k:'admitted', label:'admitted', max:'max_admitted_requests'},
+  {k:'waiting', label:'queued', max:null},
   {k:'device_main_kv_tokens', label:'KV device', max:'kv_capacity_tokens', unit:'tok'},
 ];
 
@@ -341,7 +341,9 @@ function slotsHtml(d, occ){
           return `<div class="slot-cell ${stateCls}">
             <div class="slot-num">Slot ${sl.id}</div>
             <div class="slot-status ${statusCls}">● ${statusTxt}</div>
-            <div class="slot-meta" title="${tok} tok prompt">${tok ? tok + ' tok' : '—'}</div>
+            <div class="slot-meta" title="${tok} tok prompt of ${sl.n_ctx} ctx">
+              ${tok ? tok.toLocaleString() + ' tok' : '—'}
+              ${tok && sl.n_ctx ? ` · ${(tok/sl.n_ctx*100).toFixed(1)}%` : ''}</div>
           </div>`;
         }).join('')}
       </div>
@@ -431,6 +433,7 @@ export async function loadLive(){
       <div class="k">${ti.label}</div>
       <div class="v">${v??'—'}${ti.unit?` <small>${ti.unit}</small>`:''}</div>
       <div class="s">${max!=null ? `de ${max}` : ''}</div>
+      ${pct!=null && pct>0 ? `<div class="s pct">${pct.toFixed(pct<10?1:0)}%</div>` : ''}
       ${pct!=null?`<div class="bar"><i style="width:${pct.toFixed(0)}%"></i></div>`:''}
     </div>`;
   }).join('');
@@ -443,8 +446,7 @@ export async function loadLive(){
     return `<div class="tile">
       <div class="k">GPU ${g.index}</div>
       <div class="v" style="color:${uCol}">${g.util.toFixed(0)}<small>% carga</small></div>
-      <div class="s"><span class="c-temp" style="font-weight:600">${g.temp_c.toFixed(0)}°C</span> ·
-        <span class="c-pow" style="font-weight:600">${g.power_w.toFixed(0)}W</span></div>
+      <div class="s"><span class="c-temp" style="font-weight:600">${g.temp_c.toFixed(0)}°C</span> · <span class="c-pow" style="font-weight:600">${g.power_w.toFixed(0)}W</span></div>
       <div class="bar-row"><span class="bl">VRAM</span>
         <span class="bv" style="color:${vramCol}">${(g.mem_used_mib/1024).toFixed(1)}/${(g.mem_total_mib/1024).toFixed(0)} GiB</span></div>
       <div class="bar"><i style="width:${vramPct.toFixed(0)}%;background:${vramCol}"></i></div></div>`;

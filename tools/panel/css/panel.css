@@ -157,6 +157,7 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .tile .k{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);display:flex;align-items:center;justify-content:space-between}
 .tile .v{font:700 22px var(--mono);margin-top:4px;letter-spacing:-.5px;color:#fff}
 .tile .s{font:11px var(--mono);color:var(--dim);margin-top:2px}
+.tile .s.pct{color:var(--text-muted);font-weight:600}
 .tile .bar{height:4px;background:rgba(255,255,255,0.06);border-radius:2px;margin-top:8px;overflow:hidden}
 .tile .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--teal-dark),var(--teal));transition:width .5s}
 .tile.warn .bar i{background:linear-gradient(90deg,#d97706,var(--amber))}
