@@ -141,37 +141,96 @@ function renderRecipeFlags(flags){
     {name:'execution', re:/^--(max-concurrency|max-pending|sleep-idle|unload-idle|model-suspend|no-models)/},
     {name:'output and api', re:/^--(api-key|host|port|cors|no-webui|response|revision)/},
   ];
+  const REST = 'sampling and rest';
   // Keep whatever is already in the form: loadControl() re-renders after a
   // launch, and wiping the inputs there would silently discard the recipe.
-  const keep = new Map([...$('#r-flags').querySelectorAll('input[data-flag]')]
-    .map(i => [i.dataset.flag, i.value]));
-  const mk = f => `<label class="f" style="margin-bottom:6px">${esc(f.flag.slice(2))}
-    <input data-flag="${esc(f.flag)}"
-      value="${esc(keep.has(f.flag) ? keep.get(f.flag) : (RECIPE_DEFAULTS[f.flag] ?? ''))}"
-      placeholder="${esc((f.desc||'').slice(0,60))}"></label>`;
+  const keep = new Map([...$('#r-flags').querySelectorAll('[data-flag]')]
+    .map(i => [i.dataset.flag, i.type === 'checkbox' ? (i.checked ? 'true' : '')
+                                                  : i.value]));
+
+  // One row per flag, label left and control right: a boolean asking for a
+  // value invites "yes"/"1"/"true" and three different meanings in one preset.
+  // The full --help description rides in the title, since the placeholder has
+  // room for about six words.
+  const mk = f => {
+    const name = esc(f.flag.slice(2));
+    const title = esc(f.desc || f.flag);
+    const cur = keep.has(f.flag) ? keep.get(f.flag) : (RECIPE_DEFAULTS[f.flag] ?? '');
+    let ctl;
+    if (!f.takes_value){
+      ctl = `<label class="sw" title="${title}">
+        <input type="checkbox" data-flag="${esc(f.flag)}" ${cur === 'true' ? 'checked' : ''}>
+        <i></i><span class="sw-s">${cur === 'true' ? 'true' : 'off'}</span></label>`;
+    } else if (f.enum && f.enum.length){
+      const opts = f.enum.map(o =>
+        `<option value="${esc(o)}"${o === cur ? ' selected' : ''}>${esc(o)}</option>`).join('');
+      ctl = `<select data-flag="${esc(f.flag)}" title="${title}">
+        <option value=""${cur ? '' : ' selected'}>—</option>${opts}</select>`;
+    } else {
+      ctl = `<input data-flag="${esc(f.flag)}" value="${esc(cur)}"
+        placeholder="${esc((f.desc || '').slice(0, 48))}" title="${title}">`;
+    }
+    return `<div class="flag-row"><label class="flag-name" title="${title}">${name}</label>
+      ${ctl}</div>`;
+  };
   let html = '';
-  for(const g of GROUPS){
-    const inGroup = flags.filter(f=>g.re.test(f.flag));
+  // The last group is whatever the categories above did not name, so a flag that
+  // exists is never unreachable: hiding 93 of 162 is worse than a long list.
+  const named = new Set(GROUPS.flatMap(g => flags.filter(f=>g.re.test(f.flag))
+                                                     .map(f=>f.flag)));
+  const buckets = GROUPS.map(g => [g.name, flags.filter(f=>g.re.test(f.flag))]);
+  buckets.push([REST, flags.filter(f=>!named.has(f.flag))]);
+  for(const [name, inGroup] of buckets){
     if (!inGroup.length) continue;
-    html += `<details ${g.name==='model'?'open':''}>
+    html += `<details ${name==='model'?'open':''}>
       <summary style="cursor:pointer;color:var(--teal);font:600 11px system-ui;
-        text-transform:uppercase;letter-spacing:.6px;margin:8px 0 5px">${g.name}
+        text-transform:uppercase;letter-spacing:.6px;margin:8px 0 5px">${name}
         (${inGroup.length})</summary>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;margin-bottom:6px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 18px;margin-bottom:6px">
       ${inGroup.map(mk).join('')}
       </div></details>`;
   }
   $('#r-flags').innerHTML = html;
   $('#r-flags').oninput = renderPresetPreview;
+  $('#r-flags').onchange = renderPresetPreview;
   renderPresetPreview();
 }
 
-/** The values of the form, as preset entries: "spec = mtp", not "--spec mtp". */
+/**
+ * Flag a flag, a value that is neither empty nor the built-in default is one
+ * someone chose: tint the row so the configured recipe reads at a glance without
+ * checking every field. Also refreshes the switch's own text, which otherwise
+ * keeps saying "off" when the preset filled it in without a click.
+ * Runs after the artifact fills the values and again on every change.
+ */
+function markCustom(){
+  $('#r-flags').querySelectorAll('.flag-row').forEach(row=>{
+    const ctl = row.querySelector('[data-flag]');
+    if (!ctl) return;
+    const val = ctl.type === 'checkbox' ? (ctl.checked ? 'true' : '')
+                                        : ctl.value.trim();
+    row.classList.toggle('custom',
+      val !== '' && val !== (RECIPE_DEFAULTS[ctl.dataset.flag] ?? ''));
+    const text = row.querySelector('.sw-s');
+    if (text) text.textContent = ctl.checked ? 'true' : 'off';
+  });
+}
+
+/**
+ * The values of the form, as preset entries: "spec = mtp", not "--spec mtp".
+ * An unchecked switch is absent from the preset, which is how a flag is turned
+ * off without leaving `key = false` behind.
+ */
 function recipeFlags(){
   const out = {};
-  $('#r-flags').querySelectorAll('input[data-flag]').forEach(i=>{
+  $('#r-flags').querySelectorAll('[data-flag]').forEach(i=>{
+    const key = i.dataset.flag.replace(/^--/, '');
+    if (i.type === 'checkbox'){
+      if (i.checked) out[key] = 'true';
+      return;
+    }
     const v = i.value.trim();
-    if (v) out[i.dataset.flag.replace(/^--/, '')] = v;
+    if (v) out[key] = v;
   });
   return out;
 }
@@ -187,12 +246,14 @@ function renderPresetPreview(){
   const flags = recipeFlags();
   if (!artifact){
     pre.textContent = '(pick an artifact to see its recipe)';
+    markCustom();
     return;
   }
   const id = state.recipeModel || artifact.split('/').pop().replace(/\.ninfer$/, '');
   const lines = [`[${id}]`, `artifact = ${artifact}`];
   for(const [k,v] of Object.entries(flags)) lines.push(`${k} = ${v}`);
   pre.textContent = lines.join('\n');
+  markCustom();
   return id;
 }
 
@@ -226,9 +287,10 @@ async function loadArtifactRecipe(path){
 
   const wanted = hit ? hit.flags || {}
                     : {...RECIPE_DEFAULTS, ...flagsFromComponents(comps)};
-  $('#r-flags').querySelectorAll('input[data-flag]').forEach(i=>{
+  $('#r-flags').querySelectorAll('[data-flag]').forEach(i=>{
     const v = wanted[i.dataset.flag.replace(/^--/, '')];
-    i.value = v == null ? '' : v;
+    if (i.type === 'checkbox') i.checked = v === 'true' || v === 'on';
+    else i.value = v == null ? '' : v;
   });
   if (hit){
     state.recipeModel = hit.id;

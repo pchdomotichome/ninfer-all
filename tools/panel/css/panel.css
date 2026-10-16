@@ -88,6 +88,38 @@ label.f{display:flex;flex-direction:column;gap:5px;font-size:10.5px;font-weight:
 form.run{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;padding:16px 18px;background:var(--bg-subtle);border-bottom:1px solid var(--line)}
 form.run .grow{flex:1;min-width:160px}
 form.run label.f input,form.run label.f select{width:100%}
+
+/* Recipe form: one flag per row, label left, control right. A switch for the
+   booleans, because a textbox for a boolean invites three spellings of "on". */
+.flag-row{display:flex;align-items:center;gap:8px;padding:2px 0;min-width:0}
+.flag-name{font:11.5px var(--mono);color:var(--text-muted);flex:0 1 45%;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help}
+/* A flag carrying a value someone chose, as opposed to a field left at its
+   built-in default. Only the control is tinted: the name keeps reading as a
+   name, and the colour is deliberately not the teal the group headings use. */
+.flag-row.custom input[data-flag],.flag-row.custom select[data-flag]{
+  border-color:rgba(167,139,250,.55)}
+.flag-row.custom input[data-flag]:focus,.flag-row.custom select[data-flag]:focus{
+  border-color:var(--purple)}
+.flag-row input[data-flag],.flag-row select[data-flag]{flex:1;min-width:0;font:11.5px var(--mono);
+  padding:3px 7px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:var(--radius-sm);color:var(--text)}
+.flag-row input[data-flag]:focus,.flag-row select[data-flag]:focus{outline:none;border-color:var(--teal)}
+.sw{display:flex;align-items:center;gap:6px;cursor:pointer;flex:none;margin-left:auto}
+.sw input{position:absolute;opacity:0;width:0;height:0}
+.sw i{width:26px;height:14px;border-radius:7px;background:var(--line);position:relative;
+  transition:background .15s;flex:none}
+.sw i::after{content:"";position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;
+  background:var(--dimmer);transition:transform .15s,background .15s}
+.sw input:checked + i{background:rgba(56,189,248,.28)}
+.sw input:checked + i::after{transform:translateX(12px);background:var(--teal)}
+.sw input:focus-visible + i{outline:2px solid var(--teal);outline-offset:2px}
+.sw-s{font:10.5px var(--mono);color:var(--dimmer);width:24px}
+.sw input:checked ~ .sw-s{color:var(--teal)}
+.flag-row.custom .sw i{background:rgba(167,139,250,.3)}
+.flag-row.custom .sw input:checked + i::after{background:var(--purple)}
+.flag-row.custom .sw-s{color:var(--purple)}
+.flag-row.custom .sw input:checked ~ .sw-s{color:var(--purple);font-weight:600}
 .two{display:grid;grid-template-columns:1.6fr 1fr;gap:16px}
 .two>div,.two>section{min-width:0}
 @media(max-width:1100px){.two{grid-template-columns:1fr}}

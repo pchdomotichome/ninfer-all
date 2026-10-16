@@ -583,21 +583,70 @@ class API:
         except (OSError, subprocess.SubprocessError) as err:
             return 500, {"error": str(err)[:200]}
         text = out.stdout or out.stderr
-        flags, current = [], None
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("--"):
-                parts = stripped[2:].split(None, 2)
-                name = parts[0]
-                if name in ("help", "version"):
-                    continue
-                current = {"flag": "--" + name,
-                           "takes_value": len(parts) > 1 and not parts[1].startswith("--"),
-                           "desc": (parts[-1] if len(parts) > 1 else "").strip()}
-                flags.append(current)
-            elif current:
-                current["desc"] += ((" " if current["desc"] else "") + stripped)
+        flags = self._parse_help(text)
         return 200, {"flags": flags, "binary": Path(binary).name}
+
+    # The help of ninfer-serve wraps at 80 columns, so a flag's own line holds
+    # the type and the following lines only hold prose. Reading the line alone is
+    # what makes this reliable: joining the continuations first makes
+    # `--model-suspend` look like it takes a value.
+    METAVAR = re.compile(r"^(?:[A-Z][A-Z0-9,.%=\-]*|[a-z_]+=[A-Z].*)$")
+    METAVAR_NAME = re.compile(r"[A-Z]{1,2}")
+    FLAG_LINE = re.compile(r"^\s{2}(--[a-z0-9-]+(?:, -[a-z])?)(.*)$")
+
+    def _parse_help(self, text: str) -> list[dict]:
+        """
+        Turn `--help` into flags with a type, so the form can render a boolean as
+        a switch instead of asking for "true".
+
+        A metavar is the token right after the flag name: bare uppercase (`N`,
+        `FILE`), a list (`A,B,...`), `NAME=PATH`, or an enum (`device|host|disk`).
+        Anything else is prose, which makes the flag a boolean. A leading `|`
+        means the flag was paired with a sibling (`--lm-head-q4 | --lm-head-q6`),
+        so it takes no value either.
+
+        The binary does not expose this metadata, so the rule is measured against
+        the option parser in serve_options.cpp by test_help_flags.py; the one
+        mismatch left is a flag the help itself documents wrongly.
+        """
+        flags: list[dict] = []
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            m = self.FLAG_LINE.match(line)
+            if not m:
+                continue
+            head = m.group(2).strip().split(None, 1)
+            metavar, body = head[0] if head else "", head[1] if len(head) > 1 else ""
+            if metavar == "|":        # drop the sibling flag the `|` introduces
+                body = re.sub(r"^--[a-z0-9-]+\s*", "", body)
+            if m.group(2).strip().startswith("|"):
+                # Paired with a sibling (`--lm-head-q4 | --lm-head-q6`): no value.
+                takes, enum = False, []
+            elif "|" in metavar:
+                options = [p.strip() for p in metavar.split("|")]
+                # `N|auto` is not an enum: N is a metavar for "any number", and a
+                # dropdown offering only `auto` would make `kv-capacity = 32768`
+                # impossible to write.
+                if any(self.METAVAR_NAME.fullmatch(p) for p in options):
+                    takes, enum = True, []
+                else:
+                    takes, enum = True, options
+            else:
+                takes = bool(metavar) and self.METAVAR.match(metavar) is not None
+                enum = []
+            # The rest of the description is the wrapped block up to the next flag.
+            wrapped = []
+            for nxt in lines[i + 1:]:
+                if not nxt.strip() or nxt.lstrip().startswith("--"):
+                    break
+                wrapped.append(nxt.strip())
+            desc = " ".join([body, *wrapped]).strip()
+            for name in (n.strip() for n in m.group(1).split(",")):
+                if name in ("--help", "--version", "-h"):
+                    continue
+                flags.append({"flag": name, "takes_value": takes,
+                              "enum": enum, "desc": desc})
+        return flags
 
     def convert_roots(self) -> list[str]:
         """
