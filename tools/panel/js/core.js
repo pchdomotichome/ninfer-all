@@ -21,6 +21,18 @@ export function specKey(s){
   return s.spec_backend + (s.draft_depth ? '/'+s.draft_depth : '');
 }
 
+// One hue per component name, so `dflash2` reads the same colour in the
+// benchmark table, the request list and an artifact's components. The hue is
+// taken from the name before the slash, since the tables carry `mtp/3` while
+// the artifact inspector carries `mtp`.
+const COMP_HUE = {text:'text', vision:'vision', mtp:'mtp', dflash:'dflash', dflash2:'dflash2'};
+export function compPill(spec){
+  const n = String(spec ?? '').trim();
+  if (!n || n === 'none' || n === 'off') return '<span class="muted">off</span>';
+  const hue = COMP_HUE[n.split('/')[0]] || '';
+  return `<span class="pill ${hue}">${esc(n)}</span>`;
+}
+
 
 // live.js publishes here and models.js asks, so the two never import each other
 // in the way a direct call would force.

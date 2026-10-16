@@ -1,4 +1,4 @@
-import { $, state, esc, num, api, flash } from './core.js';
+import { $, state, esc, num, api, flash, compPill } from './core.js';
 import { modelRows, wireModelRows, renderCtlRows, favs } from './models.js';
 import { fmtSize } from './convert.js';
 import { liveModels } from './live.js';
@@ -272,8 +272,14 @@ async function loadArtifactRecipe(path){
   }
   const comps = info.components || {};
   const names = Object.keys(comps);
-  $('#r-recipe').textContent =
-    `${info.name || path.split('/').pop()} · components: ${names.join(', ') || 'none'}`;
+  // Hierarchy left to right: the name is the brightest thing on the line, the
+  // label is a whisper, and the pills carry the only colour. The pills alone
+  // would float next to a name rendered in the same dim grey as the label.
+  $('#r-recipe').innerHTML =
+    `<span class="art-name">${esc(info.name || path.split('/').pop())}</span>
+     <span class="art-label">components</span>${
+      names.length ? names.map(compPill).join(' ')
+                   : '<span class="muted">none</span>'}`;
   // If the router already serves this artifact, that entry is the truth: the
   // form mirrors it exactly, so Save without edits is a no-op. Only an artifact
   // outside the catalog gets the values derived from its components.

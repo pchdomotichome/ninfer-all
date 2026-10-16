@@ -1,4 +1,4 @@
-import { $, state, esc, num, flat, specKey, api, flash } from './core.js';
+import { $, state, esc, num, flat, specKey, api, flash, compPill } from './core.js';
 import { loadConvertFiles, syncDelCtl } from './convert.js';
 
 const COLS = [
@@ -206,8 +206,7 @@ function renderRows(){
       else if (c.k==='spec'){
         cell = !raw.server || !raw.server.binary
           ? '<span class="muted">—</span>'
-          : v==='none' ? '<span class="muted">off</span>'
-          : `<span class="pill mtp">${esc(v)}</span>`;
+          : compPill(v);
       }
       else if (c.k==='model') cell = esc(String(v||'').replace(/\.(ninfer|gguf)$/,'').slice(0,34));
       else cell = num(v, c.d===undefined?2:c.d);

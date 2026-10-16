@@ -150,6 +150,15 @@ tr.run.selected td{background:rgba(56,189,248,0.12);border-color:rgba(56,189,248
 .pill.llama{border-color:rgba(251,191,36,0.35);color:var(--amber);background:rgba(251,191,36,0.08)}
 .pill.mtp{border-color:rgba(52,211,153,0.35);color:var(--green);background:rgba(52,211,153,0.08)}
 .pill.dflash2{border-color:rgba(167,139,250,0.35);color:var(--purple);background:rgba(167,139,250,0.08)}
+.pill.text{border-color:rgba(96,165,250,0.35);color:var(--blue);background:rgba(96,165,250,0.08)}
+.pill.vision{border-color:rgba(34,211,238,0.35);color:var(--cyan);background:rgba(34,211,238,0.08)}
+.pill.dflash{border-color:rgba(251,191,36,0.35);color:var(--amber);background:rgba(251,191,36,0.08)}
+
+/* Artifact line above the recipe form: name, then a whisper, then the pills. */
+#r-recipe{display:flex;align-items:center;flex-wrap:wrap}
+.art-name{font:600 12.5px var(--mono);color:var(--text)}
+.art-label{font:10.5px var(--sans);color:var(--dim);text-transform:uppercase;
+  letter-spacing:.7px;margin:0 2px 0 9px}
 
 /* Detalle expandido de fila */
 tr.detail td{background:rgba(16,22,34,0.95);cursor:default;padding:0;border-bottom:1px solid var(--line);

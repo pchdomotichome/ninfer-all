@@ -1,4 +1,4 @@
-import { $, state, esc, num, api } from './core.js';
+import { $, state, esc, num, api, compPill } from './core.js';
 
 // ---------------------------------------------------------------- requests
 const REQ_COLS = [
@@ -133,8 +133,7 @@ function renderRequests(){
       if (c.k==='spec_backend') v = v ? v+(r.draft_window!=null?'/'+r.draft_window:'') : 'off';
       if (c.k==='cache_hit') v = r.cache_hit!=null ? r.cache_hit+' tok' : v;
       if (c.k==='model') v = String(v||'').slice(0,30);
-      if (c.k==='spec_backend') return `<td class="l">${v==='off'
-        ?'<span class="muted">off</span>':`<span class="pill mtp">${esc(v)}</span>`}</td>`;
+      if (c.k==='spec_backend') return `<td class="l">${compPill(v)}</td>`;
       return `<td class="${c.l?'l':''}">${v==null||v===''?'<span class="muted">—</span>':(typeof v==='number'?v.toFixed(c.d??1):esc(v))}</td>`;
     }).join('');
     const detail = open ? detailReq(r) : '';
