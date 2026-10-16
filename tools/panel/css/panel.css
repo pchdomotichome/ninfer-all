@@ -95,10 +95,14 @@ form.run label.f input,form.run label.f select{width:100%}
 .flag-name{font:11.5px var(--mono);color:var(--text-muted);flex:0 1 45%;min-width:0;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help}
 /* A flag carrying a value someone chose, as opposed to a field left at its
-   built-in default. Only the control is tinted: the name keeps reading as a
-   name, and the colour is deliberately not the teal the group headings use. */
+   built-in default: name, dot and control all take the colour, so a set flag
+   reads as one unit against the grey defaults. Deliberately not the teal of the
+   group headings, which would read as more headings. */
+.flag-row.custom .flag-name{color:var(--purple);font-weight:600}
+.flag-row.custom .flag-name::before{content:"";display:inline-block;width:4px;height:4px;
+  border-radius:50%;background:var(--purple);margin-right:5px;vertical-align:middle}
 .flag-row.custom input[data-flag],.flag-row.custom select[data-flag]{
-  border-color:rgba(167,139,250,.55)}
+  border-color:rgba(167,139,250,.55);color:var(--purple)}
 .flag-row.custom input[data-flag]:focus,.flag-row.custom select[data-flag]:focus{
   border-color:var(--purple)}
 .flag-row input[data-flag],.flag-row select[data-flag]{flex:1;min-width:0;font:11.5px var(--mono);
