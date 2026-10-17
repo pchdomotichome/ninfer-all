@@ -97,7 +97,7 @@ export async function loadControl(){
       $('#ep-copy').onclick = () => {
         navigator.clipboard.writeText($('#ep-example').textContent)
           .then(()=>flash('Code copied to the clipboard', false))
-          .catch(()=>flash('No se pudo copiar', true));
+          .catch(()=>flash('Could not copy to the clipboard', true));
       };
     }
   }catch(e){

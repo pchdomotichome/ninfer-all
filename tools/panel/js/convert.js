@@ -11,7 +11,7 @@ export async function loadConvertFiles(){
       api('/api/convert/files'),
       api('/api/convert/recipes').catch(()=>({ok:false})),
     ]);
-  }catch(e){ $('#convnote').textContent = 'no se pudo escanear: '+e.message; return; }
+  }catch(e){ $('#convnote').textContent = 'Could not scan: '+e.message; return; }
   const sa = $('#c-artifacts'), ss = $('#c-sources');
   sa.innerHTML = '<option value="">— pick an artifact —</option>' +
     d.artifacts.map(a=>`<option value="${esc(a.path)}">
@@ -191,7 +191,7 @@ async function hfDl(el){
     badge.innerHTML = '⬇ 0%';
     flash(`Downloading ${files.length} file(s) (${fmtSize(total)})…`);
     pollDownload();
-  }catch(e){ flash('no se pudo lanzar la descarga: ' + e.message, true); }
+  }catch(e){ flash('Could not start the download: ' + e.message, true); }
 }
 
 async function pollDownload(){
