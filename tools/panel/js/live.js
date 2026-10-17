@@ -1,5 +1,5 @@
 import { $, state, esc, num, api, flash, refresh } from './core.js';
-import { modelArgs, modelRows, renderQuickLoad, wireModelRows, SVG_GEAR } from './models.js';
+import { modelArgs, modelRows, renderQuickLoad, renderCtlRows, wireModelRows, SVG_GEAR } from './models.js';
 
 const LIVE_TILES = [
   {k:'running', label:'running', max:'max_concurrency'},
@@ -157,37 +157,63 @@ function renderRailModels(d, rates){
   wireModelRows($('#rail-models'), d);
 }
 
-function renderRail(d, gpu, loadOk, rates){
+// The header strip: the machine, not the engine. One chip per GPU with the card
+// name that used to sit frozen in the version badge, plus RAM and CPU load. The
+// rail below answers the other question (what the engine is doing), so VRAM and
+// GPU live here and only here.
+function renderHostChips(gpu){
+  const host = gpu?.host || {};
+  const gib = b => (b/1073741824).toFixed(1);
+  const chip = (k, pct, col, val, dim, extra='') =>
+    `<span class="hchip${pct>=90?' hot':''}"><span class="k">${esc(k)}</span>${extra}
+      <span class="gauge"><i style="width:${Math.min(100,pct).toFixed(0)}%;background:${col}"></i></span>
+      <span class="v">${val}</span>${dim?`<span class="d">${dim}</span>`:''}</span>`;
+  const bar = (p, warn, bad) => p>=bad ? 'var(--red)' : p>=warn ? 'var(--amber)' : 'var(--teal)';
+  let h = '';
+  for (const g of (gpu?.gpus||[])){
+    const vm = g.mem_used_mib/g.mem_total_mib*100;
+    // "NVIDIA GeForce RTX 3090" -> "RTX 3090": the vendor prefix is noise here.
+    const nm = (g.name||'').replace(/^NVIDIA\s*/i,'').replace(/^GeForce\s*/i,'').replace(/\s+/g,'');
+    const uc = g.util>=90?'var(--red)':g.util>=60?'var(--amber)':'var(--blue)';
+    const tc = g.temp_c>=85?'var(--red)':g.temp_c>=75?'var(--amber)':'var(--dim)';
+    const vr = (g.mem_used_mib/1024).toFixed(1)+'/'+(g.mem_total_mib/1024).toFixed(0);
+    h += `<span class="hchip${vm>=95?' hot':''}" title="${esc(g.name)} · ${vr} · ${g.util.toFixed(0)}% load · ${g.temp_c.toFixed(0)}°C · ${g.power_w.toFixed(0)}W">
+      <span class="k">GPU ${g.index}</span><span class="nm">${esc(nm)}</span>
+      <span class="gauge"><i style="width:${Math.min(100,vm).toFixed(0)}%;background:${bar(vm,85,95)}"></i></span>
+      <span class="v">${vr}</span>
+      <span class="d"><span style="color:${uc}">${g.util.toFixed(0)}%</span> <span style="color:${tc}">${g.temp_c.toFixed(0)}°</span></span></span>`;
+  }
+  const r = host.ram;
+  if (r?.total){
+    const p = r.used/r.total*100;
+    h += chip('RAM', p, bar(p,80,90), `${gib(r.used)}/${gib(r.total)}`,
+              `${gib(r.available)} free`);
+  }
+  const c = host.cpu;
+  if (c?.cores){
+    const p = c.load5/c.cores*100;
+    h += `<span class="hchip" title="load average 1m ${c.load1.toFixed(2)} · 5m ${c.load5.toFixed(2)} · 15m ${c.load15.toFixed(2)} on ${c.cores} threads">
+      <span class="k">CPU</span>
+      <span class="gauge"><i style="width:${Math.min(100,p).toFixed(0)}%;background:${p>=90?'var(--red)':p>=75?'var(--amber)':'var(--blue)'}"></i></span>
+      <span class="v">${c.load1.toFixed(2)}</span>
+      <span class="d">/${c.cores}</span></span>`;
+  }
+  $('#hostchips').innerHTML = h;
+}
+
+function renderRail(d, loadOk, rates){
   const live = liveModels(d);
   const load = loadOk ? (d.load||{}) : {};
   const cap = load.capacity||{}, occ = load.occupancy||{}, req = load.requests||{};
-  // A model runs on one specific device (--device N from the preset): the gauge
-  // must show THAT GPU, not the first one on the host.
-  const loadedModel = live.find(m=>m.status?.value==='loaded') || live[0];
-  const dev = loadedModel ? Number(modelArgs(loadedModel).device) : NaN;
-  const g = gpu && gpu.online && gpu.gpus.length
-    ? (gpu.gpus.find(x=>x.index===dev) || gpu.gpus[0]) : null;
-  const vramPct = g ? g.mem_used_mib/g.mem_total_mib*100 : null;
-  const vramCls = vramPct==null ? '' : vramPct>=95 ? 'bad' : vramPct>=85 ? 'warn' : '';
-  const vramCol = vramPct==null ? 'var(--dim)' : vramPct>=95?'var(--red)':vramPct>=85?'var(--amber)':'var(--teal)';
   const kvPct = (occ.device_main_kv_tokens!=null && cap.kv_capacity_tokens)
     ? occ.device_main_kv_tokens/cap.kv_capacity_tokens*100 : null;
   const kvCol = kvPct==null ? 'var(--dim)' : kvPct>=95?'var(--red)':kvPct>=85?'var(--amber)':'var(--teal)';
-  const tempCol = g ? (g.temp_c>=85?'var(--red)':g.temp_c>=75?'var(--amber)':'var(--green)') : 'var(--dim)';
-  const uCol = g ? (g.util>=90?'var(--red)':g.util>=60?'var(--amber)':'var(--blue)') : 'var(--dim)';
   $('#rail-global').innerHTML = `
     <span class="item"><span class="dot ${live.length?'ok':'off'}"></span>
       <span class="val">${live.length?live.length+' in memory':'no model'}</span></span>
-    <span class="item"><span class="lbl">VRAM</span>
-      <span class="gauge ${vramCls}"><i style="width:${(vramPct??0).toFixed(0)}%"></i></span>
-      <span class="val" style="color:${vramCol}">${g?(g.mem_used_mib/1024).toFixed(1):'—'}<span class="dim">/${g?(g.mem_total_mib/1024).toFixed(0):'—'}G</span></span></span>
     <span class="item"><span class="lbl">KV</span>
       <span class="gauge ${kvPct!=null&&kvPct>90?'warn':''}"><i style="width:${(kvPct??0).toFixed(0)}%"></i></span>
       <span class="val" style="color:${kvCol}">${occ.device_main_kv_tokens!=null?occ.device_main_kv_tokens.toLocaleString():'—'}<span class="dim">/${cap.kv_capacity_tokens!=null?cap.kv_capacity_tokens.toLocaleString():'—'}</span></span></span>
-    ${g?`<span class="item"><span class="lbl">GPU ${g.index}</span>
-      <span class="val" style="color:${uCol}">${g.util.toFixed(0)}%</span>
-      <span class="val" style="color:${tempCol}">${g.temp_c.toFixed(0)}°C</span>
-      <span class="val" style="color:var(--purple)">${g.power_w.toFixed(0)}W</span></span>`:''}
     <span class="item"><span class="lbl">in flight</span>
       <span class="val" style="color:${(req.running||0)>0?'var(--teal)':'var(--dim)'}">${req.running??0}</span></span>
     <span class="push"></span>
@@ -261,7 +287,7 @@ function renderNow(d, load, cap, occ, req, loadOk, rates){
       n===1 ? '' : alerts.map(a=>a.title).join(' · '));
   }
   else if (ids.some(id=>st(id)==='loading')) renderVerdict('warn', 'loading model', detail);
-  else if (running>0)                          renderVerdict('good', 'decodificando', `${running} in flight · ${detail}`);
+  else if (running>0)                          renderVerdict('good', 'decoding', `${running} in flight · ${detail}`);
   else if (ids.some(id=>st(id)==='loaded'))    renderVerdict('good', 'idle', detail);
   else if (ids.some(id=>st(id)==='suspended')) renderVerdict('idle', 'suspendido · vive en el host', detail);
   else if (ids.some(id=>st(id)==='sleeping'))  renderVerdict('idle', 'sleeping · wakes on the next request', detail);
@@ -418,7 +444,8 @@ export async function loadLive(){
   try{ gpu = await api('/api/gpu'); }catch(e){}
 
   const rates = engineRates(d.engines);
-  renderRail(d, gpu, loadOk, rates);
+  renderHostChips(gpu);
+  renderRail(d, loadOk, rates);
   loadAlerts();
   renderNow(d, load, cap, occ, req, loadOk, rates);
 
@@ -452,6 +479,40 @@ export async function loadLive(){
       <div class="bar"><i style="width:${vramPct.toFixed(0)}%;background:${vramCol}"></i></div></div>`;
   }).join('') : '';
 
+  // The host, not just the card: a sleeping model costs host RAM, and a model
+  // that will not fit is usually a disk or a reservation question, not a GPU one.
+  const h = gpu?.host || {};
+  const gib = b => (b/1073741824).toFixed(1);
+  const hostTiles = [];
+  if (h.ram?.total){
+    const p = h.ram.used/h.ram.total*100;
+    const col = p>=90?'var(--red)':p>=80?'var(--amber)':'var(--teal)';
+    hostTiles.push(`<div class="tile">
+      <div class="k">Host RAM</div>
+      <div class="v">${gib(h.ram.used)}<small> GiB used</small></div>
+      <div class="s">${gib(h.ram.available)} GiB available of ${gib(h.ram.total)}</div>
+      <div class="bar"><i style="width:${p.toFixed(0)}%;background:${col}"></i></div></div>`);
+  }
+  if (h.cpu?.cores){
+    const p = Math.min(100, h.cpu.load5/h.cpu.cores*100);
+    const col = p>=90?'var(--red)':p>=75?'var(--amber)':'var(--blue)';
+    hostTiles.push(`<div class="tile">
+      <div class="k">CPU load</div>
+      <div class="v">${h.cpu.load1.toFixed(2)}<small> / ${h.cpu.cores}</small></div>
+      <div class="s">5 min ${h.cpu.load5.toFixed(2)} · 15 min ${h.cpu.load15.toFixed(2)}</div>
+      <div class="bar"><i style="width:${p.toFixed(0)}%;background:${col}"></i></div></div>`);
+  }
+  for (const d of (h.disks||[])){
+    const p = d.used/d.total*100;
+    const col = p>=95?'var(--red)':p>=85?'var(--amber)':'var(--teal)';
+    const name = d.path==='/' ? 'Root' : d.path.split('/').pop();
+    hostTiles.push(`<div class="tile">
+      <div class="k">${esc(name)}</div>
+      <div class="v">${gib(d.free)}<small> GiB free</small></div>
+      <div class="s">${esc(d.path)} · ${p.toFixed(0)}% used</div>
+      <div class="bar"><i style="width:${p.toFixed(0)}%;background:${col}"></i></div></div>`);
+  }
+
   const tpData = (state.charts.tp?.data.datasets[0].data)||[];
   const sparkTile = `<div class="tile info"><div class="k">Throughput</div>
     <div class="v">${tpData.length?(tpData[tpData.length-1]||0).toFixed(0):'—'} <small>tok/s</small></div>
@@ -460,7 +521,7 @@ export async function loadLive(){
 
   // With no model there is no occupancy or KV to show: those tiles would be
   // four dashes. Only the GPU ones stay, which always have data.
-  $('#tiles').innerHTML = sparkTile + (loadOk ? tiles : '') + gpuTiles;
+  $('#tiles').innerHTML = sparkTile + (loadOk ? tiles : '') + gpuTiles + hostTiles.join('');
   $('#livenote').textContent = loadOk ? '' : 'no model loaded — load one to see occupancy and KV';
   $('#slots-host').innerHTML = slotsHtml(d, occ);
   $('#modelrows').innerHTML = modelRows(d, req, false);
@@ -469,4 +530,11 @@ export async function loadLive(){
   $('#liveupd').textContent = 'updated ' + new Date().toLocaleTimeString('en-US',{hour12:false});
   wireModelRows($('#modelrows'), d);
   wireModelRows($('#quickload'), d);
+
+  // The Control page's table is drawn by loadControl() at boot and after a save
+  // only, so it froze on the state of that moment: rows claiming a model was
+  // loaded when it wasn't, and a catalog count from before the last restart.
+  // Same payload as the rail, so refresh it here rather than polling twice.
+  state.ctlLive = d;
+  renderCtlRows(d);
 }

@@ -25,8 +25,16 @@ export const SVG_GEAR = '<svg width="14" height="14" viewBox="0 0 24 24" fill="n
 // One row per model, not a card. The loaded one first; the rest is catalog.
 // `rich` adds the favourite star and the config gear: that is the Modelos tab.
 // The dashboard's has neither, only load actions.
+// /models only carries status.value: the reason a load was refused travels in that
+// one HTTP response and is gone on the next poll. The panel is the only thing
+// that saw it, so the panel remembers it until the model loads or changes.
+const loadErr = {};
+
+export function loadErrorOf(id){ return loadErr[id] || ''; }
+
 function buildModelRow(m, d, rich){
   const st = m.status?.value || 'unloaded';
+  if (st === 'loaded' || st === 'loading') delete loadErr[m.id];
   const ar = modelArgs(m);
   const dotCls = st==='loaded'?'ok':st==='loading'?'warn':st==='sleeping'?'warn'
     : st==='suspended'?'blue':'off';
@@ -43,11 +51,17 @@ function buildModelRow(m, d, rich){
       title="${favs.has(m.id)?'Remove from the Dashboard quick load':'Add to the Dashboard quick load'}">${SVG_STAR}</button>` : '';
   const gear = rich ? `<button class="iconbtn" data-cfg="${esc(m.id)}"
       title="Model config: launch flags">${SVG_GEAR}</button>` : '';
+  // A model that failed to load says so here, with the engine's own words: the
+  // reservation arithmetic ("requires X, only Y available") is what explains a
+  // model that is in the catalog and cannot be served.
+  const fe = loadErr[m.id];
+  const failed = fe
+    ? `<span class="badget" title="${esc(fe)}">load failed</span>` : '';
   const meta = `ctx ${ar.ctx??'—'}${ar.spec?` · ${ar.spec}`:''}${ar.vision?' · vision':''}`;
   return `<div class="model-row${rich?' rich':''} ${st!=='unloaded'?'live':''}">
     ${star}
     <span class="dot ${dotCls}"></span>
-    <span class="nm" title="${esc(m.id)}">${esc(m.id)}</span>
+    <span class="nm" title="${esc(m.id)}">${esc(m.id)}${failed}</span>
     <span class="mt">${meta}</span>
     <span class="acts">${act}${gear}</span>
   </div>`;
@@ -90,8 +104,9 @@ export function wireModelRows(host, d){
         const r = await api('/api/control', {method:'POST',
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify({action:b.dataset.act, model:b.dataset.model})});
-        if (r.error) flash(String(r.error).slice(0,160), true);
-      }catch(e){ flash(e.message, true); }
+        if (r.error){ loadErr[b.dataset.model] = String(r.error).slice(0,400); flash(String(r.error).slice(0,160), true); }
+        else delete loadErr[b.dataset.model];
+      }catch(e){ loadErr[b.dataset.model] = e.message; flash(e.message, true); }
       if (host.id === 'ctl-rows'){
         // Re-fetch /api/live: re-rendering from the stale payload would leave the
         // row saying "Sleep" on a model that already sleeps. loadControl() is not
@@ -167,11 +182,23 @@ export function openModelCfg(m){
 // recipe form, which would lose whatever the user was typing.
 export function renderCtlRows(d){
   const host = $('#ctl-rows');
-  if (!host || !d || !d.online) return;
+  if (!host || !d) return;
+  if (!d.online){
+    // Say it instead of leaving the last good rows up: a stale row that reads
+    // "loaded" is the same lie this render path exists to avoid.
+    host.className = 'empty';
+    host.style.maxHeight = 'none';
+    host.textContent = `The server ${d.url || ''} is not responding.`;
+    $('#ctl-note').textContent = 'no connection';
+    return;
+  }
+  host.className = 'model-rows';
+  host.style.maxHeight = '';
   host.innerHTML = modelRows(d, null, true);
   const nFav = ((d.models?.data)||[]).filter(m=>favs.has(m.id)).length;
   $('#ctl-note').textContent = `${(d.models?.data||[]).length} models` +
     (nFav ? ` · ${nFav} favorites` : '');
+  $('#ctl-upd').textContent = 'updated ' + new Date().toLocaleTimeString('en-US',{hour12:false});
   wireModelRows(host, d);
 }
 

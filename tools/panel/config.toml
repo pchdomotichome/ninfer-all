@@ -52,6 +52,15 @@ qwen38-27b-iq3xxs = "/mnt/models_local/ninfer/checkpoints/qwen38-config"
 saluki27b = "/mnt/models_local/ninfer/checkpoints/qwen38-config"
 gemma4-26b = "/mnt/models_local/ninfer/checkpoints/gemma4-26b-it"
 
+[llmprobe]
+# Pinned npm install, not `npx` per run: the report stays reproducible and the run
+# does not depend on the network or on whatever version the registry resolves to.
+bin = "/root/ninfer-lab/llmprobe/node_modules/.bin/llmprobe"
+# The JSON reports each run writes.
+dir = "/root/ninfer-lab/bench"
+url = "http://127.0.0.1:9081/v1"
+version = "0.6.16"
+
 [convert]
 # tools/convert: GGUF o safetensors -> .ninfer
 enabled = true

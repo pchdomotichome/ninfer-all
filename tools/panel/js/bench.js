@@ -446,10 +446,15 @@ export async function loadEngine(){
     };
     sel.onchange = syncTok; syncTok();
     // The version badge said "v3 · sm_86" while the server reported something
-    // else entirely; it now shows what the binary actually is.
+    // else entirely; it now shows what the binary actually is. The arch moved to
+    // the tooltip and the GPU chips: in the strip, the card name is live data
+    // and the frozen string next to the product name was only ever a duplicate.
     if (e.build && (e.build.version || e.build.arch)){
       const chip = $('#hdr-ver');
-      if (chip) chip.textContent = [e.build.version, e.build.arch].filter(Boolean).join(' · ');
+      if (chip){
+        chip.textContent = e.build.version || '';
+        chip.title = [e.build.version, e.build.arch].filter(Boolean).join(' · ');
+      }
     }
   }catch(err){ /* server down: the live tab says so */ }
 }

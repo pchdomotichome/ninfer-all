@@ -30,8 +30,64 @@ import shutil
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE / "config.toml"
 
+# The mounts worth watching: the model NVMe, the SMB share that holds the rest,
+# and the container root. A path that does not exist is skipped at read time.
+DISK_PATHS = ("/mnt/models_local", "/mnt/models_fast", "/")
+
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json"}
+
+
+class ProbeJob:
+    """
+    One llmprobe run at a time.
+
+    The tool takes six to eight minutes per model, so a request cannot wait for
+    it: the panel starts the process, keeps its last lines for the page, and the
+    page polls. The report it writes is the real result; the lines are progress.
+    """
+
+    def __init__(self):
+        self.proc: subprocess.Popen | None = None
+        self.model = ""
+        self.lines: list[str] = []
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def running(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self, cfg: dict, model: str) -> tuple[int, dict]:
+        if self.running():
+            return 409, {"error": f"a probe is already running: {self.model}"}
+        lp = cfg.get("llmprobe") or {}
+        binp, out = lp.get("bin", ""), Path(lp.get("dir", ""))
+        if not binp or not Path(binp).is_file():
+            return 503, {"error": f"llmprobe is not installed ({binp})"}
+        out.mkdir(parents=True, exist_ok=True)
+        argv = [binp, lp.get("url", "http://127.0.0.1:9081/v1"), "--model", model,
+                "--save", str(out / f"llmprobe-{model}.json")]
+        self.model, self.lines = model, []
+        self.proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, bufsize=1, start_new_session=True)
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+        return 200, {"model": model}
+
+    def _pump(self) -> None:
+        assert self.proc and self.proc.stdout
+        for line in self.proc.stdout:
+            with self._lock:
+                self.lines.append(line.rstrip("\n"))
+                del self.lines[:-400]
+        self.proc.wait()
+
+    def state(self) -> dict:
+        with self._lock:
+            lines = list(self.lines[-25:])
+        return {"running": self.running(), "model": self.model,
+                "exit": self.proc.returncode if self.proc and not self.running() else None,
+                "lines": lines}
 
 
 class Jobs:
@@ -253,6 +309,7 @@ class API:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.jobs = Jobs()
+        self.probe = ProbeJob()
         self.hub: list[callable] = []          # suscriptores SSE
         self.hub_lock = threading.Lock()
         self._gpu_ts = 0.0
@@ -552,7 +609,7 @@ class API:
         try:
             r = subprocess.run(
                 ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,memory.total,"
-                                "temperature.gpu,power.draw",
+                                "temperature.gpu,power.draw,name",
                  "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=5)
         except (OSError, subprocess.SubprocessError):
@@ -561,13 +618,146 @@ class API:
             gpus = []
             for line in r.stdout.splitlines():
                 parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 6:
+                if len(parts) >= 7:
                     gpus.append({"index": int(parts[0]), "util": float(parts[1]),
                                  "mem_used_mib": float(parts[2]), "mem_total_mib": float(parts[3]),
-                                 "temp_c": float(parts[4]), "power_w": float(parts[5])})
+                                 "temp_c": float(parts[4]), "power_w": float(parts[5]),
+                                 "name": parts[6]})
             out = {"online": bool(gpus), "gpus": gpus}
+        out["host"] = self._host_resources()
         self._gpu_ts, self._gpu_cache = now, out
         return out
+
+    def _host_resources(self) -> dict:
+        """
+        What the host itself holds: RAM, CPU load and the disks we actually fill.
+        The GPUs say whether a model fits in VRAM; these say what it costs the box
+        around it, and a sleeping model spends host memory, not device memory.
+
+        Read from /proc and statvfs, so the 2 s poll costs no process.
+        """
+        out: dict = {}
+        try:
+            info: dict[str, int] = {}
+            with open("/proc/meminfo") as fh:
+                for line in fh:
+                    key, _, rest = line.partition(":")
+                    if key in ("MemTotal", "MemAvailable"):
+                        info[key] = int(rest.split()[0]) * 1024
+            if info:
+                out["ram"] = {
+                    "total": info.get("MemTotal", 0),
+                    "available": info.get("MemAvailable", 0),
+                    "used": info.get("MemTotal", 0) - info.get("MemAvailable", 0),
+                }
+        except (OSError, ValueError):
+            pass
+        try:
+            with open("/proc/loadavg") as fh:
+                load1, load5, load15 = (float(x) for x in fh.read().split()[:3])
+            out["cpu"] = {"load1": load1, "load5": load5, "load15": load15,
+                          "cores": os.cpu_count() or 1}
+        except (OSError, ValueError, IndexError):
+            pass
+        disks = []
+        for path in DISK_PATHS:
+            try:
+                usage = shutil.disk_usage(path)
+            except OSError:
+                continue
+            disks.append({"path": path, "total": usage.total, "free": usage.free,
+                          "used": usage.used})
+        if disks:
+            out["disks"] = disks
+        return out
+
+    def probe_run(self, body: dict) -> tuple[int, dict]:
+        """Start one probe. The page polls /api/probe/state."""
+        model = (body.get("model") or "").strip()
+        if not model:
+            return 400, {"error": "model is required"}
+        return self.probe.start(self.cfg, model)
+
+    def probe_runs(self) -> dict:
+        """
+        llmprobe reports on disk, newest first.
+
+        Each report is the record of one run against one model at one config, so
+        the file is the primary key: two reports of the same model are two
+        different configurations and both have to stay visible.
+        """
+        out = []
+        cfg = self.cfg.get("llmprobe") or {}
+        root = Path(cfg.get("dir", ""))
+        if root.is_dir():
+            for f in sorted(root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+                try:
+                    d = json.loads(f.read_text())
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(d, dict) or "conformance" not in d:
+                    continue
+                conf = d.get("conformance") or {}
+                cap = d.get("capability") or {}
+                fid = d.get("fidelity") or {}
+                bench = d.get("bench") or {}
+                corr = next((s for s in (fid.get("slices") or []) if s["id"] == "correctness"), {})
+                med = lambda v: (v or {}).get("median")  # noqa: E731
+                out.append({
+                    "file": f.name,
+                    "model": (d.get("target") or {}).get("model") or "",
+                    "started_at": (d.get("run") or {}).get("startedAt") or "",
+                    "duration_s": round((d.get("durationMs") or 0) / 1000),
+                    "version": d.get("version") or "",
+                    "conformance": conf.get("pct"),
+                    "conformance_items": f"{conf.get('passed')}/{conf.get('total')}",
+                    "capability": cap.get("pct"),
+                    "fidelity": fid.get("pct"),
+                    "correctness": corr.get("detail") or "",
+                    "decode_tps": med(bench.get("decodeTokPerSec")),
+                    "ttft_ms": med(bench.get("ttftMs")),
+                    "missing_surface": [m for t in ((d.get("coverage") or {})
+                                                    .get("byTier") or []) for m in (t.get("missing") or [])],
+                })
+        return {"runs": out, "bin": cfg.get("bin", ""), "version": cfg.get("version", ""),
+                "url": cfg.get("url", ""), "online": bool(out)}
+
+    def rank(self) -> dict:
+        """
+        The join: the newest llmprobe report and the newest AIPerf run per model.
+
+        AIPerf records the artifact in `model` and the serving id in
+        `server.alias`; llmprobe records the serving id. The alias is the only
+        key both sides agree on, so that is what joins them. A model missing one
+        side is reported with the gap, never dropped; an alias that is neither in
+        the catalog nor a probe belongs to a model this server no longer serves
+        and is listed in `hidden_bench` instead of becoming an all-dash row.
+        """
+        latest_probe: dict[str, dict] = {}
+        for r in self.probe_runs()["runs"]:
+            if r["model"] and r["model"] not in latest_probe:
+                latest_probe[r["model"]] = r
+        latest_bench: dict[str, dict] = {}
+        for row in bench.list_runs(Path(self.cfg["aiperf"]["registry"])):
+            alias = ((row.get("server") or {}).get("alias")) or row.get("model") or ""
+            if alias and alias not in latest_bench and row.get("completed"):
+                latest_bench[alias] = row
+        catalog = self.engine().get("catalog") or []
+        cat_ids = [m.get("id") for m in catalog if m.get("id")]
+        # A bench alias that matches neither the catalog nor a probe is a serving
+        # id that no longer exists (apex before apex35b-mtp, saluki27b before the
+        # -abl rebuild): every cell would be a dash, so it is not a row. Reported
+        # in `hidden_bench` rather than dropped, because a name the page silently
+        # forgot is exactly what this join exists to avoid.
+        known = set(cat_ids) | set(latest_probe)
+        names = [n for n in dict.fromkeys(list(latest_probe) + list(latest_bench) + cat_ids)
+                 if n in known]
+        rows = []
+        for name in names:
+            p, b = latest_probe.get(name), latest_bench.get(name)
+            st = next((m.get("status") for m in catalog if m.get("id") == name), "")
+            rows.append({"model": name, "state": st or "", "probe": p, "bench": b})
+        return {"rows": rows, "hidden_bench": sorted(set(latest_bench) - known)}
 
     def help_flags(self) -> tuple[int, dict]:
         """
@@ -1526,6 +1716,14 @@ class API:
             # 409 model_busy is a valid answer: the model has requests in flight and cannot
             # sleep. It has to be reported, not hidden.
             detail = err.read().decode()[:300]
+            # The engine answers a refused load with its own error object. Keep the
+            # sentence it wrote ("requires X bytes, only Y available") instead of the
+            # envelope: the UI shows this verbatim as the reason the model failed.
+            try:
+                inner = json.loads(detail)
+                detail = inner["error"]["message"][:300]
+            except (ValueError, KeyError, TypeError):
+                pass
             return err.code, {"error": detail, "action": action, "model": model}
         except (OSError, ValueError) as err:
             return 502, {"error": str(err)[:200]}
@@ -1710,6 +1908,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/help":
             code, payload = self.api.help_flags()
             return self._json(payload, code)
+        if path == "/api/probe/state":
+            return self._json(self.api.probe.state())
+        if path == "/api/probe/runs":
+            return self._json(self.api.probe_runs())
+        if path == "/api/rank":
+            return self._json(self.api.rank())
         if path == "/api/convert/files":
             return self._json(self.api.convert_files())
         if path == "/api/convert/search":
@@ -1756,6 +1960,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(payload, code)
         if parsed.path == "/api/bench/stop":
             code, payload = self.api.stop(body)
+            return self._json(payload, code)
+        if parsed.path == "/api/probe/run":
+            code, payload = self.api.probe_run(body)
             return self._json(payload, code)
         if parsed.path == "/api/control":
             code, payload = self.api.control(body)

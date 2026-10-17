@@ -8,8 +8,7 @@
 <link rel="stylesheet" href="/css/panel.css">
 </head>
 <body>
-<div class="topwrap">
-<header>
+<aside class="sidenav" id="sidenav">
   <div class="brand">
     <div class="brand-logo">
       <svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -18,14 +17,23 @@
       <h1>NInfer <span class="badge-version" id="hdr-ver">—</span></h1>
     </div>
   </div>
-  <span class="sub" id="hdrsub">loading…</span>
   <nav id="nav">
     <button data-pg="dash" class="active"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>Dashboard</button>
-    <button data-pg="bench"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Benchmark</button>
-    <button data-pg="control"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Models</button>
+    <button data-pg="bench" data-group="bench"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Bench<span class="caret"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span></button>
+    <div class="subnav" id="subnav-bench" hidden>
+      <button data-pg="bench" data-sub="aiperf" class="active">AIPerf</button>
+      <button data-pg="bench" data-sub="probe">LLM Probe</button>
+      <button data-pg="bench" data-sub="rank">Ranking</button>
+    </div>
+    <button data-pg="control"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a1 1 0 0 1 0 1.82 1.65 1.65 0 0 1-1.82.33 1.65 1.65 0 0 0-1 1.51V21a1 1 0 0 1-1 1 1 1 0 0 1-1-1v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a1 1 0 0 1-1.82 0 1.65 1.65 0 0 1-.33-1.82 1.65 1.65 0 0 0-1.51-1H3a1 1 0 0 1-1-1 1 1 0 0 1 1-1h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a1.65 1.65 0 0 0 1.82-1.82 1.65 1.65 0 0 0-.33-1.82 1.65 1.65 0 0 0-1.51-1H3a1 1 0 0 1-1-1 1 1 0 0 1 1-1h.09A1.65 1.65 0 0 0 4.6 5a1.65 1.65 0 0 0 .33-1.82l-.06-.06a1.65 1.65 0 0 0 1.82 0 1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a1 1 0 0 1-1-1 1 1 0 0 1 1-1h.09A1.65 1.65 0 0 0 4.6 3a1.65 1.65 0 0 0-.33-1.82l-.06-.06a1 1 0 0 1 0-1.82A1.65 1.65 0 0 1 6.03 3z"/></svg>Models</button>
     <button data-pg="router"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a11 11 0 0 0 11 11"/></svg>Router</button>
     <button data-pg="convert"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Convert</button>
   </nav>
+  <span class="sidenav-foot sub" id="hdrsub">loading…</span>
+</aside>
+<div class="topwrap">
+<header>
+  <span class="hchips" id="hostchips"></span>
 </header>
 <div class="rail" id="rail">
           <div class="rail-row" id="rail-global"></div>
@@ -102,6 +110,7 @@
 
   <!-- ═══════════════ BENCHMARK ═══════════════ -->
   <div class="pg" id="pg-bench">
+   <div class="subpg active" data-subpg="aiperf">
     <div class="strip" id="strip"></div>
     <section id="bench">
       <div class="sechead">
@@ -148,6 +157,38 @@
       <div class="empty" id="empty" hidden>No runs yet.</div>
       <div class="pager" id="pager"></div>
     </section>
+   </div>
+
+   <div class="subpg" data-subpg="probe">
+    <section id="probe">
+      <div class="sechead">
+        <h2>Bench / LLM Probe</h2>
+        <span class="note" id="probenote">protocol conformance and model capability</span>
+        <span class="spacer"></span>
+        <select id="probe-model"></select>
+        <button id="probe-run">Run probe</button>
+      </div>
+      <div id="probe-gate"></div>
+      <div id="probe-cards"></div>
+      <div class="model-rows" id="probe-runs"></div>
+    </section>
+   </div>
+
+   <div class="subpg" data-subpg="rank">
+    <section id="rank">
+      <div class="sechead">
+        <h2>Bench / Ranking</h2>
+        <span class="note">gates first, then the axes. No single score.</span>
+        <span class="spacer"></span>
+        <select id="rank-order">
+          <option value="agentic">agentic fit</option>
+          <option value="decode">decode</option>
+        </select>
+      </div>
+      <div id="rank-gates"></div>
+      <div id="rank-rows"></div>
+    </section>
+   </div>
   </div>
 
   <!-- ═══════════════ CONTROL ═══════════════ -->

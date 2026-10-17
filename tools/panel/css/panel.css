@@ -13,7 +13,10 @@
   --shadow-glow:0 0 20px rgba(56,189,248,0.15);
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:13.5px/1.55 var(--sans);-webkit-font-smoothing:antialiased;min-height:100vh}
+/* The sidebar is fixed, so the offset belongs on the body: #main is a sibling
+   of .topwrap, and a margin on one wrapper would not reach it. */
+body{margin:0;background:var(--bg);color:var(--text);font:13.5px/1.55 var(--sans);
+  -webkit-font-smoothing:antialiased;min-height:100vh;padding-left:214px}
 
 /* Header premium con efecto frosted glass */
 header{display:flex;align-items:center;gap:18px;padding:12px 24px;
@@ -26,7 +29,24 @@ header{display:flex;align-items:center;gap:18px;padding:12px 24px;
 h1{font-size:15px;font-weight:700;margin:0;letter-spacing:.4px;color:#fff;display:flex;align-items:center;gap:8px}
 .badge-version{font:600 10.5px var(--mono);padding:2px 7px;border-radius:12px;
   background:rgba(56,189,248,0.12);color:var(--teal);border:1px solid rgba(56,189,248,0.3)}
-.sub{color:var(--dim);font:12px var(--mono)}
+.sub{color:var(--dim);font:12px var(--mono);flex:none;white-space:nowrap}
+
+/* The header owns the machine; the rail below owns the engine. These chips are
+   the "what is the box doing right now" strip: one per GPU, then RAM and CPU
+   load. The gauge is the value, the text is the reading. */
+.hchips{display:flex;gap:6px;align-items:center;margin-left:2px;flex:none}
+.hchip{display:flex;align-items:center;gap:6px;padding:3px 9px;border-radius:7px;flex:none;white-space:nowrap;
+  background:var(--bg-subtle);border:1px solid var(--line-subtle);font:11px var(--mono);cursor:default}
+.hchip .k{color:var(--dim);font-weight:600;letter-spacing:.3px}
+.hchip .nm{color:var(--purple);font-weight:600}
+.hchip .gauge{width:34px;height:5px;border-radius:3px;background:rgba(255,255,255,.09);overflow:hidden;flex:none}
+.hchip .gauge i{display:block;height:100%;border-radius:3px;transition:width .4s}
+.hchip .v{color:#fff;font-weight:600}
+.hchip .d{color:var(--dim)}
+.hchip.hot{border-color:color-mix(in srgb,var(--red) 45%,transparent)}
+/* Narrow window: the gauges and the numbers stay, the secondary readings go. */
+@media (max-width:1250px){ .hchip .d{display:none} }
+@media (max-width:1000px){ .hchip .nm{display:none} }
 
 /* Tabs estilizadas con micro-indicador */
 nav{display:flex;gap:6px;margin-left:auto;background:var(--bg-subtle);padding:3px;border-radius:9px;border:1px solid var(--line-subtle)}
@@ -37,6 +57,27 @@ nav button.active{background:var(--panel2);color:#fff;font-weight:600;box-shadow
 
 main{max-width:1560px;margin:0 auto;padding:20px 24px 60px}
 .pg{display:none;animation:fadeIn .2s ease-out}
+.subpg{display:none}
+.subpg.active{display:block}
+
+/* The left column: identity, sections, versions. The header beside it carries
+   only live machine state, which is why it has room for it. */
+.sidenav{position:fixed;left:0;top:0;bottom:0;width:214px;z-index:30;display:flex;flex-direction:column;
+  background:var(--bg-subtle);border-right:1px solid var(--line-subtle);padding:14px 10px 10px}
+.sidenav .brand{padding:2px 8px 14px}
+.sidenav nav{display:flex;flex-direction:column;gap:2px;margin:0;background:none;border:none;padding:0;gap:2px}
+.sidenav nav button{width:100%;justify-content:flex-start;text-align:left;border:1px solid transparent}
+.sidenav nav button.active{background:rgba(56,189,248,.10);border-color:var(--line);color:#fff}
+.caret{margin-left:auto;display:flex;transition:transform .15s}
+button.grouped .caret{transform:rotate(-90deg)}
+.subnav{display:flex;flex-direction:column;gap:1px;margin:2px 0 6px 20px;padding-left:11px;
+  border-left:1px solid var(--line-subtle)}
+.subnav[hidden]{display:none !important}
+.subnav button{background:transparent;border:none;color:var(--dim);font:500 11.5px var(--sans);
+  padding:6px 10px;text-align:left;border-radius:6px;cursor:pointer}
+.subnav button:hover{color:var(--text);background:rgba(255,255,255,.04)}
+.subnav button.active{color:var(--teal);background:rgba(56,189,248,.10);font-weight:600}
+.sidenav-foot{margin-top:auto;padding:10px 8px 0;border-top:1px solid var(--line-subtle)}
 .pg.active{display:block}
 @keyframes fadeIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 
@@ -154,6 +195,19 @@ tr.run.selected td{background:rgba(56,189,248,0.12);border-color:rgba(56,189,248
 .pill.vision{border-color:rgba(34,211,238,0.35);color:var(--cyan);background:rgba(34,211,238,0.08)}
 .pill.dflash{border-color:rgba(251,191,36,0.35);color:var(--amber);background:rgba(251,191,36,0.08)}
 
+/* Ranking gate and surface gap: the same semantic language as the registry's
+   ENGINE/SPEC pills; red for a miss (an engine defect), bone-white for a gate.
+   The .badge-version colours are deliberately not reused. */
+.pill.gap{border-color:rgba(244,114,182,0.45);color:#f9a8d4;background:rgba(244,114,182,0.10)}
+/* gap: the space between the label and its count is a text node, and this pill is
+   inline-flex, so that space is an anonymous flex item the browser drops.
+   box-shadow: the `ok` modifier is also the status-dot class, whose 8px glow the
+   dot's own rule adds; the pill overrides its background but would inherit the glow. */
+.pill.gate{border-color:rgba(167,139,250,0.45);color:var(--purple);background:rgba(167,139,250,0.10);cursor:help;
+  gap:7px;padding:5px 11px;box-shadow:none}
+.pill.gate.ok{border-color:rgba(52,211,153,0.45);color:var(--green);background:rgba(52,211,153,0.10)}
+.pill.gate.fail{border-color:rgba(244,114,182,0.45);color:#f9a8d4;background:rgba(244,114,182,0.10)}
+.pill.gate .dim{color:inherit;opacity:.75}
 /* Artifact line above the recipe form: name, then a whisper, then the pills. */
 #r-recipe{display:flex;align-items:center;flex-wrap:wrap}
 .art-name{font:600 12.5px var(--mono);color:var(--text)}
@@ -372,6 +426,11 @@ pre{margin:0;background:#070a0f;border:1px solid var(--line-subtle);border-radiu
 .model-row .nm{color:#fff;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-row .mt{color:var(--dim);font-size:11px;white-space:nowrap}
 .model-row .acts{display:flex;gap:6px}
+/* A model in the catalog that the engine refused to load. The tooltip carries
+   the engine's own words, which is where the reservation arithmetic lives. */
+.badget{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:9px;font:10px var(--mono);
+  color:var(--red);border:1px solid color-mix(in srgb,var(--red) 40%,transparent);
+  background:color-mix(in srgb,var(--red) 12%,transparent);vertical-align:1px;cursor:help}
 .model-row .acts button{padding:3px 9px;font-size:11px}
 /* Variante rica (Modelos/Control): estrella a la izquierda, engranaje a la derecha */
 .model-row.rich{grid-template-columns:16px 9px minmax(0,1fr) auto auto;gap:12px}
@@ -449,3 +508,19 @@ section.tight{margin:0}
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{transition:none !important;animation:none !important}
 }
+
+/* Ranking is a table on purpose: the axes are comparable columns, and a row of
+   gauges in a grid either overflows or hides which column is which. */
+#rank-rows table.rank{width:100%;border-collapse:collapse;font:11.5px var(--mono)}
+table.rank td{text-align:left;padding:8px 10px}
+table.rank th{text-align:left;color:var(--dim);font:600 10.5px var(--sans);letter-spacing:.3px;
+  padding:7px 10px;border-bottom:1px solid var(--line)}
+table.rank th .dim{font-weight:400;margin-left:4px;opacity:.65}
+table.rank td{border-bottom:1px solid var(--line-subtle);color:var(--text);vertical-align:middle}
+table.rank tr.live td{background:rgba(52,211,153,.04)}
+table.rank td.nm{color:#fff;font-weight:600;white-space:nowrap}
+table.rank td.num{white-space:nowrap}
+table.rank td.num .gauge{display:inline-block;width:30px;height:5px;border-radius:3px;
+  background:rgba(255,255,255,.09);overflow:hidden;margin-right:7px;vertical-align:1px}
+table.rank td.num .gauge i{display:block;height:100%;border-radius:3px}
+table.rank th.lo{color:var(--blue)}
