@@ -354,19 +354,22 @@ struct MoePlan {
     Tensor router, shared_gate;
     ExpertTable gate, up, down, shared_gate_table, shared_up_table, shared_down_table;
     std::optional<NativeMoePlan> native;
+    // One routed expert's width, the geometry key of the GGUF expert Op (see GgufMoeWeights).
+    std::int32_t width = 0;
     // Device banks or disk experts' device slots, with zeros after the down banks; host experts
     // are read across the bus.
     bool device_resident = false;
 
     [[nodiscard]] ops::GgufMoeWeights banks() const {
-        return {gate.view(),
-                up.view(),
-                down.view(),
-                shared_gate_table.view(),
-                shared_up_table.view(),
-                shared_down_table.view(),
-                static_cast<std::int32_t>(gate.pointers.size()),
-                device_resident};
+        return {.gate = gate.view(),
+                .up = up.view(),
+                .down = down.view(),
+                .shared_gate = shared_gate_table.view(),
+                .shared_up = shared_up_table.view(),
+                .shared_down = shared_down_table.view(),
+                .experts = static_cast<std::int32_t>(gate.pointers.size()),
+                .width = width,
+                .device_resident = device_resident};
     }
 };
 
@@ -908,6 +911,7 @@ struct Executor::Impl {
             plan.moe.up   = make_table(model, lw.moe.up);
             plan.moe.down = make_table(model, lw.moe.down);
         }
+        plan.moe.width             = static_cast<std::int32_t>(config.moe_intermediate_size);
         plan.moe.device_resident   = model.options().experts != ExpertResidency::Host;
         plan.moe.shared_gate_table = make_table(model, std::span(&lw.moe.shared_gate, 1));
         plan.moe.shared_up_table   = make_table(model, std::span(&lw.moe.shared_up, 1));
