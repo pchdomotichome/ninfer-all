@@ -14,6 +14,8 @@
 
 #include <chrono>
 #include <exception>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -1014,7 +1016,21 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
     try {
         lease = lease_query_model(req);
     } catch (const ApiException& exception) {
-        write_openai_error(res, exception.error());
+        // The WebUI reads /props before any model is loaded to learn that it may switch models:
+        // answer the way llama.cpp's router does instead of failing the lease.
+        if (!options_.router() || req.has_param("model")) {
+            write_openai_error(res, exception.error());
+            return;
+        }
+        const nlohmann::json router_props = {
+            {"role", "router"},
+            {"model_alias", "ninfer"},
+            {"model_path", "none"},
+            {"default_generation_settings", {{"params", nlohmann::json::object()}, {"n_ctx", 0}}},
+            {"build_info", "ninfer " + options_.build_version},
+            {"cors_proxy_enabled", options_.webui_mcp_proxy},
+        };
+        res.set_content(router_props.dump(), "application/json");
         return;
     }
     GenerationService& service          = lease.service();
@@ -1038,7 +1054,13 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
         {"frequency_penalty", overrides.frequency_penalty.value_or(preset.frequency_penalty)},
     };
     params["seed"] = overrides.seed ? nlohmann::json(*overrides.seed) : nlohmann::json(-1);
-    const nlohmann::json props = {
+    // llama.cpp's WebUI shows its model list, and switches models, only when /props says the
+    // server is a router, and it takes its thinking controls from this template.
+    std::string chat_template;
+    if (std::ifstream in(options.chat_template_path); in) {
+        chat_template.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    nlohmann::json props = {
         {"default_generation_settings",
          {{"n_ctx", facts.capacity.max_context},
           {"speculative", options.speculative.backend != ninfer::SpeculativeBackend::None},
@@ -1055,6 +1077,12 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
         // The WebUI ungreys its "Use llama-server proxy" option from this flag alone.
         {"cors_proxy_enabled", options_.webui_mcp_proxy},
     };
+    if (options_.router()) {
+        props["role"] = "router";
+    }
+    if (!chat_template.empty()) {
+        props["chat_template"] = std::move(chat_template);
+    }
     res.set_content(props.dump(), "application/json");
 }
 
