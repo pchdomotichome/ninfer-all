@@ -1393,6 +1393,20 @@ int test_common_objects() {
                       "models list exposes the llama.cpp-compatible model meta");
     failures += check(models["data"][0]["status"]["value"] == "loaded",
                       "models list marks the resident model as loaded");
+    // A model that is not loaded still reports the context its catalog entry knows, so a harness
+    // that discovers models before its first request sees the limit.
+    const ModelDescription unloaded{.id           = "qwen-next",
+                                    .max_model_len = 262144,
+                                    .status        = "unloaded",
+                                    .loaded_facts  = false};
+    const Json unloaded_model = Json::parse(make_models_list(unloaded, 7))["data"][0];
+    failures += check(unloaded_model["max_model_len"] == 262144 &&
+                          unloaded_model["context_window"] == 262144 &&
+                          unloaded_model["context_length"] == 262144 &&
+                          unloaded_model["meta"]["n_ctx"] == 262144 &&
+                          unloaded_model["status"]["value"] == "unloaded" &&
+                          !unloaded_model["meta"].contains("n_ctx_train"),
+                      "an unloaded catalog model advertises its configured context only");
     const Json index = make_api_index("qwen");
     failures += check(index["object"] == "api_base" && index["model"] == "qwen",
                       "the API base index names the configured model alias");

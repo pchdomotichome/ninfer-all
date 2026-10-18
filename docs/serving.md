@@ -796,6 +796,12 @@ completes it. The `meta` facts describe the registered artifact behind the alias
 | `size` | encoded weight payload bytes of the registered artifact |
 | `ftype` | encoded tensor formats of the artifact, joined with `+` when mixed |
 
+In router mode a catalog entry that is not loaded has no model metadata to report, so its object
+carries the id, `status`, `path`, `aliases` and the context limit its configuration already knows,
+under the same `max_model_len`, `context_window`, `context_length` and `meta.n_ctx` names; the
+artifact facts of the table above appear once the model is loaded. A harness that discovers models
+before its first request therefore reads the configured limit.
+
 `GET /v1/models/{id}` returns the same object for the single configured alias and a `404` for any
 other id.
 

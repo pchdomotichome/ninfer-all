@@ -54,6 +54,8 @@ struct ModelStatusSnapshot {
     std::vector<std::string> aliases;
     ModelState state = ModelState::Unloaded;
     std::vector<std::string> arguments;
+    // The configured --max-context, known from the catalog before the model is loaded.
+    std::uint32_t max_context = 0;
     // The last load or wake failed; cleared by the next success.
     bool failed = false;
     std::string last_error;

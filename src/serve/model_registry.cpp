@@ -355,15 +355,16 @@ void ModelRegistry::sleep(std::string_view model, bool hold, bool wait) {
 }
 
 ModelStatusSnapshot ModelRegistry::snapshot_locked(const Slot& slot) const {
-    return ModelStatusSnapshot{.id         = slot.definition.id,
-                               .aliases    = slot.definition.aliases,
-                               .state      = slot.state,
-                               .arguments  = slot.definition.arguments,
-                               .failed     = slot.failed,
-                               .last_error = slot.last_error,
-                               .leases     = slot.leases,
-                               .last_used  = slot.last_used,
-                               .held       = slot.held};
+    return ModelStatusSnapshot{.id          = slot.definition.id,
+                               .aliases     = slot.definition.aliases,
+                               .state       = slot.state,
+                               .arguments   = slot.definition.arguments,
+                               .max_context = slot.definition.options.max_context,
+                               .failed      = slot.failed,
+                               .last_error  = slot.last_error,
+                               .leases      = slot.leases,
+                               .last_used   = slot.last_used,
+                               .held        = slot.held};
 }
 
 std::vector<ModelStatusSnapshot> ModelRegistry::status() const {

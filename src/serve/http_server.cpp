@@ -1111,13 +1111,14 @@ void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) 
             models.push_back(std::move(description));
             continue;
         }
-        models.push_back(ModelDescription{.id           = status.id,
-                                          .status       = model_state_name(status.state),
-                                          .loaded_facts = false,
-                                          .args         = status.arguments,
-                                          .aliases      = status.aliases,
-                                          .failed       = status.failed,
-                                          .last_error   = status.last_error});
+        models.push_back(ModelDescription{.id            = status.id,
+                                          .max_model_len = status.max_context,
+                                          .status        = model_state_name(status.state),
+                                          .loaded_facts  = false,
+                                          .args          = status.arguments,
+                                          .aliases       = status.aliases,
+                                          .failed        = status.failed,
+                                          .last_error    = status.last_error});
     }
     res.set_content(make_models_list(models, unix_time_now()), "application/json");
 }
