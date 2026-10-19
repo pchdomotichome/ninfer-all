@@ -546,3 +546,13 @@ table.rank td.num .gauge{display:inline-block;width:30px;height:5px;border-radiu
   background:rgba(255,255,255,.09);overflow:hidden;margin-right:7px;vertical-align:1px}
 table.rank td.num .gauge i{display:block;height:100%;border-radius:3px}
 table.rank th.lo{color:var(--blue)}
+
+/* Fit: instant Hub results under the prober's input. One row per model, clickable. */
+.hf-hit {
+  display:flex; justify-content:space-between; align-items:center; gap:10px;
+  padding:7px 11px; border:1px solid var(--line-subtle); border-radius:var(--radius-sm);
+  margin:6px 0; cursor:pointer;
+}
+.hf-hit:hover { border-color:var(--teal) }
+.hf-hit .r { font:12.5px var(--mono); color:var(--text); overflow:hidden; text-overflow:ellipsis }
+.hf-hit .m { font:11.5px var(--mono); color:var(--dim); white-space:nowrap }

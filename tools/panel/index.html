@@ -305,9 +305,11 @@
       <div style="padding:15px">
         <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
           <label class="f grow" style="min-width:280px">Hugging Face repo
-            <input id="fit-hf-repo" type="text" placeholder="owner/repo"></label>
+            <input id="fit-hf-repo" type="text" placeholder="search the Hub, or paste owner/repo"></label>
           <button class="primary" id="fit-hf-go">Read sizes</button>
         </div>
+        <!-- Instant results while typing; picking one runs the probe on it. -->
+        <div id="fit-hf-hits" style="max-height:300px;overflow-y:auto"></div>
         <div id="fit-hf-out"></div>
       </div>
     </section>

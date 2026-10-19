@@ -117,10 +117,20 @@ const SEGS = [
 /* The profile is the one control where a wrong value is invisible in the output, so a model
    whose id or artifact does not name exactly one measured profile is called out instead of
    guessed at: "27b" in a name is a hint, not a promise about the architecture. */
+/* The measured profiles are per architecture, not per size: a 27B Qwen3.5 and a 27B Qwen3.8
+   share a number and nothing else, and sizing one on the other's cache cost is the error this
+   view exists to prevent. So a name matches only when it carries its family as well as its
+   size. */
+const PROFILE_FAMILIES = {'27b': ['qwen3.8', 'qwen38'], '35b': ['qwen3.6', 'qwen36']};
+
 export function profileFor(data, model) {
   if (!model) return null;
   const hay = `${model.id} ${model.artifact_real || model.artifact || ''}`.toLowerCase();
-  const hits = Object.keys(data.models).filter(k => hay.includes(k));
+  const hits = Object.keys(data.models).filter(k => {
+    if (!hay.includes(k)) return false;
+    const fams = PROFILE_FAMILIES[k];
+    return !fams || fams.some(f => hay.includes(f));
+  });
   return hits.length === 1 ? hits[0] : null;
 }
 
@@ -213,7 +223,17 @@ function bindFit() {
   $('#fit-reserve').oninput = e => { state.fit.reserve = Number(e.target.value); renderFit(); };
   $('#fit-size').oninput = () => renderFit();
   $('#fit-hf-go').onclick = hfProbe;
-  $('#fit-hf-repo').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); hfProbe(); } };
+  $('#fit-hf-repo').oninput = e => hfSoon(e.target.value);
+  $('#fit-hf-repo').onkeydown = e => {
+    // Enter sizes whatever is typed, so a pasted repo id needs no second step.
+    if (e.key === 'Enter') { e.preventDefault(); $('#fit-hf-hits').innerHTML = ''; hfProbe(); }
+    if (e.key === 'Escape') { $('#fit-hf-hits').innerHTML = ''; e.target.blur(); }
+  };
+  // Delegated, so re-rendering the list needs no handlers of its own.
+  $('#fit-hf-hits').onclick = e => {
+    const el = e.target.closest && e.target.closest('.hf-hit');
+    if (el) hfPick(el.dataset.repo);
+  };
 }
 
 /* The selected card, real or not. A real one brings the memory it has free right now; a
@@ -290,8 +310,60 @@ function weightsBytes(ui) {
   return onDisk || null;
 }
 
+/* Instant Hub search, the same endpoint the Convert tab's modal uses. The prober needs a repo id,
+   and typing one exactly is where a search term would otherwise have to become a guess. */
+let hfTimer = null, hfSeq = 0;
+
+function hfSoon(q) {
+  clearTimeout(hfTimer);
+  const box = $('#fit-hf-hits');
+  if (!q || q.trim().length < 3) { box.innerHTML = ''; return; }
+  hfTimer = setTimeout(() => hfSearch(q), 280);
+}
+
+async function hfSearch(q) {
+  const seq = ++hfSeq, box = $('#fit-hf-hits');
+  box.innerHTML = `<div class="note" style="padding:8px 2px">searching the Hub…</div>`;
+  let r;
+  try { r = await api('/api/convert/search?q=' + encodeURIComponent(q)); }
+  catch (e) {
+    if (seq === hfSeq) box.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    return;
+  }
+  // A slow answer for an older query must not paint over a newer one.
+  if (seq !== hfSeq) return;
+  const hits = r.hits || [];
+  if (!hits.length) {
+    box.innerHTML = `<div class="note" style="padding:8px 2px">nothing on the Hub for
+      “${esc(q)}”${r.error ? ' — ' + esc(r.error) : ''}</div>`;
+    return;
+  }
+  box.innerHTML = hits.map(h => `<div class="hf-hit" data-repo="${esc(h.id)}">
+      <span class="r">${esc(h.id)}</span>
+      <span class="m">${h.gguf === 0 ? 'GGUF · ' : ''}♥ ${count(h.likes)} ·
+        ${count(h.downloads)} dl</span>
+    </div>`).join('') +
+    `<div class="note" style="padding:4px 2px 8px">pick one to size its files</div>`;
+}
+
+function count(n) {
+  n = Number(n) || 0;
+  return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n);
+}
+
+function hfPick(repo) {
+  $('#fit-hf-repo').value = repo;
+  $('#fit-hf-hits').innerHTML = '';
+  hfProbe();
+}
+
 async function hfProbe() {
   const ui = state.fit;
+  // Anything typed and not yet acted on is stale once the probe runs: clear it so a slow search
+  // answer cannot paint over the result, and so the list does not sit next to a table for a
+  // repo it does not describe.
+  clearTimeout(hfTimer);
+  $('#fit-hf-hits').innerHTML = '';
   const repo = $('#fit-hf-repo').value.trim();
   if (!repo) return;
   if (!ui.data) {
@@ -516,6 +588,11 @@ function renderHfOut() {
     : `<div class="note" style="padding:10px 0 4px">${esc(ui.hfRepo)} · ${hwCount(hf)}, sizes
         read from the Hub — only the weights size is taken from a repo, the cache cost is still
         ${esc((ui.data.models[ui.profile] || {}).label || ui.profile)}</div>
+      ${profileFor(ui.data, {id: ui.hfRepo}) ? '' : `<div class="warn-msg" style="margin:8px 0 10px">
+        <b>No measured profile matches this name.</b> These files are sized on
+        ${esc((ui.data.models[ui.profile] || {}).label || ui.profile)}: the cache cost and the
+        context that fits are that architecture's, not this repo's. Change the profile above if
+        the name is deceiving.</div>`}
       <table><thead><tr><th class="l">Quant</th><th class="l">File</th><th>Weights</th>
         <th>Max context</th><th>Margin</th></tr></thead><tbody>
       ${hf.slice(0, 60).map(f => hfRow(ui, f)).join('')}</tbody></table>`;
