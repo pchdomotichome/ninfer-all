@@ -138,8 +138,11 @@ globalThis.document = {querySelector: s => {
 }};
 
 // Every path loadFit asks for, so a new one fails loudly here instead of 404ing in the browser.
+// The endpoint adds the cards from the panel's config, so the fixture does too.
+const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+data.cards = [{name: 'RTX 5090', mib: 32768}, {name: 'RTX PRO 6000 Blackwell', mib: 98304}];
 const fixtures = {
-  '/api/fit/data': JSON.parse(fs.readFileSync(dataPath, 'utf8')),
+  '/api/fit/data': data,
   '/api/router/catalog': {models: [
     {id: 'qwen38-27b-iq3s', artifact: '/m/Qwen3.8-27B-IQ3_S.ninfer',
      flags: {spec: 'mtp', 'draft-tokens': '3', 'max-context': '131072'}},
@@ -175,7 +178,19 @@ eq('the default card is the one with room', nodes.get('#fit-gpu').value, '1');
 // The artifact's own size, in MiB, rather than the profile's 19.59 GiB reference quant.
 ok('the artifact size on disk is used', out.includes('12,288 MiB'));
 
+ok('the cards that are not here are offered', nodes.get('#fit-gpu').innerHTML.includes('RTX 5090'));
+
+// A projected card: it has no free memory to report, only its own, and the view has to say both
+// that the fit is real for it and that nothing else about it is.
+core.state.fit.gpu = 'card:RTX 5090';
+await fit.loadFit();
+const sim = nodes.get('#fit-out').innerHTML;
+ok('a projected card shows its own room', sim.includes('Room on RTX 5090'));
+ok('and its figure is the card minus the reserve', sim.includes('31.00 GiB'));
+ok('and it is called out as not in this box', sim.includes('is not in this box'));
+
 // Nothing selected: the box still has to be worth looking at, which is what was reported empty.
+core.state.fit.gpu = 1;
 core.state.fit.open = '';
 await fit.loadFit();
 const bare = nodes.get('#fit-out').innerHTML;

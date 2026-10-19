@@ -630,18 +630,30 @@ class API:
 
     def fit_data(self) -> tuple[int, dict]:
         """
-        The measured constants the Fit view computes with.
+        The measured constants the Fit view computes with, plus the cards this box does not have.
 
-        Copied from docs/config-calculator.html, not derived here: the panel measures
-        nothing, it only combines what was measured. test_fit.py holds the two together.
+        The constants are copied from docs/config-calculator.html, not derived here: the panel
+        measures nothing, it only combines what was measured, and test_fit.py holds the two
+        together. The cards come from this panel's own config instead of that file, so the copy
+        stays exactly that -- a copy -- and adding a card cannot make it disagree with the page.
         """
         path = HERE / "fit-data.json"
         try:
-            return 200, json.loads(path.read_text())
+            data = json.loads(path.read_text())
         except OSError as err:
             return 500, {"error": f"fit-data.json is missing: {err}"}
         except json.JSONDecodeError as err:
             return 500, {"error": f"fit-data.json is not JSON: {err}"}
+        cards = []
+        for c in self.cfg.get("fit", {}).get("cards", []):
+            try:
+                mib = int(c.get("mib", 0))
+            except (TypeError, ValueError):
+                continue
+            if c.get("name") and mib > 0:
+                cards.append({"name": str(c["name"]), "mib": mib})
+        data["cards"] = cards
+        return 200, data
 
     def _host_resources(self) -> dict:
         """
@@ -918,6 +930,24 @@ class API:
     GGUF_PREFIXES = ("IQ3_XXS", "IQ3_XS", "IQ3_S", "IQ2_XXS", "IQ2_S", "IQ1_M",
                      "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S",
                      "Q4_0", "Q3_K_M", "Q3_K_S", "Q3_K_L", "Q2_K", "BF16", "F16")
+    # A quantisation token as it appears in a filename -- Q4_K_M, IQ3_XXS, BF16, and Unsloth's
+    # dynamic UD-Q2_K_XL. The tuple above only orders the ones this lab happens to use; this
+    # recognises the rest by shape, so an unlisted quant keeps its name instead of being filed as
+    # "otro" (which is what a UD- quant did), and it matches a token instead of a substring of the
+    # whole path, so a directory cannot label someone else's file.
+    GGUF_QUANT = re.compile(r"(?:UD-)?(?:MXFP|IQ|TQ|BF|Q|F)\d+(?:_[0-9A-Z]+)*", re.I)
+
+    def _quant_of(self, path: str) -> str | None:
+        """The quant token of a file, or None.
+
+        The last token of the name wins: it sits at the end of a name, and a repo that prefixes
+        its files with one (Q4_K_M/model-f16.gguf) means the trailing one. With no token in the
+        name the whole path is searched, since some repos put it in the directory instead.
+        """
+        name = path.rsplit("/", 1)[-1]
+        found = self.GGUF_QUANT.findall(name) or self.GGUF_QUANT.findall(path)
+        return found[-1].upper() if found else None
+
     _HF_TIMEOUT = 20.0
     _HF_BASE = "https://huggingface.co/api/models"
 
@@ -981,28 +1011,41 @@ class API:
             pass
         return None
 
-    def hf_ggufs(self, model: str) -> list:
-        """A model's GGUFs, grouped by quantisation; mmproj/mtp separately."""
+    def hf_ggufs(self, model: str, with_artifacts: bool = False) -> list:
+        """A model's GGUFs, grouped by quantisation; mmproj/mtp separately.
+
+        with_artifacts also lists the repo's .ninfer files, which is what the Fit view asks for:
+        it sizes a published artifact exactly as it sizes a GGUF, since only the byte count
+        matters at that point. Off by default, because the Convert tab offers this list as
+        conversion sources and a .ninfer is not one.
+        """
         tree = self.hf_details(model)
         if not tree:
             return []
-        files = []
+        gguf, artefacts = [], []
         for f in tree:
             path = f.get("path") or f.get("rfilename") or ""
             if path.endswith(".gguf"):
-                files.append({"path": path, "size": f.get("size", 0)})
+                gguf.append({"path": path, "size": f.get("size", 0)})
+            elif with_artifacts and path.endswith(".ninfer"):
+                artefacts.append({"path": path, "size": f.get("size", 0)})
         byq: dict = {"__mmproj": [], "__mtp": [], "__otro": []}
-        for f in files:
-            mid = f["path"].lower()
-            if "mmproj" in mid:
+        for f in gguf:
+            name = f["path"].lower().rsplit("/", 1)[-1]
+            if "mmproj" in name:
                 byq["__mmproj"].append(f)
-            elif mid.startswith("mtp") or "-mtp." in mid:
+            elif name.startswith("mtp") or "-mtp." in name:
                 byq["__mtp"].append(f)
             else:
-                q = next((k for k in self.GGUF_PREFIXES if k.lower() in mid), None)
-                byq.setdefault(q if q else "__otro", []).append(f)
-        groups = [{"quant": k, **f} for k in self.GGUF_PREFIXES for f in byq.get(k, [])]
+                byq.setdefault(self._quant_of(f["path"]) or "__otro", []).append(f)
+        known = [k for k in self.GGUF_PREFIXES if k in byq]
+        extra = sorted(k for k in byq if k not in known and not k.startswith("__"))
+        groups = [{"quant": k, **f} for k in known + extra for f in byq[k]]
         groups += [{"quant": k, **f} for k in ("__mmproj", "__mtp", "__otro") for f in byq[k]]
+        # A published .ninfer, last and largest first. No parsed quant: the artifact's own name is
+        # what a recipe points at, so that is the label, rather than a truncation of it.
+        groups += [{"quant": None, "kind": "ninfer", **f}
+                   for f in sorted(artefacts, key=lambda x: -x["size"])]
         return groups
 
     def hf_inbox(self, model: str) -> Path:
@@ -1939,7 +1982,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/convert/details":
             return self._json(self.api.hf_details(query.get("model", [""])[0]))
         if path == "/api/convert/ggufs":
-            return self._json(self.api.hf_ggufs(query.get("model", [""])[0]))
+            return self._json(self.api.hf_ggufs(query.get("model", [""])[0],
+                                                with_artifacts=query.get("ninfer", [""])[0] == "1"))
         if path == "/api/convert/download":
             st = self.api.hf_download_state(query.get("run_id", [""])[0])
             return self._json(st if st else {"error": "there is no such download"},

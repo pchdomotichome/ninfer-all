@@ -216,6 +216,16 @@ function bindFit() {
   $('#fit-hf-repo').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); hfProbe(); } };
 }
 
+/* The selected card, real or not. A real one brings the memory it has free right now; a
+   projected one brings its whole memory, which is all a card that is not here can bring. */
+function gpuFor(ui, data, key) {
+  const real = (ui.gpus || []).find(g => String(g.index) === String(key));
+  if (real) return {...real, simulated: false};
+  const card = (data.cards || []).find(c => 'card:' + c.name === key);
+  return card ? {index: card.name, name: card.name, mem_total_mib: card.mib, mem_used_mib: 0,
+                 simulated: true} : null;
+}
+
 function fillControls(data) {
   const ui = state.fit;
   $('#fit-src').innerHTML = (ui.catalog.length
@@ -246,13 +256,22 @@ function fillControls(data) {
   $('#fit-kv').value = ui.kv;
   ui.kv = $('#fit-kv').value;
 
-  $('#fit-gpu').innerHTML = ui.gpus.length
-    ? ui.gpus.map(g => `<option value="${g.index}">GPU ${g.index} · ${esc(g.name)} · ${
-        giB((g.mem_total_mib - g.mem_used_mib) * MIB)} free</option>`).join('')
-    : '<option value="">no GPU</option>';
-  if (ui.gpu !== undefined && ui.gpus.some(g => String(g.index) === String(ui.gpu))) {
-    $('#fit-gpu').value = ui.gpu;
-  }
+  // Two groups, because they answer different questions: the cards in this box, where free
+  // memory is what is really available, and the ones that are not.
+  const cards = data.cards || [];
+  $('#fit-gpu').innerHTML =
+    (ui.gpus.length
+      ? `<optgroup label="This box">` + ui.gpus.map(g =>
+          `<option value="${g.index}">GPU ${g.index} · ${esc(g.name)} · ${
+            giB((g.mem_total_mib - g.mem_used_mib) * MIB)} free</option>`).join('') + `</optgroup>`
+      : '<option value="">no GPU</option>') +
+    (cards.length
+      ? `<optgroup label="Not this box — memory only">` + cards.map(c =>
+          `<option value="card:${esc(c.name)}">${esc(c.name)} · ${giB(c.mib * MIB)}</option>`)
+          .join('') + `</optgroup>`
+      : '');
+  // An unknown value leaves the select on its first option, which is the intended fallback.
+  $('#fit-gpu').value = ui.gpu;
   ui.gpu = $('#fit-gpu').value;
 
   if (!ui.ctx) ui.ctx = 32768;
@@ -283,7 +302,8 @@ async function hfProbe() {
   $('#fit-hf-out').innerHTML = '<div class="note" style="padding:10px 0 4px">reading the Hub…</div>';
   try {
     // Only the weights size comes from the repo. The cache cost never does: it is the profile's.
-    ui.hf = await api(`/api/convert/ggufs?model=${encodeURIComponent(repo)}`);
+    // ninfer=1 also lists the repo's .ninfer artifacts, which size exactly like a GGUF here.
+    ui.hf = await api(`/api/convert/ggufs?model=${encodeURIComponent(repo)}&ninfer=1`);
     ui.hfRepo = repo;
   } catch (e) {
     ui.hf = {error: e.message};
@@ -303,7 +323,7 @@ function renderFit() {
   const kv = ui.kv, specKey = ui.spec || Object.keys(profile.spec)[0];
   const ctx = Math.max(1, Number(ui.ctx) || 1);
   const reserve = Math.max(0, Number(ui.reserve) || 0) * MIB;
-  const gpu = (ui.gpus || []).find(g => String(g.index) === String(ui.gpu));
+  const gpu = gpuFor(ui, data, ui.gpu);
   const cur = (ui.catalog || []).find(m => m.id === ui.open);
   const wb = weightsBytes(ui);
   const asked = cur && Number((cur.flags || {})['max-context'] || 0);
@@ -316,6 +336,12 @@ function renderFit() {
       <b>${esc(profile.label || ui.profile)}</b>. The cache cost below — the largest term, and the
       one that decides the verdict — is this profile's architecture: check it is the same before
       trusting the answer.`);
+  }
+  if (gpu && gpu.simulated) {
+    warn.push(`<b>${esc(gpu.name)} is not in this box.</b> Its memory is the card's own, so the
+      verdict and the context that fits are real for it. Nothing else is: the room assumes
+      nothing else runs on the card, and the decode and accept figures below stay the ones
+      measured here, because a kernel route is per card.`);
   }
   if (!gpu) {
     out.innerHTML = `<div class="err">No GPU. The panel reads nvidia-smi; with no card there is
@@ -393,9 +419,12 @@ function renderFit() {
       <div class="tile"><div class="k">Cache per token</div>
         <div class="v">${per === null ? '—' : toks(per) + ' B'}</div>
         <div class="s">${esc(kv)} · ${giB(b.kvBytes)} at ${toks(atPage)} tok</div></div>
-      <div class="tile"><div class="k">Free on GPU ${esc(gpu.index)}</div>
+      <div class="tile"><div class="k">${gpu.simulated ? 'Room on' : 'Free on GPU'} ${
+        esc(gpu.simulated ? gpu.name : gpu.index)}</div>
         <div class="v">${giB(freeVram)}</div>
-        <div class="s">of ${giB(gpu.mem_total_mib * MIB)} · keeping ${miB(reserve)} back</div>
+        <div class="s">${gpu.simulated
+          ? `the card's whole memory · keeping ${miB(reserve)} back`
+          : `of ${giB(gpu.mem_total_mib * MIB)} · keeping ${miB(reserve)} back`}</div>
         <div class="bar"><i style="width:${Math.min(100, 100 * freeVram / (gpu.mem_total_mib * MIB))}%;
           background:var(--teal)"></i></div></div>
     </div>
@@ -484,24 +513,41 @@ function renderHfOut() {
   if (!hf) return;
   $('#fit-hf-out').innerHTML = hf.error
     ? `<div class="err">${esc(hf.error)}</div>`
-    : `<div class="note" style="padding:10px 0 4px">${esc(ui.hfRepo)} · ${
-        hf.length} GGUF files, sizes read from the Hub — only the weights size is taken from a
-        repo, the cache cost is still ${esc((ui.data.models[ui.profile] || {}).label || ui.profile)}</div>
+    : `<div class="note" style="padding:10px 0 4px">${esc(ui.hfRepo)} · ${hwCount(hf)}, sizes
+        read from the Hub — only the weights size is taken from a repo, the cache cost is still
+        ${esc((ui.data.models[ui.profile] || {}).label || ui.profile)}</div>
       <table><thead><tr><th class="l">Quant</th><th class="l">File</th><th>Weights</th>
         <th>Max context</th><th>Margin</th></tr></thead><tbody>
       ${hf.slice(0, 60).map(f => hfRow(ui, f)).join('')}</tbody></table>`;
 }
 
+/* "15 GGUF files and 2 .ninfer artifacts" -- the two are listed together because this view only
+   needs their size, but they are not the same thing to a converter. */
+function hwCount(files) {
+  const other = files.filter(f => f.kind === 'ninfer').length;
+  const gguf = files.length - other;
+  return `${gguf} GGUF file${gguf === 1 ? '' : 's'}` +
+    (other ? ` and ${other} .ninfer artifact${other === 1 ? '' : 's'}` : '');
+}
+
+/* A published artifact gets "artifact" rather than its own name repeated from the next column;
+   a GGUF the parser could not name gets the publisher's name rather than the internal "__otro". */
+function quantLabel(f) {
+  if (f.kind === 'ninfer') return 'artifact';
+  return f.quant && !f.quant.startsWith('__') ? f.quant
+    : f.path.split('/').pop().replace(/\.(gguf|ninfer)$/i, '').slice(0, 40);
+}
+
 function hfRow(ui, f) {
   const data = ui.data, profile = data.models[ui.profile];
-  const gpu = (ui.gpus || []).find(g => String(g.index) === String(ui.gpu));
+  const gpu = gpuFor(ui, data, ui.gpu);
   if (!gpu || !f.size) return '';
   const reserve = Math.max(0, Number(ui.reserve) || 0) * MIB;
   const usable = Math.max(0, (gpu.mem_total_mib - gpu.mem_used_mib) * MIB - reserve);
   const max = maxContext(data, profile, ui.spec, ui.kv, f.size, usable);
   const set = ui.ctx || 32768;
   const b = budget(data, profile, ui.spec, ui.kv, set, f.size, usable);
-  return `<tr><td class="l">${esc(f.quant)}</td>
+  return `<tr><td class="l">${esc(quantLabel(f))}</td>
     <td class="l muted">${esc(f.path.split('/').pop().slice(0, 46))}</td>
     <td>${giB(f.size)}</td>
     <td>${max === null ? '—' : toks(max)}</td>
