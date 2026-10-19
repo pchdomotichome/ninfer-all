@@ -1,14 +1,20 @@
 #include "models/qwen3_5/execution/ffn.h"
+#include "models/qwen3_5/execution/expert_runtime.h"
+#include "ops/sparse_moe/streamed.h"
 #include "models/qwen3_5/execution/rotation.h"
 
 #include "core/layout.h"
+#include "ninfer/ops/cast.h"
 #include "ninfer/ops/hadamard_transform.h"
+#include "ninfer/ops/moe_experts.h"
+#include "ninfer/ops/moe_route.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer/ops/residual_add.h"
 #include "ninfer/ops/silu_mul.h"
 
+#include <cstdint>
 #include <stdexcept>
 
 namespace ninfer::models::qwen3_5::execution {
@@ -68,9 +74,37 @@ void rotated_dense_ffn(const Tensor& hidden, const DenseParameters& p, Tensor& r
 std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t first,
                                 std::int32_t last, bool mtp, bool verify, bool wide_verification) {
     if (first <= 0 || last < first) { throw std::invalid_argument("FFN: invalid column interval"); }
+    if (const auto* streamed = std::get_if<StreamedMoeParameters>(&parameters)) {
+        std::size_t bytes = 0;
+        for (const std::int32_t tokens : {first, last}) {
+            bytes = std::max(bytes, ops::detail::sparse_moe_stream_workspace_bytes(
+                                        tokens, streamed->weights.routed_gate_up.qtype,
+                                        streamed->weights.routed_down.qtype));
+        }
+        // Small-T grows with the column count up to the prefill frontier.
+        for (std::int32_t tokens = first; tokens <= std::min(last, ops::detail::kSparseMoeSmallTMax);
+             ++tokens) {
+            bytes = std::max(bytes, ops::detail::sparse_moe_stream_workspace_bytes(
+                                        tokens, streamed->weights.routed_gate_up.qtype,
+                                        streamed->weights.routed_down.qtype));
+        }
+        return bytes;
+    }
     if (const auto* moe = std::get_if<ops::SparseMoeWeights>(&parameters)) {
         return ops::sparse_moe_workspace_capacity_bytes(moe->routed_gate_up.qtype,
                                                         moe->routed_down.qtype, first, last);
+    }
+    if (const auto* gguf = std::get_if<GgufMoeParameters>(&parameters)) {
+        // The router's ids, weights and shared gate, then the experts' own transient capacity, then
+        // the FP32 expert result and the BF16 copy the residual add takes. Sized for the interval's
+        // high end because neither Op takes a range.
+        const std::size_t tokens = static_cast<std::size_t>(last);
+        const std::size_t pairs  = tokens * static_cast<std::size_t>(gguf->top_k);
+        return ops::moe_route_workspace_bytes(last, gguf->banks.experts) +
+               ops::moe_experts_gguf_workspace_bytes(last) +
+               pairs * sizeof(std::int32_t) + pairs * sizeof(float) + tokens * sizeof(float) +
+               tokens * static_cast<std::size_t>(gguf->router.ne[0]) *
+                   (sizeof(float) + sizeof(std::uint16_t));
     }
     const auto& p = std::get<DenseParameters>(parameters);
     if (rotated_dense(p)) {
@@ -142,15 +176,47 @@ const Tensor* ffn_input_signs(const FfnParameters& parameters) {
 
 void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual,
          const ops::SparseMoeHints& hints, WorkspaceArena& workspace, cudaStream_t stream, bool mtp,
-         bool verify, InputBasis basis, bool wide_verification) {
+         bool verify, InputBasis basis, bool wide_verification, NativeExpertRuntime* experts) {
     auto scope         = workspace.scope();
     const auto columns = hidden.ne[1];
+    if (const auto* moe = std::get_if<StreamedMoeParameters>(&parameters)) {
+        if (experts == nullptr) { throw std::logic_error("streamed SparseMoe has no Program delivery service"); }
+        if (hidden.dtype != DType::BF16 || residual.dtype != DType::BF16 ||
+            hidden.ne[0] != 2048 || residual.ne[0] != 2048 || residual.ne[1] != columns ||
+            columns <= 0 || !hidden.is_contiguous() || !residual.is_contiguous()) {
+            throw std::invalid_argument("streamed SparseMoe needs contiguous BF16 [2048,T]");
+        }
+        auto& delivery = experts->layer(moe->delivery_layer);
+        delivery.check();
+        ops::detail::sparse_moe_stream(hidden, moe->weights, residual, delivery,
+                                       experts->local_layer(moe->delivery_layer), workspace, stream);
+        return;
+    }
     if (const auto* moe = std::get_if<ops::SparseMoeWeights>(&parameters)) {
         const auto storage =
             workspace.alloc_bytes(ffn_workspace_bytes(parameters, columns, columns));
         WorkspaceArena scratch(storage);
         ops::sparse_moe(hidden, *moe, ops::SparseMoeEpilogue::AddResidual, residual, hints, scratch,
                         stream);
+        return;
+    }
+    if (const auto* gguf = std::get_if<GgufMoeParameters>(&parameters)) {
+        const auto storage =
+            workspace.alloc_bytes(ffn_workspace_bytes(parameters, columns, columns));
+        WorkspaceArena scratch(storage);
+        const std::int32_t rows  = gguf->router.ne[0];
+        const std::int32_t top_k = gguf->top_k;
+        Tensor ids     = scratch.alloc(DType::I32, {top_k, columns});
+        Tensor weights = scratch.alloc(DType::FP32, {top_k, columns});
+        Tensor shared  = scratch.alloc(DType::FP32, {columns});
+        ops::moe_route(hidden, gguf->router, gguf->shared_gate, scratch, ids, weights, shared, stream);
+        // The experts write FP32; the residual is BF16, so the sum needs the cast in between. The
+        // native Op adds the residual itself because it fuses the whole block.
+        Tensor experts = scratch.alloc(DType::FP32, {rows, columns});
+        ops::moe_experts_gguf(hidden, ids, weights, shared, gguf->banks, scratch, experts, stream);
+        Tensor bf16 = scratch.alloc(DType::BF16, {rows, columns});
+        ops::cast_fp32_to_bf16(experts, bf16, stream);
+        ops::residual_add(bf16, residual, stream);
         return;
     }
     const auto& p = std::get<DenseParameters>(parameters);

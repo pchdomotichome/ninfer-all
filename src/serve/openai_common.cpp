@@ -149,8 +149,10 @@ OpenAIPromptCachePolicy parse_openai_prompt_cache_policy(const RequestJson& body
                         field);
         }
     };
-    require_string_hint("prompt_cache_key", 64U);
-    require_string_hint("safety_identifier", 64U);
+    // The Responses parser allows the longer context-cache session key, so a gateway that
+    // namespaces keys per user is not refused.
+    require_string_hint("prompt_cache_key", ninfer::kMaximumContextCacheSessionKeyBytes);
+    require_string_hint("safety_identifier", 128U);
     require_string_hint("user");
 
     if (body.contains("prompt_cache_retention") && !body.at("prompt_cache_retention").is_null()) {
@@ -296,6 +298,14 @@ Json model_json(const ModelDescription& model, std::int64_t created) {
                     {"status", model_status_json(model)}};
         if (!model.path.empty()) { out["path"] = model.path; }
         if (!model.aliases.empty()) { out["aliases"] = model.aliases; }
+        // The catalog knows this model's configured context before it is loaded, and a client that
+        // discovers models before its first request (an agent harness) needs the limit then.
+        if (model.max_model_len > 0) {
+            out["max_model_len"]  = model.max_model_len;
+            out["context_window"] = model.max_model_len;
+            out["context_length"] = model.max_model_len;
+            out["meta"]           = Json{{"n_ctx", model.max_model_len}};
+        }
         return out;
     }
     Json input = Json::array({"text"});

@@ -311,7 +311,10 @@ std::string usage_text(std::string_view program) {
         << "  --rope-yarn-factor <F>      YaRN at this fixed factor, 1..4, for every position "
            "(default: 1, native RoPE)\n"
         << "  --prefill-chunk <tokens>    multiple of " << kPrefillChunkAlignment
-        << " (default: " << kDefaultPrefillChunk << ")\n"
+        << " (default: the Engine's automatic chunk)\n"
+        << "  --expert-residency <device|host|disk>  routed MoE experts on the GPU (default), in "
+           "pinned host memory, or in the artifact files\n"
+        << "  --expert-cache-mib <N|auto> persistent device expert cache (default: auto)\n"
         << "  --kv-dtype <bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4>  KV cache storage "
            "(default: bf16)\n"
         << "  --fast-prefill-kernel       fast INT8-KV prompt kernel, wave-aligned chunks\n"
@@ -321,8 +324,9 @@ std::string usage_text(std::string_view program) {
         << "  --ngram-draft-tokens <n>   copy proposals 1..63; 0 disables (default: 15 with "
            "--spec, 0 without)\n"
         << "  --ngram-min-match <n>      copy admission 4..64 (default: 12)\n"
-        << "  --lm-head-draft             use the optimized proposal head; requires a speculative "
-           "backend\n"
+        << "  --lm-head-draft             use the optimized proposal head (the default when the "
+           "artifact stores one); requires a speculative backend\n"
+        << "  --full-draft-head           use the full output head for drafts\n"
         << "  --device <id>               CUDA device ordinal (default: 0)\n"
         << "  --no-cuda-graph             use eager decode\n"
         << "  --no-prefill-a8             full prefill tiles keep their A16 routes\n"
@@ -381,6 +385,25 @@ BenchOptions parse_args(int argc, char** argv) {
             options.prefill_chunk = parse_u32(value("--prefill-chunk"), "prefill-chunk");
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value("--kv-dtype"));
+        } else if (arg == "--expert-residency") {
+            const std::string residency = value("--expert-residency");
+            if (residency == "device") {
+                options.expert_residency = ExpertResidency::Device;
+            } else if (residency == "host") {
+                options.expert_residency = ExpertResidency::Host;
+            } else if (residency == "disk") {
+                options.expert_residency = ExpertResidency::Disk;
+            } else {
+                throw std::invalid_argument("--expert-residency must be device, host or disk");
+            }
+        } else if (arg == "--expert-cache-mib") {
+            const std::string mib = value("--expert-cache-mib");
+            if (mib == "auto") {
+                options.expert_cache_bytes.reset();
+            } else {
+                options.expert_cache_bytes = std::uint64_t(parse_u32(mib, "expert-cache-mib", true))
+                                             << 20;
+            }
         } else if (arg == "--fast-prefill-kernel") {
             options.fast_prefill_kernel = true;
         } else if (arg == "--spec") {
@@ -406,6 +429,8 @@ BenchOptions parse_args(int argc, char** argv) {
                 parse_u32(value("--ngram-min-match"), "ngram-min-match");
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
+        } else if (arg == "--full-draft-head") {
+            options.speculative.proposal_head = ProposalHead::Full;
         } else if (arg == "--device") {
             options.device = parse_nonnegative(value("--device"), "device");
         } else if (arg == "--no-cuda-graph") {
@@ -646,6 +671,7 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
         << " rope_yarn_factor=" << env.rope_yarn_factor << " prefill_chunk=" << env.prefill_chunk
         << " fast_prefill_kernel=" << (env.fast_prefill_kernel ? "on" : "off")
         << " kv_cache=" << kv_cache_name(env.kv_cache)
+        << " experts=" << expert_residency_name(env.expert_residency)
         << " spec=" << product::speculative_backend_name(env.speculative.backend)
         << " draft_tokens=" << env.speculative.draft_tokens
         << " ngram_draft_tokens=" << env.speculative.ngram_draft_tokens
@@ -770,6 +796,12 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "    \"prefill_chunk\": " << env.prefill_chunk << ",\n"
         << "    \"fast_prefill_kernel\": " << (env.fast_prefill_kernel ? "true" : "false") << ",\n"
         << "    \"kv_cache\": \"" << kv_cache_name(env.kv_cache) << "\",\n"
+        << "    \"expert_residency\": \"" << expert_residency_name(env.expert_residency) << "\",\n"
+        << "    \"expert_cache_bytes\": " << env.memory.expert_cache_bytes << ",\n"
+        << "    \"expert_routes\": " << env.experts.routes << ",\n"
+        << "    \"expert_hits\": " << env.experts.hits << ",\n"
+        << "    \"expert_admissions\": " << env.experts.admitted << ",\n"
+        << "    \"expert_transferred_bytes\": " << env.experts.transferred_bytes << ",\n"
         << "    \"speculative_backend\": \""
         << product::speculative_backend_name(env.speculative.backend) << "\",\n"
         << "    \"draft_tokens\": " << env.speculative.draft_tokens << ",\n"
@@ -948,6 +980,15 @@ std::string json_escape(std::string_view value) {
     return out;
 }
 
+std::string expert_residency_name(ExpertResidency residency) {
+    switch (residency) {
+    case ExpertResidency::Device: return "device";
+    case ExpertResidency::Host: return "host";
+    case ExpertResidency::Disk: return "disk";
+    }
+    return "unknown";
+}
+
 std::string kv_cache_name(KvCacheStorage storage) {
     switch (storage) {
     case KvCacheStorage::BFloat16:
@@ -974,6 +1015,8 @@ std::string kv_cache_name(KvCacheStorage storage) {
 
 std::string proposal_head_name(ProposalHead head) {
     switch (head) {
+    case ProposalHead::Auto:
+        return "auto";
     case ProposalHead::Full:
         return "full";
     case ProposalHead::Optimized:

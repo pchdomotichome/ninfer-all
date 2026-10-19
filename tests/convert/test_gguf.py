@@ -6,6 +6,7 @@ import torch
 
 gguf = pytest.importorskip("gguf")
 
+from tools.convert.sources.gguf import GGUFFile, write_gguf
 from tools.convert.sources.gguf_source import (
     GGUFSource,
     HFAliasSource,
@@ -15,6 +16,8 @@ from tools.convert.sources.gguf_source import (
     reorder_linear_attention_v_heads,
     standard_dense_name_map,
 )
+
+TYPE_Q8_0 = 8
 
 
 def _write_gguf(path, tensors: dict[str, np.ndarray]) -> None:
@@ -268,3 +271,49 @@ def test_qwen35_vision_name_map_has_composite_and_no_deepstack_surprises():
         qwen35_vision_name_map(
             1, hidden_size=8, patch_size=4, temporal_patch_size=3
         )
+
+
+def test_read_blocks_accepts_a_routed_expert_rank(tmp_path):
+    """A routed-expert tensor is rank 3 and its block matrix is not shape[0] rows.
+
+    ``blk.0.ffn_up_exps.weight`` is ``ne = (hidden, inter, expert)`` on disk and
+    reports ``shape == (expert, inter, hidden)``. Quantization runs along the
+    contiguous axis, so the block matrix is ``expert*inter`` rows of ``hidden``.
+    Reading ``shape[0]`` as the row count -- what this used to do, after
+    rejecting anything but rank 2 -- makes every expert slice fall outside the
+    tensor.
+    """
+    experts, inter, hidden = 2, 3, 64
+    rows = experts * inter
+    blocks_per_row = hidden // 32  # Q8_0
+
+    generator = np.random.default_rng(7)
+    blocks = generator.integers(0, 256, size=(rows, blocks_per_row, 34), dtype=np.uint8)
+    scales = generator.uniform(0.01, 0.02, size=(rows, blocks_per_row)).astype(np.float16)
+    blocks[:, :, :2] = scales.view(np.uint8).reshape(rows, blocks_per_row, 2)
+
+    path = tmp_path / "moe.gguf"
+    write_gguf(
+        path,
+        {"general.architecture": "qwen35moe"},
+        [("blk.0.ffn_up_exps.weight", (experts, inter, hidden), TYPE_Q8_0, blocks.tobytes())],
+    )
+
+    with GGUFFile(path) as gguf:
+        info = gguf.info("blk.0.ffn_up_exps.weight")
+        # info.shape is the row-major shape that was written; the file holds
+        # reversed(shape) as ne.
+        assert info.shape == (experts, inter, hidden)
+
+        whole = gguf.read_blocks("blk.0.ffn_up_exps.weight")
+        assert whole.shape == (rows, blocks_per_row * 34)
+        assert whole.tobytes() == blocks.tobytes()
+
+        # an expert is a contiguous row range, which is what block_source takes
+        expert = gguf.read_blocks("blk.0.ffn_up_exps.weight", inter, 2 * inter)
+        assert expert.shape == (inter, blocks_per_row * 34)
+        assert expert.tobytes() == blocks[inter : 2 * inter].tobytes()
+
+        # the row count is experts*inter, so a range one row past it is rejected
+        with pytest.raises(ValueError, match="outside"):
+            gguf.read_blocks("blk.0.ffn_up_exps.weight", 0, rows + 1)

@@ -22,6 +22,12 @@ int q8_a16_conformance() {
     failures += ninfer::test::linear_pair::run_q8_a16_shape(
         "Q8_A16 LinearPair", ShapeCase{5120, 431U, kK5120RouteStarts, kK5120RouteInteriors});
 
+    // The 4096-hidden dense model. Its plan takes kLayoutAgnosticRoutes, which is the same table as
+    // kK5120Routes, so the boundaries are the same; the width is new and was never run here, and it
+    // is the one the GDN mixer of that model uses.
+    failures += ninfer::test::linear_pair::run_q8_a16_shape(
+        "Q8_A16 LinearPair", ShapeCase{4096, 435U, kK5120RouteStarts, kK5120RouteInteriors});
+
     // These track kK2048Routes. The eight DualSplitKMedium starts that used to sit between 81 and
     // 193 are gone: on sm_86 that whole family is one kernel, and 65..384 is now a single
     // ConcatMmaR32C64 band. The widths themselves stay below as interiors, so the coverage that

@@ -54,6 +54,8 @@ struct ModelStatusSnapshot {
     std::vector<std::string> aliases;
     ModelState state = ModelState::Unloaded;
     std::vector<std::string> arguments;
+    // The configured --max-context, known from the catalog before the model is loaded.
+    std::uint32_t max_context = 0;
     // The last load or wake failed; cleared by the next success.
     bool failed = false;
     std::string last_error;
@@ -99,8 +101,11 @@ public:
 
     [[nodiscard]] GenerationService& service() override { return *service_; }
 
+    // The Engine has to support suspend for the model to be able to sleep: --model-suspend does
+    // not make a core that cannot suspend (Gemma 4) able to, and a refusal repeated for the whole
+    // room timeout would keep the router from ever making room.
     [[nodiscard]] bool suspendable() const override {
-        return service_->engine_options().suspend.enabled;
+        return service_->engine_options().suspend.enabled && service_->residency().enabled;
     }
 
     void suspend() override { (void)service_->suspend(true); }

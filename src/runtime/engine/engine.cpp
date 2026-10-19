@@ -2,6 +2,7 @@
 #include "text/structured_output.h"
 
 #include "core/device.h"
+#include "core/gpu_clock_floor.h"
 #include "core/nvtx.h"
 #include "core/startup.h"
 #include "runtime/contract/sampling.h"
@@ -11,6 +12,7 @@
 #include "runtime/engine/context_cache/hybrid_resource_manager.h"
 #include "runtime/engine/diagnostics.h"
 #include "runtime/engine/model_instance.h"
+#include "runtime/engine/gemma4_core.h"
 #include "runtime/engine/qwen4_exp_core.h"
 #include "runtime/engine/slot_spill_guard.h"
 
@@ -36,6 +38,16 @@
 namespace ninfer {
 namespace {
 
+// Gemma 4 and Flash-Next keep context caches of their own, which the checkpoint catalog's options
+// configure; the hybrid prefix cache, the server's default, belongs to the Qwen3.5 Program.
+EngineOptions with_family_context_cache(EngineOptions options) {
+    if (runtime::is_gemma4_artifact(options.artifact_path) ||
+        runtime::is_qwen4_exp_artifact(options.artifact_path)) {
+        options.context_cache.mode = ContextCacheMode::Legacy;
+    }
+    return options;
+}
+
 DeviceContext initialize_device(const EngineOptions& options) {
     StartupPhaseScope phase(options.startup_observer, StartupPhase::CudaInitialize);
     if (options.devices.empty()) {
@@ -43,21 +55,27 @@ DeviceContext initialize_device(const EngineOptions& options) {
         phase.complete();
         return device;
     }
-#ifdef _WIN32
-    // Multi-GPU execution is a Linux feature. Repeating one device id still works on Windows, which
-    // exercises the whole stage path on a single card.
-    for (const int id : options.devices) {
-        if (id != options.devices.front()) {
-            throw std::invalid_argument(
-                "multi-GPU execution is supported on Linux only; repeat one device id "
-                "(for example --devices 0,0) to test the pipeline on a single GPU");
-        }
-    }
-#endif
     DeviceContext device{std::span<const int>(options.devices)};
     phase.complete();
     return device;
 }
+
+// One diagnostic line per device that EngineOptions::gpu_clock_floor_mhz was asked for.
+void report_gpu_clock_floor(const EngineOptions& options, const GpuClockFloor& floor) {
+    for (const std::string& line : floor.report()) {
+        runtime::publish_diagnostic(
+            options.diagnostic_observer,
+            floor.complete() ? DiagnosticLevel::Info : DiagnosticLevel::Warning,
+            "gpu clock floor: %s", line.c_str());
+    }
+}
+
+// A generation's hold on the clock floor beside its reference to the Engine, both kept until its
+// handle ends; the hold ends first.
+struct HeldEngine {
+    std::shared_ptr<void> engine;
+    std::shared_ptr<void> clock_floor;
+};
 
 runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefaults& defaults,
                                                         SamplingMode mode, RequestOptions options) {
@@ -257,14 +275,32 @@ public:
     using ScoringCore = runtime::CausalScoreCore<runtime::ModelInstance>;
     // Qwen3.8-Flash-Next: its own model family and core, which serves generation and scoring.
     using Qwen4ExpCore = runtime::Qwen4ExpCore;
+    // Gemma 4: its own model family and core, which serves generation and scoring.
+    using Gemma4Core = runtime::Gemma4Core;
     using Core = std::variant<std::monostate, std::unique_ptr<GenerationCore>,
                               std::unique_ptr<HybridGenerationCore>, std::unique_ptr<ScoringCore>,
-                              std::unique_ptr<Qwen4ExpCore>>;
+                              std::unique_ptr<Qwen4ExpCore>, std::unique_ptr<Gemma4Core>>;
 
     explicit Impl(EngineOptions engine_options)
-        : options(runtime::normalize_engine_options(std::move(engine_options))),
-          device(initialize_device(options)) {
+        : options(runtime::normalize_engine_options(
+              with_family_context_cache(std::move(engine_options)))),
+          device(initialize_device(options)),
+          clock_floor(device.device_ids(), options.gpu_clock_floor_mhz) {
+        report_gpu_clock_floor(options, clock_floor);
         nvtx::ScopedRange load_range(nvtx::Name::EngineLoad, nvtx::Category::Runtime);
+        if (runtime::is_gemma4_artifact(options.artifact_path)) {
+            auto constructed    = runtime::construct_gemma4(options, device);
+            gemma               = std::move(constructed.instance);
+            load                = std::move(constructed.load);
+            load.cuda_sync_mode = device.sync_mode();
+            model_metadata      = std::move(constructed.model_metadata);
+            sampling_defaults   = gemma->frontend.sampling_defaults();
+            StartupPhaseScope finalize_phase(options.startup_observer,
+                                             StartupPhase::EngineFinalize);
+            core = std::make_unique<Gemma4Core>(*gemma, device, options);
+            finalize_phase.complete();
+            return;
+        }
         if (runtime::is_qwen4_exp_artifact(options.artifact_path)) {
             auto constructed    = runtime::construct_qwen4_exp(options, device);
             flash               = std::move(constructed.instance);
@@ -277,6 +313,18 @@ public:
             core = std::make_unique<Qwen4ExpCore>(*flash, device, options);
             finalize_phase.complete();
             return;
+        }
+        if (options.hybrid_experts.dma_share != HybridExpertOptions{}.dma_share ||
+            options.hybrid_experts.dma_share_auto ||
+            options.hybrid_experts.cpu_threads != 0 || options.hybrid_experts.mapped_misses ||
+            options.hybrid_experts.tail_skip_rank != 0 ||
+            options.hybrid_experts.prefill_buffers != 1 || options.hybrid_experts.adaptive_cache ||
+            !options.hybrid_experts.routing_profile.empty() ||
+            !options.hybrid_experts.record_profile.empty()) {
+            throw std::invalid_argument("hybrid expert options require native Qwen3.8-Flash-Next host experts");
+        }
+        if (options.speculative.draft_min_p != 0) {
+            throw std::invalid_argument("--draft-min-p requires Qwen3.8-Flash-Next MTP");
         }
         auto constructed  = runtime::construct_model(options, device);
         // construct_model returns the resolved options for this instance. Anything the model had
@@ -415,17 +463,20 @@ public:
 
     // The model's frontend and prompt capacity, whichever family it is.
     [[nodiscard]] const models::qwen3_5::Frontend& frontend() const {
-        return flash ? flash->frontend : active->frontend;
+        return gemma ? gemma->frontend : flash ? flash->frontend : active->frontend;
     }
 
     [[nodiscard]] std::uint32_t capacity() const {
-        return flash ? flash->capacity : active->capacity;
+        return gemma ? gemma->capacity : flash ? flash->capacity : active->capacity;
     }
 
     EngineOptions options;
     DeviceContext device;
+    // Held by each generation and scoring call (GpuClockFloor::hold).
+    GpuClockFloor clock_floor;
     std::unique_ptr<runtime::ModelInstance> active;
     std::unique_ptr<runtime::Qwen4ExpInstance> flash;
+    std::unique_ptr<runtime::Gemma4Instance> gemma;
     LoadSummary load;
     ModelMetadata model_metadata;
     ModelSamplingDefaults sampling_defaults;
@@ -607,11 +658,13 @@ std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32
     }
     PreparedPrompt prompt      = prepare_tokens(std::move(tokens), false);
     const std::size_t expected = prompt.summary().prompt_tokens - first_target;
+    const std::shared_ptr<void> clock_floor = impl_->clock_floor.hold();
     std::vector<float> result  = std::visit(
         [&](auto& core) -> std::vector<float> {
             using CoreState = std::remove_cvref_t<decltype(core)>;
             if constexpr (std::is_same_v<CoreState, std::unique_ptr<Impl::ScoringCore>> ||
-                          std::is_same_v<CoreState, std::unique_ptr<Impl::Qwen4ExpCore>>) {
+                          std::is_same_v<CoreState, std::unique_ptr<Impl::Qwen4ExpCore>> ||
+                          std::is_same_v<CoreState, std::unique_ptr<Impl::Gemma4Core>>) {
                 return core->score(std::move(prompt.impl_->value), first_target);
             } else {
                 throw std::logic_error("Engine scoring core is unavailable");
@@ -700,11 +753,17 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
             } else if constexpr (std::is_same_v<CoreState, std::unique_ptr<Impl::ScoringCore>>) {
                 throw std::logic_error("Engine generation core is unavailable");
             } else {
+                // Held before the core can start the request, so its prompt runs at the floor.
+                std::shared_ptr<void> keep_alive = impl_;
+                if (auto clock_floor = impl_->clock_floor.hold()) {
+                    keep_alive = std::make_shared<HeldEngine>(
+                        HeldEngine{.engine = impl_, .clock_floor = std::move(clock_floor)});
+                }
                 auto submission = core->submit(std::move(prompt.impl_->value), prompt_summary,
                                                prepare_seconds, std::move(resolved_options),
                                                consumer_mode, observation, pending_deadline);
                 return GenerationHandle(std::make_unique<GenerationHandle::Impl>(
-                    impl_, std::move(submission), resolved_sampling));
+                    std::move(keep_alive), std::move(submission), resolved_sampling));
             }
         },
         impl_->core);
@@ -739,7 +798,7 @@ std::uint32_t Engine::concurrent_output_budget(const PreparedPrompt& prompt) con
         throw std::logic_error("concurrent_output_budget requires a Generation Engine");
     }
     if (prompt.impl_ == nullptr) { throw std::invalid_argument("PreparedPrompt is empty"); }
-    if (impl_->flash) {
+    if (impl_->flash || impl_->gemma) {
         // One sequence at a time: the whole window past the prompt.
         const std::uint32_t prompt_tokens = prompt.impl_->summary.prompt_tokens;
         return prompt_tokens >= impl_->capacity() ? 0U : impl_->capacity() - prompt_tokens + 1U;

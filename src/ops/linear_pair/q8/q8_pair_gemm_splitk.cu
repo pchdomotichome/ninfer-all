@@ -60,18 +60,18 @@ struct Q8PairExactTEpilogue {
     }
 };
 
-template <int ActiveCols>
+template <int Hidden, int ActiveCols>
 void launch_active_cols(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
                         Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
     constexpr int TileCols =
         ActiveCols <= 8 ? 8 : (ActiveCols <= 16 ? 16 : (ActiveCols <= 24 ? 24 : 32));
-    using Geometry           = Q8LinearGeometry<2 * kRows, kHidden>;
+    using Geometry           = Q8LinearGeometry<2 * kRows, Hidden>;
     using Schedule           = Q8KSplitDefaultSchedule<TileCols, ActiveCols>;
     const auto* first_codes  = static_cast<const std::uint8_t*>(first_weight.qdata);
     const auto* first_scales = static_cast<const std::uint8_t*>(first_weight.scales);
-    if (static_cast<const std::uint8_t*>(second_weight.qdata) != first_codes + kRows * kHidden ||
+    if (static_cast<const std::uint8_t*>(second_weight.qdata) != first_codes + kRows * Hidden ||
         static_cast<const std::uint8_t*>(second_weight.scales) !=
-            first_scales + kRows * (kHidden / 32) * 2) {
+            first_scales + kRows * (Hidden / 32) * 2) {
         throw std::invalid_argument("Q8 exact pair requires adjacent K/V row views");
     }
 
@@ -84,23 +84,27 @@ void launch_active_cols(const Tensor& x, const Weight& first_weight, const Weigh
         Q8PairExactTRows{});
 }
 
-template <std::size_t... Offsets>
+template <int Hidden, std::size_t... Offsets>
 constexpr auto make_launchers(std::index_sequence<Offsets...>) {
     return std::array<PairLauncher, sizeof...(Offsets)>{
-        &launch_active_cols<kFirstExactT + static_cast<int>(Offsets)>...};
+        &launch_active_cols<Hidden, kFirstExactT + static_cast<int>(Offsets)>...};
 }
 
-constexpr auto kLaunchers =
-    make_launchers(std::make_index_sequence<kLastExactT - kFirstExactT + 1>{});
+// One table per input width: the tables are constexpr, so the width cannot arrive at runtime.
+template <int Hidden>
+struct PairLaunchers {
+    static constexpr auto exact =
+        make_launchers<Hidden>(std::make_index_sequence<kLastExactT - kFirstExactT + 1>{});
+};
 
-template <int TileCols, int KSplits, int NGroups, int MinBlocks>
+template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks>
 void launch_medium(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
                    Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
     const auto* first_codes  = static_cast<const std::uint8_t*>(first_weight.qdata);
     const auto* first_scales = static_cast<const std::uint8_t*>(first_weight.scales);
-    if (static_cast<const std::uint8_t*>(second_weight.qdata) != first_codes + kRows * kHidden ||
+    if (static_cast<const std::uint8_t*>(second_weight.qdata) != first_codes + kRows * Hidden ||
         static_cast<const std::uint8_t*>(second_weight.scales) !=
-            first_scales + kRows * (kHidden / 32) * 2) {
+            first_scales + kRows * (Hidden / 32) * 2) {
         throw std::invalid_argument("Q8 medium pair requires adjacent K/V row views");
     }
     const PairOutput output{static_cast<__nv_bfloat16*>(first_out.data),
@@ -120,27 +124,43 @@ void q8_pair_splitk_exact_t_launch(const Tensor& x, const Weight& first_weight,
                                                second_out, stream);
         return;
     }
-    if (x.ne[0] != kHidden || x.ne[1] < kFirstExactT || x.ne[1] > kLastExactT ||
-        first_out.ne[0] != kRows || first_out.ne[1] != x.ne[1] || second_out.ne[0] != kRows ||
+    if (x.ne[1] < kFirstExactT || x.ne[1] > kLastExactT || first_out.ne[0] != kRows ||
+        first_out.ne[1] != x.ne[1] || second_out.ne[0] != kRows ||
         second_out.ne[1] != x.ne[1]) {
-        throw std::invalid_argument("Q8 exact pair requires [1024,2048] and T=2..32");
+        throw std::invalid_argument("Q8 exact pair requires [1024,K] and T=2..32");
     }
-    kLaunchers[x.ne[1] - kFirstExactT](x, first_weight, second_weight, first_out, second_out,
-                                       stream);
+    // The input width picks the table; a width with none is refused by name rather than run at
+    // another model's.
+    const std::size_t index = static_cast<std::size_t>(x.ne[1] - kFirstExactT);
+    switch (x.ne[0]) {
+    case 2048:
+        PairLaunchers<2048>::exact[index](x, first_weight, second_weight, first_out, second_out,
+                                          stream);
+        break;
+    case 4096:
+        PairLaunchers<4096>::exact[index](x, first_weight, second_weight, first_out, second_out,
+                                          stream);
+        break;
+    default:
+        throw std::invalid_argument("Q8 exact pair: unsupported input width");
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 
-void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
-                                  const Weight& first_weight, const Weight& second_weight,
-                                  Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
+namespace {
+// One instantiation per admitted input width, so the medium schedules carry it as a constant.
+template <int Hidden>
+bool medium_for_width(Q8PairScheduleId schedule, const Tensor& x, const Weight& first_weight,
+                      const Weight& second_weight, Tensor& first_out, Tensor& second_out,
+                      cudaStream_t stream) {
     if (fused_route_table("unified/q8_linear_pair", x.ne[1]) == LinearRouteTable::Unified) {
         unified::q8_pair_splitk_medium_launch(schedule, x, first_weight, second_weight, first_out,
                                               second_out, stream);
-        return;
+        return true;
     }
-    if (x.ne[0] != kHidden || x.ne[1] < 33 || first_out.ne[0] != kRows ||
-        first_out.ne[1] != x.ne[1] || second_out.ne[0] != kRows || second_out.ne[1] != x.ne[1]) {
-        throw std::invalid_argument("Q8 medium pair requires [1024,2048] and T>=33");
+    if (x.ne[1] < 33 || first_out.ne[0] != kRows || first_out.ne[1] != x.ne[1] ||
+        second_out.ne[0] != kRows || second_out.ne[1] != x.ne[1]) {
+        throw std::invalid_argument("Q8 medium pair requires [1024,K] and T>=33");
     }
 #if defined(NINFER_SM8X_COMPAT)
     // Two of this table's ten tiles are both reachable here and able to fit, so they are
@@ -163,18 +183,18 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
     switch (schedule) {
     case Q8PairScheduleId::DualSplitKMediumC48:
         if (x.ne[1] <= 48) {
-            launch_medium<48, 4, 2, 3>(x, first_weight, second_weight, first_out, second_out,
+            launch_medium<Hidden, 48, 4, 2, 3>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC64:
         if (x.ne[1] <= 64) {
-            launch_medium<64, 4, 2, 2>(x, first_weight, second_weight, first_out, second_out,
+            launch_medium<Hidden, 64, 4, 2, 2>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     default:
@@ -195,23 +215,23 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
         }
         offset += count;
     }
-    return;
+    return true;
 #else
     switch (schedule) {
     case Q8PairScheduleId::DualSplitKMediumC48:
         if (x.ne[1] <= 48) {
-            launch_medium<48, 4, 2, 3>(x, first_weight, second_weight, first_out, second_out,
+            launch_medium<Hidden, 48, 4, 2, 3>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC64:
         if (x.ne[1] <= 64) {
-            launch_medium<64, 4, 2, 2>(x, first_weight, second_weight, first_out, second_out,
+            launch_medium<Hidden, 64, 4, 2, 2>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC80:
@@ -219,7 +239,7 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
             launch_medium<80, 4, 2, 1>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC88:
@@ -227,7 +247,7 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
             launch_medium<88, 4, 1, 1>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC96:
@@ -235,7 +255,7 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
             launch_medium<96, 4, 1, 1>(x, first_weight, second_weight, first_out, second_out,
                                        stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC104:
@@ -243,7 +263,7 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
             launch_medium<104, 4, 1, 1>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC112:
@@ -251,7 +271,7 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
             launch_medium<112, 4, 1, 1>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC128:
@@ -259,7 +279,7 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
             launch_medium<128, 2, 4, 2>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC160:
@@ -267,7 +287,7 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
             launch_medium<160, 2, 5, 2>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC192:
@@ -275,7 +295,7 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
             launch_medium<192, 2, 6, 2>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC224:
@@ -283,7 +303,7 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
             launch_medium<224, 2, 7, 2>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     case Q8PairScheduleId::DualSplitKMediumC256:
@@ -291,7 +311,7 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
             launch_medium<256, 2, 8, 1>(x, first_weight, second_weight, first_out, second_out,
                                         stream);
             CUDA_CHECK(cudaGetLastError());
-            return;
+            return true;
         }
         break;
     default:
@@ -299,6 +319,25 @@ void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
     }
     throw std::invalid_argument("Q8 medium pair schedule does not cover this T");
 #endif
+}
+} // namespace
+
+void q8_pair_splitk_medium_launch(Q8PairScheduleId schedule, const Tensor& x,
+                                  const Weight& first_weight, const Weight& second_weight,
+                                  Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
+    // The input width picks the instantiation; a width with none is refused by name.
+    switch (x.ne[0]) {
+    case 2048:
+        medium_for_width<2048>(schedule, x, first_weight, second_weight, first_out, second_out,
+                               stream);
+        return;
+    case 4096:
+        medium_for_width<4096>(schedule, x, first_weight, second_weight, first_out, second_out,
+                               stream);
+        return;
+    default:
+        throw std::invalid_argument("Q8 medium pair: unsupported input width");
+    }
 }
 
 } // namespace ninfer::ops::detail

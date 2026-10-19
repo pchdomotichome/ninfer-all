@@ -1,0 +1,282 @@
+"""Self-check for the Fit view.
+
+Two things can go wrong quietly here.
+
+fit-data.json is a copy of measurements that live in docs/config-calculator.html. A rerun of
+those sweeps updates the page and not the copy, and the panel would keep answering with
+yesterday's constants. The first test therefore re-reads the page and compares.
+
+The arithmetic that combines them lives in js/fit.js. A wrong constant there does not raise --
+it produces a confident wrong verdict, which is the failure mode this whole view exists to
+avoid. The rest of the tests drive that arithmetic through node, including the two details that
+already burned us once: the cache is reserved by the 64-token physical page rather than by the
+context asked for, and DFlash2's CUDA graph allowance steps up with depth.
+
+    python3 test_fit.py
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).parent
+PAGE = HERE.parent.parent / "docs" / "config-calculator.html"
+
+# The DATA block is JavaScript, so JavaScript is what parses it. Keys the view does not read are
+# not compared: the page's decode-vs-depth sweeps stay where they are, in the page.
+EXTRACT = r"""
+const fs = require('node:fs');
+const [, , page] = process.argv;   // run as a file: argv[0] is node, [1] the script
+const src = fs.readFileSync(page, 'utf8');
+const at = src.indexOf('const DATA = {');
+const body = src.slice(at, src.indexOf('\n};', at) + 3);
+const DATA = new Function(body + '; return DATA;')();
+const conv = o => Array.isArray(o) ? o.map(conv)
+  : (o && typeof o === 'object') ? Object.fromEntries(Object.entries(o).map(([k, v]) => [k, conv(v)]))
+  : (o === Infinity ? null : o);
+const d = conv(DATA);
+const models = {};
+for (const [k, m] of Object.entries(d.models)) {
+  models[k] = {label: m.label, weightsBytes: m.weightsBytes, workspaceBytes: m.workspaceBytes,
+               nativeMaxContext: m.nativeMaxContext, kv: m.kv, spec: m.spec};
+}
+console.log(JSON.stringify({cardMiB: d.cardMiB, kvLabels: d.kvLabels, kvNotes: d.kvNotes,
+                            perplexity: d.perplexity, models}));
+"""
+
+# The arithmetic, driven where it lives. Every case below is a number the calculator's method
+# notes predict, not a golden value copied out of a run.
+CHECKS = r"""
+import fs from 'node:fs';
+const [dataPath, jsUrl] = process.argv.slice(1);   // -e: argv[0] is node, [1] the first arg
+const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+const F = await import(jsUrl);
+const GIB = 1024 ** 3;
+const bad = [];
+const eq = (what, got, want) => { if (got !== want) bad.push(`${what}: got ${got}, want ${want}`); };
+const ok = (what, cond) => { if (!cond) bad.push(`${what}: not true`); };
+const p27 = data.models['27b'], p35 = data.models['35b'];
+
+// The cache is reserved by the whole physical page the context rounds up to.
+eq('pageRoundUp(1)', F.pageRoundUp(1, 64), 64);
+eq('pageRoundUp(64)', F.pageRoundUp(64, 64), 64);
+eq('pageRoundUp(65)', F.pageRoundUp(65, 64), 128);
+
+// A flat allowance, and the stepped one: DFlash2 asks for 288 MiB up to 8,192 and 384 MiB past
+// it, so a value between measured points takes the higher of the two.
+eq('graph flat', F.graphBytes(p27.spec.mtp3, 131072), 90177536);
+eq('graph at its step', F.graphBytes(p27.spec['dflash2-7'], 8192), 301989888);
+eq('graph past its step', F.graphBytes(p27.spec['dflash2-7'], 8193), 402653184);
+eq('graph far past it', F.graphBytes(p27.spec['dflash2-7'], 1000000), 402653184);
+
+// Per-token cost: MTP's extra draft tokens are buffered in the KV format, so its term is a
+// ratio; DFlash pays a fixed 4,096 B/token regardless of the format.
+ok('mtp3 ratio scales the format', F.kvPerToken(p27, 'bf16', 'mtp3') > F.kvPerToken(p27, 'int8', 'mtp3'));
+eq('dflash adds a flat scratch', F.kvPerToken(p35, 'int8', 'dflash-3'), p35.kv['int8'] + 4096);
+eq('none is the format alone', F.kvPerToken(p27, 'int8', 'none'), p27.kv['int8']);
+
+const usable = 23 * GIB, wb = p27.weightsBytes;
+const b = F.budget(data, p27, 'mtp3', 'int8', 32768, wb, usable);
+eq('the parts are the total', b.total,
+   b.weightsBytes + b.kvBytes + b.seqBytes + b.workspaceBytes);
+eq('room is what is left', b.free, usable - b.total);
+
+// The reported context has to be achievable and the largest one that is: it lands on a page
+// boundary, it fits, and one page more does not.
+const quiet = F.maxContext(data, p27, 'mtp3', 'int8', wb, usable);
+ok('max context is a page boundary', quiet % 64 === 0);
+const at = F.budget(data, p27, 'mtp3', 'int8', quiet, wb, usable);
+ok('max context fits', at.total <= usable);
+ok('and one page more does not',
+   F.budget(data, p27, 'mtp3', 'int8', quiet + 64, wb, usable).total > usable);
+
+// Room is what changes the answer, and the model's own ceiling caps it.
+ok('a shallower format reaches further',
+   F.maxContext(data, p27, 'mtp3', 'rk4v4', wb, usable) >= quiet);
+eq('a huge card hits the native ceiling',
+   F.maxContext(data, p27, 'mtp3', 'int8', wb, 4096 * GIB), p27.nativeMaxContext);
+
+// Weights that do not fit cannot be rescued by any context.
+const over = F.budget(data, p27, 'none', 'int8', 32768, 200 * GIB, usable);
+ok('an oversized artifact is over budget', over.free < 0);
+
+// The profile decides every term above, so a name that matches two measured profiles, or none,
+// must not silently resolve to one: the view says so instead.
+eq('a named profile is used', F.profileFor(data, {id: 'qwen38-27b-iq3s'}), '27b');
+eq('an unmeasured model resolves to nothing',
+   F.profileFor(data, {id: 'qwen38-flash-next-128k'}), null);
+eq('an ambiguous name resolves to nothing', F.profileFor(data, {id: 'a27bb35b'}), null);
+eq('no model resolves to nothing', F.profileFor(data, null), null);
+
+console.log(JSON.stringify(bad));
+"""
+
+
+# loadFit driven with the smallest DOM that will take it. Every bug this catches is a bug that
+# shows up on screen as three controls that do nothing, with nothing said about why -- the shape
+# the user reported: an empty model list, an empty budget box and a dead button.
+LOADFIT = r"""
+import fs from 'node:fs';
+const [dataPath, coreUrl, fitUrl] = process.argv.slice(1);
+const GIB = 1024 ** 3;
+
+// Not a browser: querySelector by id, cached so state persists across calls, and any property
+// assignment accepted.
+const nodes = new Map();
+const STRINGS = new Set(['value', 'innerHTML', 'textContent', 'placeholder']);
+const node = () => new Proxy({value: '', innerHTML: '', onclick: null}, {
+  get: (t, k) => t[k],
+  set: (t, k, v) => { t[k] = STRINGS.has(k) ? String(v) : v; return true; },
+});
+globalThis.document = {querySelector: s => {
+  if (!nodes.has(s)) nodes.set(s, node());
+  return nodes.get(s);
+}};
+
+// Every path loadFit asks for, so a new one fails loudly here instead of 404ing in the browser.
+// The endpoint adds the cards from the panel's config, so the fixture does too.
+const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+data.cards = [{name: 'RTX 5090', mib: 32768}, {name: 'RTX PRO 6000 Blackwell', mib: 98304}];
+const fixtures = {
+  '/api/fit/data': data,
+  '/api/router/catalog': {models: [
+    {id: 'qwen38-27b-iq3s', artifact: '/m/Qwen3.8-27B-IQ3_S.ninfer',
+     flags: {spec: 'mtp', 'draft-tokens': '3', 'max-context': '131072'}},
+    {id: 'flash-next-128k', artifact: '/m/Qwen3.8-FlashNext.ninfer',
+     flags: {'expert-residency': 'disk'}},
+  ]},
+  '/api/gpu': {gpus: [
+    {index: 0, name: 'RTX 3090', mem_total_mib: 24576, mem_used_mib: 4096},
+    {index: 1, name: 'RTX 3090', mem_total_mib: 24576, mem_used_mib: 1024},
+  ], host: {ram: {total: 72 * GIB, available: 40 * GIB}}},
+  '/api/convert/files': {artifacts: [{path: '/m/Qwen3.8-27B-IQ3_S.ninfer', size: 12 * GIB}]},
+};
+globalThis.fetch = async path => path in fixtures
+  ? {ok: true, status: 200, statusText: 'OK', json: async () => fixtures[path]}
+  : {ok: false, status: 404, statusText: 'no fixture', json: async () => ({error: `no fixture for ${path}`})};
+
+const core = await import(coreUrl);
+const fit = await import(fitUrl);
+const bad = [];
+const eq = (what, got, want) => {
+  if (got !== want) bad.push(`${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+};
+const ok = (what, cond) => { if (!cond) bad.push(`${what}: not true`); };
+
+await fit.loadFit();
+const out = nodes.get('#fit-out').innerHTML;
+ok('the model list is filled', nodes.get('#fit-src').innerHTML.includes('qwen38-27b-iq3s'));
+ok('the budget is rendered', out.length > 800);
+eq('the prober button is wired', typeof nodes.get('#fit-hf-go').onclick, 'function');
+eq('the profile follows the model name', nodes.get('#fit-profile').value, '27b');
+eq('the spec follows the model flags', nodes.get('#fit-spec').value, 'mtp3');
+eq('the default card is the one with room', nodes.get('#fit-gpu').value, '1');
+// The artifact's own size, in MiB, rather than the profile's 19.59 GiB reference quant.
+ok('the artifact size on disk is used', out.includes('12,288 MiB'));
+
+ok('the cards that are not here are offered', nodes.get('#fit-gpu').innerHTML.includes('RTX 5090'));
+
+// A projected card: it has no free memory to report, only its own, and the view has to say both
+// that the fit is real for it and that nothing else about it is.
+core.state.fit.gpu = 'card:RTX 5090';
+await fit.loadFit();
+const sim = nodes.get('#fit-out').innerHTML;
+ok('a projected card shows its own room', sim.includes('Room on RTX 5090'));
+ok('and its figure is the card minus the reserve', sim.includes('31.00 GiB'));
+ok('and it is called out as not in this box', sim.includes('is not in this box'));
+
+// Nothing selected: the box still has to be worth looking at, which is what was reported empty.
+core.state.fit.gpu = 1;
+core.state.fit.open = '';
+await fit.loadFit();
+const bare = nodes.get('#fit-out').innerHTML;
+ok('an empty selection still renders', bare.length > 800);
+ok('and still reports the card', bare.includes('Free on GPU'));
+ok('and says what is missing', bare.includes('No weights yet'));
+
+console.log(JSON.stringify(bad));
+"""
+
+
+def _node(script: str, *args: str) -> str:
+    out = subprocess.run(["node", "--input-type=module", "-e", script, *args],
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, f"node failed:\n{out.stderr[:2000]}"
+    return out.stdout.strip()
+
+
+def test_constants_still_match_the_calculator():
+    """fit-data.json is a copy; this is the copy's whole guarantee."""
+    data = json.loads((HERE / "fit-data.json").read_text())
+    assert "config-calculator.html" in data["source"]["file"], "provenance must name the source"
+    assert "ninfer" in data["source"]["project"], "provenance must name the project"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        extract = Path(tmp) / "extract.cjs"
+        extract.write_text(EXTRACT)
+        out = subprocess.run(["node", str(extract), str(PAGE)],
+                             capture_output=True, text=True, timeout=120)
+        assert out.returncode == 0, f"node failed:\n{out.stderr[:2000]}"
+        live = json.loads(out.stdout)
+
+    for key in ("cardMiB", "kvLabels", "kvNotes", "perplexity"):
+        assert data[key] == live[key], f"{key} drifted from {PAGE.name}"
+    assert data["pageTokens"] == 64, "the page size comes from kPagedKVPageSize"
+    assert data["kvOrder"] == ["bf16", "int8", "fp8", "rk8v4", "rk4v4", "k8v4", "nvfp4"]
+
+    assert set(data["models"]) == set(live["models"]), "a measured profile appeared or vanished"
+    for name, lived in live["models"].items():
+        mine = data["models"][name]
+        assert mine == lived, f"profile {name} drifted from {PAGE.name}"
+        # The view picks its formats from kvOrder and its specs from the profile, so a hole in
+        # either shows as a missing option rather than as a wrong number.
+        assert set(mine["kv"]) <= set(data["kvOrder"]), f"{name} has a format kvOrder lacks"
+        assert mine["spec"]["none"], f"{name} needs a 'none' spec to measure the heads against"
+
+
+def test_the_arithmetic():
+    with tempfile.TemporaryDirectory() as tmp:
+        check = Path(tmp) / "check.mjs"
+        check.write_text(CHECKS)
+        # -e rather than the file: the checks are ESM and this way they need no extension dance.
+        out = _node(check.read_text(), str(HERE / "fit-data.json"),
+                    (HERE / "js" / "fit.js").as_uri())
+    bad = json.loads(out)
+    assert not bad, "js/fit.js disagrees with its method notes:\n  " + "\n  ".join(bad)
+
+
+def test_the_view_loads_and_answers():
+    """A scope mistake or a missing element inside loadFit leaves the section blank and silent,
+    which is what reached the user: the two tests above cannot see it, because they only touch
+    the arithmetic."""
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "load.mjs"
+        script.write_text(LOADFIT)
+        out = _node(script.read_text(), str(HERE / "fit-data.json"),
+                    (HERE / "js" / "core.js").as_uri(), (HERE / "js" / "fit.js").as_uri())
+    bad = json.loads(out)
+    assert not bad, "js/fit.js does not survive its own load:\n  " + "\n  ".join(bad)
+
+
+def test_every_control_it_binds_exists():
+    """A renamed id makes the view render nothing at all, and nowhere does it say why: the
+    first `$('#...')` that comes back null throws, the click handler's promise is dropped, and
+    the section just stays empty. Cheaper to catch here."""
+    js = (HERE / "js" / "fit.js").read_text()
+    html = (HERE / "index.html").read_text()
+    ids = set(re.findall(r"\$\('#([a-z0-9-]+)'\)", js))
+    assert len(ids) > 8, f"only found {sorted(ids)}: the selector convention changed"
+    missing = sorted(i for i in ids if f'id="{i}"' not in html)
+    assert not missing, f"index.html has no id for {missing}"
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print("  ok ", name)
+    print("fit: todo ok")

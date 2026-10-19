@@ -154,8 +154,7 @@ make_stage_runtime(DeviceContext& device, const execution::Parameters& parameter
     const StageLinkOptions residual{.slot_bytes   = columns * hidden * sizeof(std::uint16_t),
                                     .slots        = 2,
                                     .force_staged = force_staged};
-    // Six int32 control tensors of at most `columns` entries, plus alignment.
-    const StageLinkOptions control{.slot_bytes   = (6 * columns + 16) * sizeof(std::int32_t),
+    const StageLinkOptions control{.slot_bytes   = stage_control_bytes(columns),
                                    .slots        = 2,
                                    .force_staged = force_staged};
     for (std::size_t stage = 0; stage + 1 < stages; ++stage) {
@@ -164,6 +163,35 @@ make_stage_runtime(DeviceContext& device, const execution::Parameters& parameter
     runtime->back.emplace(device, stages - 1, 0, residual);
     for (std::size_t stage = 1; stage < stages; ++stage) {
         runtime->control.emplace_back(device, 0, stage, control);
+    }
+    // A masked drafter reads target features from layers that may sit on later stages; such a stage
+    // sends each tapped layer's output to rank 0 as soon as the layer has run, on a stream of its
+    // own, so the transfer overlaps the stage's later layers.
+    const auto& draft = parameters.model.config().draft;
+    if (plan.features.masked_draft() && draft) {
+        runtime->features.reserve(stages - 1);
+        for (std::size_t stage = 1; stage < stages; ++stage) {
+            std::vector<std::uint32_t> taps = text.stage_taps(stage, draft->target_layer_ids);
+            if (taps.empty()) {
+                runtime->features.emplace_back();
+                continue;
+            }
+            const RankContext& rank = device.rank(stage);
+            std::vector<StageLink> links;
+            std::vector<CudaCompletionEvent> ready;
+            links.reserve(taps.size());
+            ready.reserve(taps.size());
+            for (std::size_t tap = 0; tap < taps.size(); ++tap) {
+                links.emplace_back(device, stage, 0, residual);
+                ready.emplace_back(rank);
+            }
+            runtime->features.emplace_back(
+                execution::StageRuntime::FeatureLink{.layers = std::move(taps),
+                                                     .links  = std::move(links),
+                                                     .ready  = std::move(ready),
+                                                     .sent   = CudaCompletionEvent(rank),
+                                                     .stream = execution::SideStream(rank.device)});
+        }
     }
     return runtime;
 }
@@ -198,7 +226,8 @@ std::vector<DeviceArena> make_rank_workspaces(DeviceContext& device,
 } // namespace
 
 ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const SequencePlanImpl& plan,
-                         DeviceContext& device_in, const StartupObserver& startup_observer)
+                         DeviceContext& device_in, const StartupObserver& startup_observer,
+                         std::unique_ptr<execution::NativeExpertRuntime> expert_runtime)
     : parameters(parameters_in), device(device_in), capacity(plan.capacity),
       kv_capacity(plan.kv_capacity), max_concurrency(plan.max_concurrency),
       context_cache(plan.context_cache),
@@ -228,6 +257,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       work(DeviceSpan{workspace_storage.base(), plan.workspace.general_capacity}),
       continuation_states(continuation_capacity), continuation_slots(continuation_capacity),
       shared_prefix_states(shared_prefix_capacity), shared_prefix_slots(shared_prefix_capacity),
+      experts(std::move(expert_runtime)),
       round_host(plan.causal_scoring ? std::nullopt
                                      : std::make_optional<PinnedHostBuffer>(sizeof(TokenId))),
       score_logprobs_host(plan.causal_scoring ? std::make_optional<PinnedHostBuffer>(
@@ -464,8 +494,22 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         // The 1 GiB floor inside the clamp is memory the run still needs after this point and that
         // no plan accounts for (module loads, graph instantiation, launch-local backing); halving
         // what remains is the conservative split, so the cache never takes more than it leaves.
-        std::size_t free_device = 0, total_device = 0;
-        if (cudaMemGetInfo(&free_device, &total_device) == cudaSuccess) {
+        // Every GPU of a pipeline can address pinned host memory, so the buffer is sized for the
+        // rank with the least device memory free; that a mapping is charged to each of them is an
+        // assumption, measured on one card only.
+        std::size_t free_device       = std::numeric_limits<std::size_t>::max();
+        bool measured                 = false;
+        const std::size_t active_rank = device.active_rank();
+        for (std::size_t rank = 0; rank < device.size(); ++rank) {
+            device.activate_rank(rank);
+            std::size_t free_rank = 0, total_rank = 0;
+            if (cudaMemGetInfo(&free_rank, &total_rank) == cudaSuccess) {
+                free_device = std::min(free_device, free_rank);
+                measured    = true;
+            }
+        }
+        device.activate_rank(active_rank);
+        if (measured) {
             reserved_bytes =
                 clamp_host_kv_reservation_bytes(reserved_bytes, free_device, minimum_stride);
         }
@@ -539,7 +583,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         structured_round = std::make_unique<qwen3_5::StructuredRound>(
             plan.persistent.grammar_masks->bind(backing),
             parameters.model.resources().public_token_count, widest_verify_window() + 1U,
-            max_concurrency);
+            max_concurrency,
+            speculative_backend == SpeculativeBackend::DFlash ||
+                speculative_backend == SpeculativeBackend::DFlash2);
         io.structured = structured_round.get();
     }
     active_continuations.fill(continuation_capacity);
@@ -609,14 +655,24 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         const std::size_t free_before = device.free_bytes();
         prepare_graphs();
         device.synchronize();
+        if (experts) { experts->check(); }
         const std::size_t free_after = device.free_bytes();
-        graph_measured_bytes         = free_before > free_after ? free_before - free_after : 0;
+        graph_measured_bytes =
+            free_after == 0 ? std::nullopt
+                            : std::optional<std::size_t>(
+                                  free_before > free_after ? free_before - free_after : 0);
         graph_phase.complete();
     }
     work.reset();
     work.reset_peak();
     workspace_logical_peak_bytes = 0;
     create_hybrid_prefix_cache(startup_observer);
+    // Warm-up deliveries, the transport's asynchronous prefetches included, stay out of the
+    // request counters.
+    if (experts) {
+        experts->drain();
+        expert_startup_stats = experts->stats();
+    }
 }
 
 void ProgramImpl::synchronize_transfer_streams() const {
@@ -732,7 +788,7 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
             execution::PrefillContext schedule_state{
                 {device, parameters, work, state_images->linear(0), nullptr, io, prefill_hidden,
                  prefill_chunk, proposal_head, stage_runtime.get(), rope_yarn, fast_prefill_kernel,
-                 mtp_attention_window},
+                 mtp_attention_window, experts.get()},
                 decoder->text_kv.execution_view(text_kv_addresses->execution_row(*address)),
                 {},
                 decoder->text_kv,
@@ -874,6 +930,16 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
             out.vision_workspace->mirror_bytes          = pool->mirror_bytes();
         }
     }
+    if (experts) {
+        for (std::size_t rank = 0; rank < device.size(); ++rank) {
+            out.expert_cache_bytes += experts->memory(rank).cache_bytes;
+        }
+        const auto m = experts->memory(0);
+        const auto overhead = m.bank_bytes + m.metadata_bytes;
+        out.workspace.capacity_bytes += overhead;
+        out.workspace.used_bytes += overhead;
+        out.workspace.peak_used_bytes += overhead;
+    }
     out.workspace_logical_peak_bytes = workspace_logical_peak_bytes;
     out.cuda_graph_allowance_bytes   = graph_allowance_bytes;
     out.cuda_graph_measured_bytes    = graph_measured_bytes;
@@ -909,6 +975,18 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
                  .workspace = ArenaMemorySummary{
                      workspace_storage_by_rank.at(rank - 1).capacity(), 0,
                      rank < work.rank_count() ? work.peak_used_for_rank(rank) : 0}});
+        }
+        if (experts) {
+            for (std::size_t rank = 0; rank < out.devices.size(); ++rank) {
+                const auto m = experts->memory(rank);
+                out.devices[rank].expert_cache_bytes = m.cache_bytes;
+                if (rank == 0) { continue; }
+                const auto overhead = m.bank_bytes + m.metadata_bytes;
+                auto& workspace = out.devices[rank].workspace;
+                workspace.capacity_bytes += overhead;
+                workspace.used_bytes += overhead;
+                workspace.peak_used_bytes += overhead;
+            }
         }
     }
     return out;

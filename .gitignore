@@ -76,9 +76,8 @@ profiles/
 .chatgpt/
 benchmark_results/
 
-# Local release products. Keep the publishing guide, upload archives as GitHub Release assets.
-dist/*
-!dist/README.md
+# Local release products; the archives are uploaded as GitHub Release assets.
+dist/
 
 # Claude Code personal/local settings (may contain API tokens)
 .claude/settings.local.json
@@ -90,3 +89,19 @@ repro/
 
 # WebUI releases unpacked by scripts/fetch-webui.sh for -DNINFER_WEBUI_DIR.
 third_party/webui/
+
+# Build trees and profiling output. `build` is a symlink to one of these on the
+# dev hosts, and a pattern with a trailing slash does not match a symlink.
+build
+build-*/
+
+# Herramientas locales del panel y del harness: no son código del repo.
+.playwright-mcp/
+.serena/
+
+# Capturas sueltas de trabajo.
+pagoda-*.png
+
+# Estado de runtime del panel: referencias aprendidas y alertas. Lo escribe el
+# proceso; versionarlo sería versionar la máquina, no el código.
+tools/panel/panel-state.json

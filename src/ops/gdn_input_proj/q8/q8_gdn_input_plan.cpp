@@ -35,19 +35,27 @@ constexpr bool catalog_is_closed() {
 
 static_assert(catalog_is_closed(), "Q8 GDN input routes must be exact and closed");
 
+// The row counts are the GDN mixer's output split: query+key+value then z. Only
+// the input width varies between models, and the routes below are selected on the
+// column count alone, so admitting a width is admitting a new instantiation of
+// schedules that are already parameterized on it.
 bool supported_shape(const Q8GdnInputProblem& problem) noexcept {
-    return problem.input_rows == 2048 && problem.qkv_rows == 8192 && problem.z_rows == 4096 &&
-           problem.parent_rows == 12288 && problem.padded_k == 2048;
+    const bool width_admitted = problem.input_rows == 2048 || problem.input_rows == 4096;
+    return width_admitted && problem.qkv_rows == 8192 && problem.z_rows == 4096 &&
+           problem.parent_rows == 12288 && problem.padded_k == problem.input_rows;
 }
 
 } // namespace
 
+// These name the schedule, not the width: the schedules are parameterized on K and
+// each serves every admitted width, so a name carrying one width would be wrong for
+// the other. The width is a property of the problem, not of the schedule.
 const char* q8_gdn_input_schedule_name(Q8GdnInputScheduleId schedule) noexcept {
     switch (schedule) {
     case Q8GdnInputScheduleId::DecodeR8Direct:
-        return "gdn_input_proj.q8.decode.r8.direct.k2048.split2";
+        return "gdn_input_proj.q8.decode.r8.direct.split2";
     case Q8GdnInputScheduleId::SplitKMmaDirect:
-        return "gdn_input_proj.q8.mma.splitk.direct.k2048";
+        return "gdn_input_proj.q8.mma.splitk.direct";
     case Q8GdnInputScheduleId::MmaR64C128:
         return "gdn_input_proj.q8.mma.r64.c128.split2";
     }

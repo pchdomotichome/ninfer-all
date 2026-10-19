@@ -10,6 +10,10 @@
 #include "ops/linear/gguf/gguf_linear.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/sm70/sm70_dequantize.h"
+#include "ops/linear/sm70/sm70_gemm.h"
+#include "ops/linear/sm70/sm70_integer.h"
+#include "ops/linear/sm70/sm70_project.h"
 #include "ops/linear/t2/t2_a8.h"
 #include "ops/linear_add/fp8/fp8_linear_add_plan.h"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
@@ -23,6 +27,7 @@
 #include <string>
 
 #include "ops/linear_swiglu/q4a8/q4a8_linear_swiglu.h"
+#include "ops/linear_swiglu/q4cublas/cublas_prefill_gate.h"
 #include "ops/linear_swiglu/q4cublas/w4_cublas_prefill.h"
 
 namespace ninfer::ops {
@@ -102,12 +107,16 @@ std::size_t grouped_integer_workspace_bytes(std::size_t a16, std::int32_t output
                                             std::int32_t min_tokens, std::int32_t max_tokens) {
     const bool integer_shape = output_rows == 5120 && (input_rows == 17408 || input_rows == 6144);
     if (!allows_a8_int(policy) || !integer_shape) { return a16; }
-    // See linear_swiglu: where the cuBLAS route is admitted it is the widest claimant, so any
-    // interval reaching its width gate must reserve for it.
-    if (allows_cublas_prefill(policy) && max_tokens >= kCublasPrefillMinTokens) {
-        return std::max(a16, detail::w4_cublas_prefill_workspace_capacity_bytes(
-                                 output_rows, input_rows,
-                                 std::max(min_tokens, kCublasPrefillMinTokens), max_tokens));
+    // See linear_swiglu: an interval the cuBLAS route takes any width of reserves for it from the
+    // narrowest such width, on top of the integer routes it admits as well.
+    if (allows_cublas_prefill(policy)) {
+        const std::size_t integer = grouped_integer_workspace_bytes(
+            a16, output_rows, input_rows, LinearPolicy::AllowA8Int, min_tokens, max_tokens);
+        const std::int32_t first = detail::cublas_prefill_first_width(
+            *detail::cublas_linear_add_family(input_rows), min_tokens, max_tokens);
+        if (first == 0) { return integer; }
+        return std::max(integer, detail::w4_cublas_prefill_workspace_capacity_bytes(
+                                     output_rows, input_rows, first, max_tokens));
     }
     if (min_tokens == max_tokens) {
         return detail::a8_add_tokens_supported(min_tokens)
@@ -127,10 +136,11 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
                                                LinearPolicy::A16Only, min_tokens, max_tokens);
 }
 
-std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output_rows,
-                                                std::int32_t input_rows, LinearPolicy policy,
-                                                std::int32_t min_tokens, std::int32_t max_tokens) {
-    validate_policy(policy);
+namespace {
+
+std::size_t linear_add_route_workspace_bytes(QType qtype, std::int32_t output_rows,
+                                             std::int32_t input_rows, LinearPolicy policy,
+                                             std::int32_t min_tokens, std::int32_t max_tokens) {
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("linear_add workspace: invalid token interval");
     }
@@ -193,6 +203,20 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
     throw std::invalid_argument("linear_add workspace: unsupported weight format");
 }
 
+} // namespace
+
+std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output_rows,
+                                                std::int32_t input_rows, LinearPolicy policy,
+                                                std::int32_t min_tokens, std::int32_t max_tokens) {
+    validate_policy(policy);
+    const auto routes = [&](std::int32_t lo, std::int32_t hi) {
+        return linear_add_route_workspace_bytes(qtype, output_rows, input_rows, policy, lo, hi);
+    };
+    // Every width of a dense format takes an sm_70 route there.
+    return detail::sm70::capacity(qtype, output_rows, input_rows, min_tokens, max_tokens, policy,
+                                  routes);
+}
+
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, WorkspaceArena& ws,
                 cudaStream_t stream) {
     linear_add(x, w, residual_out, LinearPolicy::A16Only, ws, stream);
@@ -211,6 +235,16 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
 
     if (is_gguf(w.qtype)) {
         detail::gguf_linear_add(x, w, residual_out, ws, stream);
+        return;
+    }
+
+    if (detail::sm70::covers(w, t)) {
+        auto scope            = ws.scope();
+        const auto activation = detail::sm70::prepare_for(
+            x, w.n, ws, stream, detail::sm70::integer_takes(w, t, policy));
+        const detail::sm70::Destination residual{
+            static_cast<__nv_bfloat16*>(residual_out.data), w.n, 0, 0, w.n, true};
+        detail::sm70::project_for(activation, w, {&residual, 1}, stream);
         return;
     }
 
@@ -251,7 +285,9 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
                 "linear_add: Q4 requires 16-byte x/residual/code/scale alignment");
         }
         // The same prefill routes as Q5 below, in the same order.
-        if (allows_cublas_prefill(policy) && t >= kCublasPrefillMinTokens &&
+        const auto* cublas_family = detail::cublas_linear_add_family(w.k);
+        if (allows_cublas_prefill(policy) && cublas_family != nullptr && w.n == 5120 &&
+            detail::cublas_prefill_takes(*cublas_family, t) &&
             detail::w4_cublas_prefill_supported(w, t)) {
             detail::w4_cublas_add_launch(x, w, residual_out, ws, stream);
             return;
@@ -266,8 +302,12 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
 
     if (w.qtype == QType::Q5_G64_FP16) {
         require_q5(w);
-        const bool supported_shape = (w.n == 5120 && w.k == 17408) || (w.n == 5120 && w.k == 6144);
-        if (!supported_shape) { throw std::invalid_argument("linear_add: unsupported Q5 shape"); }
+        // The plan owns the list of served shapes; duplicating it here is how a width gets
+        // admitted in one place and rejected in the other.
+        const detail::Q5LinearAddProblem shape{w.n, w.k, w.padded_shape[1], t};
+        if (!detail::q5_linear_add_admits(shape)) {
+            throw std::invalid_argument("linear_add: unsupported Q5 shape");
+        }
         if (!aligned_to(x.data, 16) || !aligned_to(residual_out.data, 16) ||
             !aligned_to(w.qdata, 16) || !aligned_to(w.qhigh, 16) || !aligned_to(w.scales, 16)) {
             throw std::invalid_argument(
@@ -276,8 +316,10 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
         // About 1.9x the integer route at 4096 tokens; below the width gate it loses, because the
         // dequantise pass costs the same whatever the token count. The shape was checked above and
         // the route takes any token count, so unlike the integer route below it is not gated on a
-        // 128-token tile -- an unaligned final chunk is where it is furthest ahead.
-        if (allows_cublas_prefill(policy) && t >= kCublasPrefillMinTokens &&
+        // 128-token tile -- an unaligned final chunk is where it is furthest ahead. The device
+        // profile places the gate (cublas_prefill_gate.h).
+        if (allows_cublas_prefill(policy) &&
+            detail::cublas_prefill_takes(*detail::cublas_linear_add_family(w.k), t) &&
             detail::w4_cublas_prefill_supported(w, t)) {
             detail::w4_cublas_add_launch(x, w, residual_out, ws, stream);
             return;

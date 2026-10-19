@@ -36,6 +36,9 @@ struct Journal {
     std::map<std::string, int> alive;
     // Read by the registry's idle thread: entries exist before a service is loaded.
     std::map<std::string, std::atomic<bool>> failing;
+    // Ids whose service claims it can sleep and then refuses: an Engine with no suspend, which
+    // --model-suspend does not give one.
+    std::vector<std::string> refuses_suspend;
 };
 
 class FakeService final : public ModelService {
@@ -55,7 +58,14 @@ public:
 
     bool suspendable() const override { return suspendable_; }
 
-    void suspend() override { journal_.calls.push_back("sleep " + id_); }
+    void suspend() override {
+        if (std::find(journal_.refuses_suspend.begin(), journal_.refuses_suspend.end(), id_) !=
+            journal_.refuses_suspend.end()) {
+            journal_.calls.push_back("refuse " + id_);
+            throw std::invalid_argument("model suspend applies to Generation Engines");
+        }
+        journal_.calls.push_back("sleep " + id_);
+    }
 
     void resume() override { journal_.calls.push_back("wake " + id_); }
 
@@ -134,6 +144,27 @@ void lifecycle_under_one_slot() {
         (void)registry.acquire("c", false);
     } catch (const ModelNotLoaded&) { not_loaded = true; }
     expect(not_loaded, "autoload off refuses a model that is not loaded");
+}
+
+// A model whose Engine has no suspend says it can sleep and then refuses, the way --model-suspend
+// reaches an Engine that does not implement it. The refusal cannot change, so the router makes
+// room by unloading the victim instead of retrying it for the whole room timeout.
+void a_suspend_that_always_refuses_makes_room_by_unload() {
+    Journal journal;
+    journal.refuses_suspend = {"a"};
+    RegistryPolicy policy;
+    policy.models_max   = 1;
+    policy.room_timeout = std::chrono::seconds(30);
+    ModelRegistry registry({model("a"), model("b")}, policy, factory(journal), true);
+    { auto lease = registry.acquire("a"); }
+    const auto started = std::chrono::steady_clock::now();
+    { auto lease = registry.acquire("b"); }
+    const auto waited = std::chrono::steady_clock::now() - started;
+    expect(state_of(registry, "b") == ModelState::Loaded, "the second model loads");
+    expect(waited < policy.room_timeout, "the refusal does not spend the room timeout");
+    expect(state_of(registry, "a") == ModelState::Unloaded,
+           "a victim that cannot suspend is unloaded for room");
+    expect(journal.alive["a"] == 0, "its service is gone");
 }
 
 void leases_hold_models() {
@@ -291,6 +322,7 @@ model-suspend = false
 int main() {
     try {
         lifecycle_under_one_slot();
+        a_suspend_that_always_refuses_makes_room_by_unload();
         leases_hold_models();
         idle_sleep_and_events();
         observing_is_not_use();

@@ -10,10 +10,14 @@
 
 #include "guarded_main.h"
 #include "models/qwen3_5/execution/ffn.h"
+#include "ninfer/ops/linear_swiglu.h"
+#include "ops/common/device_tier.h"
 
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -51,9 +55,12 @@ DenseParameters parameters(bool prefill_a8, bool a8_decode) {
     out.verify_gate_up_policy = out.gate_up.policy;
 #if defined(NINFER_SM8X_COMPAT)
     // --mlp-a8-decode admits the decode route by this profile's own format/shape, independently
-    // of --prefill-a8 -- the two flags must stay orthogonal (see parameters.cpp:dense()).
+    // of --prefill-a8 -- the two flags must stay orthogonal (see parameters.cpp:dense()). The
+    // width question is asked of the Op that owns the compiled profiles rather than restated here:
+    // a copy of the condition could disagree with the real one and still pass.
     if (a8_decode && out.gate_up.weight.qtype == QType::Q4_G64_FP16 &&
-        out.gate_up.weight.n == 34816 && out.gate_up.weight.k == 5120) {
+        ninfer::ops::linear_swiglu_compiles_a8_int_decode(out.gate_up.weight.n,
+                                                           out.gate_up.weight.k)) {
         out.verify_gate_up_policy = LinearPolicy::AllowA8IntDecode;
     }
 #endif
@@ -74,9 +81,11 @@ void run_planning() {
                                      std::to_string(prefill) + ")");
 #if defined(NINFER_SM8X_COMPAT)
         // The route stages one s8 code per (token, hidden) plus an FP16 scale per 64-k group, over
-        // the padded tile width. Anything less than that and the arena can throw mid-round.
+        // the padded tile width. Anything less than that and the arena can throw mid-round. (A
+        // Volta card has no integer Q4 route: these widths take its own small-T route, which
+        // stages nothing.)
         const std::size_t codes = static_cast<std::size_t>(width) * 5120;
-        check(verify >= prefill + codes,
+        check(ninfer::ops::current_device_volta() || verify >= prefill + codes,
               "verify planning must cover the integer scratch at T=" + std::to_string(width) +
                   " (needs at least " + std::to_string(codes) + " more than prefill's " +
                   std::to_string(prefill) + ", got " + std::to_string(verify) + ")");
@@ -124,7 +133,7 @@ void run_combined_flags() {
                                   "--no-prefill-a8 --mlp-a8-decode at T=" +
                                       std::to_string(width));
 #if defined(NINFER_SM8X_COMPAT)
-        check(verify > prefill,
+        check(ninfer::ops::current_device_volta() || verify > prefill,
               "verify planning must admit the decode route under --no-prefill-a8 "
               "--mlp-a8-decode at T=" +
                   std::to_string(width));
@@ -135,9 +144,34 @@ void run_combined_flags() {
     }
 }
 
+// The width predicate is the Op's, so this asserts which widths it admits rather than assuming the
+// one this model uses. A registered profile whose release does not carry the route must answer
+// false, and an unregistered pair must too: silently answering true would let --mlp-a8-decode
+// plan a scratch allocation for a mainloop that was never compiled at that width.
+void run_width_admission() {
+    using ninfer::ops::linear_swiglu_compiles_a8_int_decode;
+    check(linear_swiglu_compiles_a8_int_decode(34816, 5120),
+          "the measured profile must carry the A8 integer decode route");
+    // Registered profiles that do not carry it: the other three compiled widths.
+    for (const auto& [gate_up_rows, input_rows] : std::array<std::pair<std::int32_t, std::int32_t>, 3>{
+             {{12288, 2048}, {24576, 4096}, {18432, 2560}}}) {
+        check(!linear_swiglu_compiles_a8_int_decode(gate_up_rows, input_rows),
+              "a registered profile without the route must answer false at " +
+                  std::to_string(gate_up_rows) + "x" + std::to_string(input_rows));
+    }
+    // Unregistered and mismatched pairs.
+    for (const auto& [gate_up_rows, input_rows] : std::array<std::pair<std::int32_t, std::int32_t>, 3>{
+             {{34816, 2048}, {24576, 5120}, {1024, 1024}}}) {
+        check(!linear_swiglu_compiles_a8_int_decode(gate_up_rows, input_rows),
+              "an unregistered pair must answer false at " + std::to_string(gate_up_rows) + "x" +
+                  std::to_string(input_rows));
+    }
+}
+
 int run() {
     run_planning();
     run_combined_flags();
+    run_width_admission();
     std::cout << (failures == 0 ? "OK" : "FAIL")
               << " --mlp-a8-decode phase gate and workspace planning\n";
     return failures == 0 ? 0 : 1;

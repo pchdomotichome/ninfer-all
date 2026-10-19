@@ -53,6 +53,9 @@ struct RequestLimits {
     // Responses input: assistant message content or reasoning after function_call Items joins
     // the run's assistant turn instead of failing (--lenient-assistant-history).
     bool lenient_assistant_history = false;
+    // An image detail other than auto, low or high is read as auto instead of failing
+    // (--lenient-image-detail).
+    bool lenient_image_detail = false;
 };
 
 enum class ContentKind {
@@ -81,13 +84,39 @@ struct ContentPart {
     std::string type_raw; // original wire "type" string for diagnostics
     ninfer::product::media_acquire::Source source;
     ninfer::ImageResizePolicy image_resize_policy = ninfer::ImageResizePolicy::Downsize;
+    ninfer::ImageDetail image_detail              = ninfer::ImageDetail::Auto;
+    // A detail value outside auto, low and high, read as auto until settle_image_details accepts
+    // or refuses it.
+    std::string unknown_image_detail;
     std::optional<CacheBoundary> cache_boundary_after;
 };
+
+// OpenAI's image detail values; empty for any other (see settle_image_details).
+[[nodiscard]] inline std::optional<ninfer::ImageDetail> parse_image_detail(std::string_view value) {
+    if (value == "auto") { return ninfer::ImageDetail::Auto; }
+    if (value == "low") { return ninfer::ImageDetail::Low; }
+    if (value == "high") { return ninfer::ImageDetail::High; }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline const char* image_detail_name(ninfer::ImageDetail detail) noexcept {
+    switch (detail) {
+    case ninfer::ImageDetail::Auto:
+        return "auto";
+    case ninfer::ImageDetail::Low:
+        return "low";
+    case ninfer::ImageDetail::High:
+        return "high";
+    }
+    return "auto";
+}
 
 struct ToolDefinition {
     std::string name;
     std::string description;
     std::string input_schema_json;
+    // Arguments are generated under input_schema_json (needs --structured-output).
+    bool strict = false;
     std::optional<std::string> input_examples_json;
     std::optional<CacheBoundary> cache_boundary_after;
 };
@@ -248,6 +277,11 @@ struct GenerationRequest {
     // Sampling from the token after the reasoning block closes (a `post_thinking` object).
     std::optional<SamplingParams> post_thinking;
     StructuredOutputOptions structured_output;
+    // The request field that asked for structured_output, named by errors about it.
+    std::string structured_output_param = "response_format";
+    // Chat Completions takes a tool's strict flag as a hint where it cannot be enforced (a server
+    // without --structured-output); the other protocols refuse it there.
+    bool strict_tools_advisory = false;
     // Each generated content token's log probability, with `top_logprobs` (0 to
     // kMaximumTokenLogprobs) of its most likely alternatives in the response.
     bool logprobs    = false;

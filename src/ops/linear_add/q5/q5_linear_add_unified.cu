@@ -133,6 +133,12 @@ void dispatch_shape(const Tensor& x, const Weight& w, Tensor& residual_out, cuda
         launch_split2<Cols, 6144>(x, w, residual_out, stream);
     } else if (w.k == 17408) {
         launch_split2<Cols, 17408>(x, w, residual_out, stream);
+    } else if (w.k == 4096) {
+        launch_split2<Cols, 4096>(x, w, residual_out, stream);
+    } else if (w.k == 12288) {
+        launch_split2<Cols, 12288>(x, w, residual_out, stream);
+    } else if (w.k == 24576) {
+        launch_split2<Cols, 24576>(x, w, residual_out, stream);
     } else {
         throw std::invalid_argument("q5 linear_add split2: unsupported exact K");
     }

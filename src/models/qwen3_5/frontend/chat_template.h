@@ -53,6 +53,7 @@ struct MediaData {
     std::string media_type;
     std::string source_name;
     ImageResizePolicy image_resize_policy = ImageResizePolicy::Downsize;
+    ImageDetail image_detail              = ImageDetail::Auto;
 };
 
 struct ChatPart {
@@ -91,6 +92,12 @@ struct ChatMessage {
     [[nodiscard]] bool has_media() const noexcept;
 };
 
+// The syntax a model writes its tool calls in, which decides how a forced call is opened.
+enum class ToolCallSyntax : std::uint8_t {
+    Qwen,  // <tool_call>\n<function=NAME>\n ...
+    Gemma, // <|tool_call>call:NAME{ ...
+};
+
 struct ChatRenderOptions {
     PromptContinuationMode continuation = PromptContinuationMode::NewAssistantTurn;
     // Internal renderer control used by frontend qualification. Product PromptInput always
@@ -102,7 +109,9 @@ struct ChatRenderOptions {
     std::string chat_template_kwargs_json;
     bool add_vision_id = false;
     std::vector<std::string> tool_jsons;
+    // Function whose call the generation prompt opens; the opener is written in `tool_call_syntax`.
     std::string forced_tool_name;
+    ToolCallSyntax tool_call_syntax = ToolCallSyntax::Qwen;
     std::vector<PromptCacheMarker> cache_markers;
 };
 

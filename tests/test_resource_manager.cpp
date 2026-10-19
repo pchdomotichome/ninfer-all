@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <iostream>
 #include <map>
@@ -62,6 +63,8 @@ using ninfer::runtime::FinishDisposition;
 using ninfer::runtime::LaneId;
 using ninfer::runtime::MaterializationMachineWork;
 using ninfer::runtime::PrefillWork;
+using ninfer::runtime::SharedCandidateRank;
+using ninfer::runtime::strongest_shared_candidates;
 using ninfer::runtime::PlanningCandidateId;
 using ninfer::runtime::PlanningOwnerId;
 using ninfer::runtime::PrivateSourceMode;
@@ -752,6 +755,9 @@ public:
         if (source != nullptr) {
             inspected_private_sources.push_back(source->id);
             if (source->content_key != prompt.content_key || !checkpoint) { return std::nullopt; }
+            if (refuse_endpoint_admission && checkpoint->kind == CheckpointKind::SessionEndpoint) {
+                return std::nullopt;
+            }
         }
         if (shared_source != nullptr) {
             inspected_shared_sources.push_back(shared_source->id);
@@ -801,8 +807,10 @@ public:
         }
         plan.identity.machine_work.remaining_prefill_work = plan.remaining;
         plan.identity.machine_work.reused_prompt_tokens   = plan.value.reusable_prompt_tokens;
+        const bool unforkable_anchor = retained_long_anchor_infeasible && must_retain_source &&
+                                       checkpoint && checkpoint->kind == CheckpointKind::LongAnchor;
         plan.identity.physical_status =
-            target_feasible(std::span<const FakeTargetDecision>{})
+            target_feasible(std::span<const FakeTargetDecision>{}) && !unforkable_anchor
                 ? ninfer::runtime::MaterializationPhysicalStatus::Feasible
                 : ninfer::runtime::MaterializationPhysicalStatus::Infeasible;
         plan.identity.source_mode = plan.source_mode;
@@ -879,8 +887,9 @@ public:
     start_resource_transaction(FakeResourcePlan&& plan, FakePreparedPrompt&& prompt,
                                CancellationFlagView cancellation) {
         ++start_calls;
-        started_source_id   = plan.admission.private_source_id;
-        started_source_mode = plan.admission.source_mode;
+        started_source_id     = plan.admission.private_source_id;
+        started_source_mode   = plan.admission.source_mode;
+        started_reused_tokens = plan.admission.value.reusable_prompt_tokens;
         started_action_ids.clear();
         for (const auto& action : plan.private_actions) { started_action_ids.push_back(action.id); }
         for (const auto& action : plan.shared_actions) { started_action_ids.push_back(action.id); }
@@ -1201,6 +1210,10 @@ public:
         if (finish_with_rewrite) {
             result.summary.rewrite = rewrite_checkpoint(key, finish_frontier - 1U);
         }
+        for (std::size_t index = 0; index < finish_long_anchor_frontiers.size(); ++index) {
+            result.summary.long_anchors.push_back(long_anchor(
+                key, finish_long_anchor_frontiers[index], static_cast<std::uint32_t>(index + 1)));
+        }
         result.continuation.emplace(sequence.id, key);
         return result;
     }
@@ -1298,6 +1311,12 @@ public:
     std::uint64_t seal_window_claims                     = 0;
     bool finish_release                                  = false;
     bool finish_with_rewrite                             = false;
+    // Long anchors a finished continuation publishes besides its endpoint.
+    std::vector<std::uint32_t> finish_long_anchor_frontiers;
+    // A prompt that diverges below every endpoint: private endpoints refuse admission.
+    bool refuse_endpoint_admission = false;
+    // A long anchor that cannot fork beside its conversation as the cache stands.
+    bool retained_long_anchor_infeasible = false;
     // The private replacement the most recent capture inspection was asked to price.
     mutable std::optional<CheckpointRef> last_capture_private_replacement;
     bool abort_salvage_next                              = false;
@@ -1326,6 +1345,7 @@ public:
     std::uint32_t finish_frontier             = 16;
     std::uint32_t started_source_id           = 0;
     PrivateSourceMode started_source_mode     = PrivateSourceMode::ConsumeToActive;
+    std::uint32_t started_reused_tokens       = 0;
     std::vector<std::uint32_t> inspected_private_sources;
     std::vector<std::uint32_t> inspected_shared_sources;
     std::vector<std::vector<std::uint64_t>> seal_attempts;
@@ -2776,6 +2796,93 @@ void test_branch_anchor_frontier_follows_the_deepest_unrestorable_match() {
             "a prompt of other content produced a branch anchor");
 }
 
+// An endpoint anchor is proposed at a catalogued endpoint the prompt matches all the way through,
+// only where it lies at least kEndpointAnchorMinimumGainTokens above that owner's long anchors.
+void test_endpoint_anchor_frontier_keeps_a_matched_endpoint_far_above_its_anchors() {
+    using ninfer::runtime::kEndpointAnchorMinimumGainTokens;
+    FakeManager manager = make_manager(1, 2);
+    FakeProgram program;
+    program.finish_long_anchor_frontiers = {512};
+    const ActiveRequest first = start_active(manager, program, 7, make_base(7), 1);
+    (void)finish_active(manager, program, first, 4096);
+    require(manager.catalog_state(0) == FakeManager::CatalogState::Catalogued,
+            "terminal continuation was not catalogued");
+    const FakePreparedPrompt prompt{7};
+    require(!manager.endpoint_anchor_frontier(program, prompt),
+            "an owner with no measured match produced an endpoint anchor");
+    program.matched_tokens[first.sequence.id] = 4095;
+    require(!manager.endpoint_anchor_frontier(program, prompt),
+            "a prompt that diverges before the endpoint produced an endpoint anchor");
+    program.matched_tokens[first.sequence.id] = 4200;
+    const auto anchor = manager.endpoint_anchor_frontier(program, prompt);
+    require(anchor && *anchor == 4096, "an endpoint the prompt extends was not anchored");
+    require(!manager.endpoint_anchor_frontier(program, FakePreparedPrompt{8}),
+            "a prompt of other content produced an endpoint anchor");
+
+    // The same endpoint just above a deeper anchor of its own conversation gains too little.
+    FakeManager near_manager = make_manager(1, 2);
+    FakeProgram near_program;
+    near_program.finish_long_anchor_frontiers = {4096 - kEndpointAnchorMinimumGainTokens + 1};
+    const ActiveRequest nearby = start_active(near_manager, near_program, 7, make_base(7), 1);
+    (void)finish_active(near_manager, near_program, nearby, 4096);
+    near_program.matched_tokens[nearby.sequence.id] = 4200;
+    require(!near_manager.endpoint_anchor_frontier(near_program, prompt),
+            "an endpoint within the minimum gain of an anchor was anchored again");
+    near_program.finish_long_anchor_frontiers = {4096 - kEndpointAnchorMinimumGainTokens};
+    FakeManager far_manager = make_manager(1, 2);
+    const ActiveRequest distant = start_active(far_manager, near_program, 7, make_base(7), 1);
+    (void)finish_active(far_manager, near_program, distant, 4096);
+    near_program.matched_tokens[distant.sequence.id] = 4200;
+    require(far_manager.endpoint_anchor_frontier(near_program, prompt) == 4096U,
+            "an endpoint a full minimum gain above an anchor was not anchored");
+}
+
+// A request that diverges from its conversation at a long anchor branches off it where the anchor
+// forks beside the conversation as the cache stands. Where it does not, the request rewrites the
+// conversation from the anchor, as a rewrite restore does from its checkpoint, rather than
+// re-prefilling from root.
+void test_long_anchor_reuse_retains_the_conversation_only_where_it_forks() {
+    FakeManager manager = make_manager(1, 3);
+    FakeProgram program;
+    program.finish_long_anchor_frontiers = {8};
+    const ActiveRequest owner = start_active(manager, program, 61, make_base(61), 1);
+    (void)finish_active(manager, program, owner, 16);
+    program.finish_long_anchor_frontiers.clear();
+    program.refuse_endpoint_admission = true;
+
+    const ActiveRequest branch = start_active(manager, program, 61, make_base(61), 2);
+    require(program.started_source_id == owner.sequence.id && program.started_reused_tokens == 8 &&
+                program.started_source_mode == PrivateSourceMode::Retain,
+            "a branch that forks beside its conversation consumed it");
+    (void)finish_active(manager, program, branch, 16);
+    require(manager.catalog_state(0) == FakeManager::CatalogState::Catalogued &&
+                manager.catalog_state(1) == FakeManager::CatalogState::Catalogued,
+            "the conversation and its branch were not both catalogued");
+
+    program.retained_long_anchor_infeasible = true;
+    const ActiveRequest rewrite = start_active(manager, program, 61, make_base(61), 3);
+    require(program.started_source_id == owner.sequence.id && program.started_reused_tokens == 8 &&
+                program.started_source_mode == PrivateSourceMode::ConsumeToActive,
+            "a branch that cannot fork beside its conversation did not rewrite it from the anchor");
+    (void)finish_active(manager, program, rewrite, 16);
+
+    // A request that must keep its source never consumes it, fork or not.
+    FakeManager kept_manager = make_manager(1, 3);
+    program.finish_long_anchor_frontiers = {8};
+    const ActiveRequest kept_owner = start_active(kept_manager, program, 62, make_base(62), 1);
+    (void)finish_active(kept_manager, program, kept_owner, 16);
+    program.finish_long_anchor_frontiers.clear();
+    FakeRequestBasePlan read_only        = make_base(62);
+    read_only.value.publish_continuation = false;
+    const ActiveRequest reader = start_active(kept_manager, program, 62, read_only, 2);
+    require(program.started_source_id != kept_owner.sequence.id ||
+                program.started_source_mode == PrivateSourceMode::Retain,
+            "a read-only request consumed the conversation at its anchor");
+    (void)finish_active(kept_manager, program, reader, 16);
+    require(kept_manager.catalog_state(0) == FakeManager::CatalogState::Catalogued,
+            "a read-only request left its conversation uncatalogued");
+}
+
 void test_state_transfer_statistics_use_payload_bytes() {
     FakeManager manager = make_manager(1, 2);
     FakeProgram program;
@@ -3903,6 +4010,72 @@ void test_shared_fanout_keeps_owner_edges_live_across_summary_refresh() {
             "shared fanout did not release both logical owner edges");
 }
 
+// A long prompt carries more shared boundaries than the projection can search exhaustively: the
+// prefix grid alone proposes kPrefixGridCandidates, and the structural and client boundaries come
+// on top. Planning must narrow them instead of failing the Engine's admission unit, which fails
+// every running lane with the request.
+void test_more_shared_boundaries_than_the_subset_search_still_plan() {
+    FakeManager manager = make_manager(1, 4, 8);
+    FakeProgram program;
+    FakeRequestBasePlan base = make_base(51);
+    for (std::uint32_t index = 1; index <= ninfer::kPrefixGridCandidates + 1U; ++index) {
+        base.cache.opportunities.push_back(FakeContextCache::Opportunity{
+            .kind     = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+            .evidence = ninfer::SharedCandidateEvidence::ExplicitBoundary,
+            .frontier = 4U * index,
+        });
+    }
+    const ActiveRequest active = start_active(manager, program, 51, base, 1);
+    (void)finish_active(manager, program, active);
+}
+
+// Narrowing ranks by distinct reuse domains. One session asking for a prefix again and again is a
+// single domain however many demand records it leaves; two independent callers are the evidence
+// that a prefix is shared and must outrank it.
+void test_candidate_narrowing_ranks_distinct_reuse_domains() {
+    constexpr std::size_t kLimit = 7;
+    const auto rank = [](bool pressure, std::uint32_t domains, std::uint64_t rebuild_ns = 100) {
+        return SharedCandidateRank{
+            .pressure_capable = pressure, .reuse_domains = domains, .rebuild_ns = rebuild_ns};
+    };
+
+    // Seven candidates two independent callers asked for, one a single session asked for (however
+    // often), and one three callers asked for: with one slot short, the single-session candidate
+    // goes, never a cross-domain one.
+    std::vector<SharedCandidateRank> ranks(7, rank(true, 2));
+    ranks.push_back(
+        rank(true, 1, 1'000'000));  // index 7: one session, the most expensive to rebuild
+    ranks.push_back(rank(true, 3)); // index 8: three independent callers
+    const std::vector<std::size_t> kept = strongest_shared_candidates(ranks, kLimit);
+    require(kept.size() == kLimit, "narrowing did not keep exactly the search limit");
+    require(std::find(kept.begin(), kept.end(), std::size_t{7}) == kept.end(),
+            "a single-session candidate outranked cross-domain demand");
+    require(std::find(kept.begin(), kept.end(), std::size_t{8}) != kept.end(),
+            "a three-domain candidate was dropped");
+    require(std::is_sorted(kept.begin(), kept.end()), "narrowing reordered the candidates");
+
+    // A candidate that can force an eviction outranks any amount of surplus-only demand.
+    std::vector<SharedCandidateRank> pressure(8, rank(false, 5));
+    pressure[3]                                  = rank(true, 1);
+    const std::vector<std::size_t> pressure_kept = strongest_shared_candidates(pressure, kLimit);
+    require(std::find(pressure_kept.begin(), pressure_kept.end(), std::size_t{3}) !=
+                pressure_kept.end(),
+            "a pressure-capable candidate lost to surplus-only demand");
+
+    // Equal demand falls back to the work a hit saves, then to the earlier candidate.
+    std::vector<SharedCandidateRank> equal(8, rank(true, 2, 100));
+    equal[5]                                  = rank(true, 2, 50);
+    const std::vector<std::size_t> equal_kept = strongest_shared_candidates(equal, kLimit);
+    require(std::find(equal_kept.begin(), equal_kept.end(), std::size_t{5}) == equal_kept.end(),
+            "the candidate saving the least rebuild work was kept over equal demand");
+
+    // At or under the limit nothing is dropped.
+    require(strongest_shared_candidates(std::span<const SharedCandidateRank>(ranks).first(kLimit),
+                                        kLimit)
+                    .size() == kLimit,
+            "narrowing dropped candidates within the search limit");
+}
+
 void test_shared_capture_combines_two_pressure_owners() {
     FakeManager manager = make_manager(1, 4, 1);
     FakeProgram program;
@@ -4853,6 +5026,46 @@ void test_escape_hatch_ranks_shared_prefixes_with_private_owners() {
             "rung destroyed a shared prefix whose eviction the admission did not need");
 }
 
+// NINFER_MAT_DEBUG on or off for the admission inspections that follow.
+void set_materialization_trace(bool on) {
+#ifdef _WIN32
+    _putenv_s("NINFER_MAT_DEBUG", on ? "1" : "");
+#else
+    if (on) {
+        setenv("NINFER_MAT_DEBUG", "1", 1);
+    } else {
+        unsetenv("NINFER_MAT_DEBUG");
+    }
+#endif
+}
+
+void test_mismatching_shared_prefixes_beyond_the_private_catalog() {
+    // A shared prefix-index entry's slot numbers the shared catalog. With more shared slots than
+    // private ones, a prompt whose key differs from every catalogued shared prefix must be
+    // admitted without consulting the private catalog at those slots, traced or not (issue #39:
+    // an access violation on admission). The test target checks container bounds.
+    FakeManager manager = make_manager(1, 1, 4);
+    FakeProgram program;
+    std::uint64_t order = 1;
+    for (const std::uint32_t digest : {71U, 72U, 73U}) {
+        publish_shared_prefix(manager, program, digest, order++, digest,
+                              ninfer::SharedCandidateEvidence::DefaultAutomatic);
+    }
+    for (const bool trace : {false, true}) {
+        set_materialization_trace(trace);
+        auto inspection =
+            manager.inspect(program, FakePreparedPrompt{99}, make_base(99), order);
+        require(inspection.choice.has_value(),
+                "a prompt matching no shared prefix produced no admission choice");
+        require(inspection.choice->summary().prefix_reuse_path !=
+                    PrefixReusePath::SharedStablePrefix,
+                "a prompt reused a shared prefix whose key it does not match");
+    }
+    set_materialization_trace(false);
+    require_shared_reuse(manager, program, 72, order, true,
+                         "a matching prompt no longer reuses its shared prefix");
+}
+
 void test_automatic_shared_capture_reclaims_oldest_catalog_entry() {
     FakeManager manager = make_manager(1, 4, 2);
     FakeProgram program;
@@ -5348,6 +5561,10 @@ int main() {
     run_test("state transfer payload statistics", test_state_transfer_statistics_use_payload_bytes);
     run_test("branch anchor at the deepest unrestorable match",
              test_branch_anchor_frontier_follows_the_deepest_unrestorable_match);
+    run_test("endpoint anchor frontier keeps a matched endpoint far above its anchors",
+             test_endpoint_anchor_frontier_keeps_a_matched_endpoint_far_above_its_anchors);
+    run_test("long-anchor reuse keeps the conversation only where it forks",
+             test_long_anchor_reuse_retains_the_conversation_only_where_it_forks);
     run_test("independent complete-target oracle",
              test_complete_search_against_small_exhaustive_oracle);
     run_test("publication-only construction",
@@ -5424,6 +5641,10 @@ int main() {
              test_shared_fanout_keeps_owner_edges_live_across_summary_refresh);
     run_test("shared capture multi-owner pressure",
              test_shared_capture_combines_two_pressure_owners);
+    run_test("shared boundaries beyond the subset search",
+             test_more_shared_boundaries_than_the_subset_search_still_plan);
+    run_test("shared candidate narrowing ranks reuse domains",
+             test_candidate_narrowing_ranks_distinct_reuse_domains);
     run_test("infeasible shared capture may reclaim without pressure evidence",
              test_infeasible_shared_capture_may_reclaim_without_pressure_evidence);
     run_test("aborted shared capture logical rollback",
@@ -5471,6 +5692,8 @@ int main() {
              test_escape_hatch_sacrifices_oldest_first_and_demotes_the_rest);
     run_test("escape hatch ranks shared prefixes with private owners",
              test_escape_hatch_ranks_shared_prefixes_with_private_owners);
+    run_test("mismatching shared prefixes beyond the private catalog",
+             test_mismatching_shared_prefixes_beyond_the_private_catalog);
     run_test("shared capture seal failure skips instead of throwing",
              test_shared_capture_seal_failure_skips_instead_of_throwing);
     run_test("automatic reclaim picks the least recently used entry",

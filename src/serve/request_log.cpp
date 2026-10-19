@@ -1,5 +1,6 @@
 #include "serve/request_log.h"
 #include "product/logging/pretty_format.h"
+#include "product/reasoning_loop_options.h"
 #include "product/speculative_options.h"
 
 #include <spdlog/logger.h>
@@ -8,7 +9,9 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
@@ -104,6 +107,7 @@ Json tool_call_parse_json(const ninfer::ToolCallParseDiagnostics& diagnostics) {
                 {"recovered_call_count", diagnostics.recovered_call_count},
                 {"malformed_call_reported", diagnostics.malformed_call_reported},
                 {"trailing_content_dropped", diagnostics.trailing_content_dropped},
+                {"recovered_from_reasoning", diagnostics.recovered_from_reasoning},
                 {"fallback_reason",
                  ninfer::tool_call_parse_fallback_reason_name(diagnostics.fallback_reason)}};
 }
@@ -158,7 +162,15 @@ const char* kv_capacity_mode_name(ninfer::KvCapacityMode mode) {
 }
 
 const char* proposal_head_name(ninfer::ProposalHead proposal) {
-    return proposal == ninfer::ProposalHead::Optimized ? "optimized" : "full";
+    switch (proposal) {
+    case ninfer::ProposalHead::Auto:
+        return "auto";
+    case ninfer::ProposalHead::Full:
+        return "full";
+    case ninfer::ProposalHead::Optimized:
+        return "optimized";
+    }
+    return "unknown";
 }
 
 const char* prefix_reuse_path_name(ninfer::PrefixReusePath path) {
@@ -635,6 +647,11 @@ std::string format_request_done(const RequestLogContext& context,
             << " control=" << (outcome.thinking.applied ? "applied" : "unused");
     }
     if (outcome.thinking.post_thinking_sampling) { out << " post_thinking=applied"; }
+    if (outcome.thinking.loop_detected) {
+        out << " reasoning_loop=" << (outcome.thinking.applied ? "concluded" : "stopped")
+            << " loop_thinking=" << outcome.thinking.loop_thinking_tokens
+            << " loop_coverage=" << outcome.thinking.loop_coverage;
+    }
     return out.str();
 }
 
@@ -711,35 +728,36 @@ std::string format_server_start_json(
             std::string(requested_reasoning_effort_name(*options.default_reasoning_effort));
     }
 
-    record["server"] =
-        Json{{"host", options.host},
-             {"port", options.port},
-             {"public_model_id", public_model_id},
-             {"api_key_configured", !options.api_key.empty()},
-             {"cors_enabled", options.enable_cors},
-             {"unconstrained_response_format", options.unconstrained_response_format},
-             {"assistant_prefill", options.assistant_prefill},
-             {"derive_session_keys", options.derive_session_keys},
-             {"lenient_assistant_history", options.lenient_assistant_history},
-             {"max_request_bytes", options.max_request_bytes},
-             {"media_cache_bytes", options.media_cache_bytes},
-             {"media_live_bytes", options.media_live_bytes},
-             {"media_preprocess_threads", options.media_preprocess_threads},
-             {"request_log_jsonl", options.request_log_jsonl},
-             // null: requests that omit a limit get the Engine's concurrent lane budget.
-             {"default_output_tokens", options.default_max_tokens
-                                           ? Json(*options.default_max_tokens)
-                                           : Json(nullptr)},
-             {"default_output_policy",
-              options.default_max_tokens ? "fixed" : "concurrent_lane_budget"},
-             {"default_thinking",
-              options.enable_thinking ? Json(*options.enable_thinking) : Json(nullptr)},
-             {"default_thinking_budget", std::move(default_thinking_budget)},
-             {"default_reasoning_effort", std::move(default_reasoning_effort)},
-             {"default_preserve_thinking",
-              options.preserve_thinking ? Json(*options.preserve_thinking) : Json(nullptr)},
-             {"default_graft",
-              options.default_graft.empty() ? Json(nullptr) : Json(options.default_graft)}};
+    record["version"] = options.build_version;
+    record["server"]  = Json{
+        {"host", options.host},
+        {"port", options.port},
+        {"public_model_id", public_model_id},
+        {"api_key_configured", !options.api_key.empty()},
+        {"cors_enabled", options.enable_cors},
+        {"unconstrained_response_format", options.unconstrained_response_format},
+        {"assistant_prefill", options.assistant_prefill},
+        {"derive_session_keys", options.derive_session_keys},
+        {"lenient_assistant_history", options.lenient_assistant_history},
+        {"lenient_image_detail", options.lenient_image_detail},
+        {"max_request_bytes", options.max_request_bytes},
+        {"media_cache_bytes", options.media_cache_bytes},
+        {"media_live_bytes", options.media_live_bytes},
+        {"media_preprocess_threads", options.media_preprocess_threads},
+        {"request_log_jsonl", options.request_log_jsonl},
+        // null: requests that omit a limit get the Engine's concurrent lane budget.
+        {"default_output_tokens",
+         options.default_max_tokens ? Json(*options.default_max_tokens) : Json(nullptr)},
+        {"default_output_policy", options.default_max_tokens ? "fixed" : "concurrent_lane_budget"},
+        {"default_thinking",
+         options.enable_thinking ? Json(*options.enable_thinking) : Json(nullptr)},
+        {"default_thinking_budget", std::move(default_thinking_budget)},
+        {"reasoning_loop", product::reasoning_loop_name(options.reasoning_loop)},
+        {"default_reasoning_effort", std::move(default_reasoning_effort)},
+        {"default_preserve_thinking",
+         options.preserve_thinking ? Json(*options.preserve_thinking) : Json(nullptr)},
+        {"default_graft",
+         options.default_graft.empty() ? Json(nullptr) : Json(options.default_graft)}};
     record["artifact"]                             = Json{{"path", options.artifact_path},
                                                           {"size_bytes", std::move(artifact_size)},
                                                           {"architecture", load.architecture},
@@ -838,10 +856,13 @@ std::string format_server_start_json(
              {"kv_lease_growth", cache.kv_lease_growth},
              {"automatic_long_anchors", cache.automatic_long_anchors},
              {"branch_anchors", cache.branch_anchors},
+             {"endpoint_anchors", cache.endpoint_anchors},
              {"long_anchor_min_spacing_tokens", cache.long_anchor_min_spacing_tokens},
+             {"progress_anchor_tokens", cache.progress_anchor_tokens},
              {"mode", cache.mode == ContextCacheMode::Hybrid ? "hybrid" : "legacy"},
              {"host_cache_budget_bytes",
               cache.host_cache_budget_bytes ? Json(*cache.host_cache_budget_bytes) : Json(nullptr)},
+             {"host_cache_auto", options.context_cache.host_cache_auto},
              {"hybrid",
               cache.mode == ContextCacheMode::Hybrid
                   ? Json{{"device_snapshot_slots", cache.hybrid.device_snapshot_slots.value_or(0)},
@@ -874,7 +895,9 @@ std::string format_server_start_json(
              {"kv_capacity_headroom_bytes", memory.kv_capacity_headroom_bytes},
              {"planned_slack_bytes", memory.planned_slack_bytes},
              {"cuda_graph_allowance_bytes", memory.cuda_graph_allowance_bytes},
-             {"cuda_graph_measured_bytes", memory.cuda_graph_measured_bytes},
+             {"cuda_graph_measured_bytes", memory.cuda_graph_measured_bytes
+                                               ? Json(*memory.cuda_graph_measured_bytes)
+                                               : Json(nullptr)},
              {"kv_payload_bytes", memory.kv_payload_bytes},
              {"host_state_capacity_slots", memory.host_state_capacity_slots},
              {"host_state_occupied_slots", memory.host_state_occupied_slots},
@@ -933,12 +956,15 @@ std::string format_request_done_json(const std::string& server_instance_id, std:
                                      ? Json(*outcome.thinking.requested_budget)
                                      : Json(nullptr)},
              {"effective_thinking_budget", outcome.thinking.effective_budget
-                                              ? Json(*outcome.thinking.effective_budget)
-                                              : Json(nullptr)},
+                                               ? Json(*outcome.thinking.effective_budget)
+                                               : Json(nullptr)},
              {"model_thinking_tokens", outcome.thinking.model_thinking_tokens},
              {"thinking_control_tokens", outcome.thinking.injected_tokens},
              {"thinking_control_applied", outcome.thinking.applied},
              {"post_thinking_sampling", outcome.thinking.post_thinking_sampling},
+             {"reasoning_loop_detected", outcome.thinking.loop_detected},
+             {"reasoning_loop_thinking_tokens", outcome.thinking.loop_thinking_tokens},
+             {"reasoning_loop_coverage", outcome.thinking.loop_coverage},
              {"tool_call_count", outcome.tool_calls.size()},
              {"tool_call_parse", tool_call_parse_json(outcome.tool_call_parse)}};
     record["timings_seconds"] = Json{
@@ -1194,6 +1220,51 @@ std::string format_throughput_json(const std::string& server_instance_id, std::u
                  {"host_snapshot_evictions", delta(&RuntimeStats::hybrid_host_snapshot_evictions)},
                  {"host_dead_reclaims", delta(&RuntimeStats::hybrid_host_dead_reclaims)},
                  {"unbacked_node_losses", delta(&RuntimeStats::hybrid_unbacked_node_losses)}};
+    }
+    // Qwen3.8-Flash-Next's n-gram table reads: the interval's rows and passes, the latency
+    // quantiles as the upper bound of the histogram bucket that holds them, and the device time the
+    // PLE layer waited for its rows.
+    const NgramTableStats& rows_now  = current.ngram_table;
+    const NgramTableStats& rows_then = previous.ngram_table;
+    if (rows_now.rows != 0) {
+        std::array<std::uint64_t, NgramTableStats::kLatencyBuckets> latency{};
+        std::uint64_t batches = 0;
+        for (std::size_t b = 0; b < latency.size(); ++b) {
+            latency[b] =
+                monotonic_delta(rows_then.latency_histogram[b], rows_now.latency_histogram[b]);
+            batches += latency[b];
+        }
+        const auto quantile = [&](double q) -> Json {
+            const auto rank    = static_cast<std::uint64_t>(std::ceil(q * double(batches)));
+            std::uint64_t seen = 0;
+            for (std::size_t b = 0; b < latency.size() && batches != 0; ++b) {
+                seen += latency[b];
+                if (seen >= rank) { return std::uint64_t{1} << b; }
+            }
+            return nullptr;
+        };
+        record["ngram_table"] = Json{
+            {"rows", monotonic_delta(rows_then.rows, rows_now.rows)},
+            {"resident_rows", monotonic_delta(rows_then.resident_rows, rows_now.resident_rows)},
+            {"batches", batches},
+            {"read_seconds", monotonic_delta(rows_then.read_seconds, rows_now.read_seconds)},
+            {"read_latency_us", Json{{"p50", quantile(0.5)}, {"p99", quantile(0.99)}}},
+            {"stalls", monotonic_delta(rows_then.stalls, rows_now.stalls)},
+            {"stall_seconds", monotonic_delta(rows_then.stall_seconds, rows_now.stall_seconds)}};
+    }
+    // Qwen3.8-Flash-Next's host- or disk-resident experts: the interval's routes, device-slot
+    // hits, CPU-computed pairs and bytes copied to the devices.
+    const ExpertResidencyStats& experts_now  = current.experts;
+    const ExpertResidencyStats& experts_then = previous.experts;
+    if (experts_now.routes != 0) {
+        record["experts"] = Json{
+            {"routes", monotonic_delta(experts_then.routes, experts_now.routes)},
+            {"hits", monotonic_delta(experts_then.hits, experts_now.hits)},
+            {"cpu_routes", monotonic_delta(experts_then.cpu_routes, experts_now.cpu_routes)},
+            {"admitted", monotonic_delta(experts_then.admitted, experts_now.admitted)},
+            {"transferred_bytes",
+             monotonic_delta(experts_then.transferred_bytes, experts_now.transferred_bytes)},
+            {"slots", experts_now.slots}};
     }
     record["engine_recoveries"] =
         monotonic_delta(previous.engine_recoveries, current.engine_recoveries);

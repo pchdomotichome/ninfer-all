@@ -2,6 +2,7 @@
 
 #include "product/media_acquire/acquire.h"
 #include "serve/console_log.h"
+#include "serve/structured_output.h"
 #include "serve/translate.h"
 
 #include <cuda_runtime_api.h>
@@ -196,6 +197,7 @@ ninfer::OwnedMedia acquire_media(const ContentPart& part, Clock::time_point dead
     }
     media.bytes               = std::move(source_bytes);
     media.image_resize_policy = part.image_resize_policy;
+    media.image_detail        = part.image_detail;
     return media;
 }
 
@@ -268,6 +270,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.max_pending_requests     = options.max_pending_requests;
     engine_options.pending_timeout_ms       = options.pending_timeout_ms;
     engine_options.prefill_chunk            = options.prefill_chunk;
+    engine_options.decode_rounds_per_prefill = options.decode_rounds_per_prefill;
     engine_options.fast_prefill_kernel      = options.fast_prefill_kernel;
     engine_options.kv_cache                 = options.kv_cache;
     engine_options.enable_vision            = options.enable_vision;
@@ -275,6 +278,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.vision_residency         = options.vision_residency;
     engine_options.vision_max_merged_tokens = options.vision_max_merged_tokens;
     engine_options.use_cuda_graph           = options.use_cuda_graph;
+    engine_options.gpu_clock_floor_mhz      = options.gpu_clock_floor_mhz;
     engine_options.lm_head_q4               = options.lm_head_q4;
     engine_options.lm_head_q6               = options.lm_head_q6;
     engine_options.embedding_q4             = options.embedding_q4;
@@ -305,6 +309,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.expert_residency           = options.expert_residency;
     engine_options.ngram_table                = options.ngram_table;
     engine_options.expert_cache_bytes         = options.expert_cache_bytes;
+    engine_options.hybrid_experts             = options.hybrid_experts;
     engine_options.context_cost.preset_path = options.context_cost_presets;
     engine_options.device_profile           = options.device_profile;
     engine_options.device_profile_path      = options.device_profile_path;
@@ -342,6 +347,12 @@ GenerationService::GenerationService(
     engine_options.diagnostic_observer   = std::move(diagnostic_observer);
     engine_options.slot_auto_save.listener = std::move(auto_save_listener);
     engine_           = std::make_unique<ninfer::Engine>(std::move(engine_options));
+    // A request that says nothing about thinking gets its template's default. Qwen's templates
+    // think unless told not to; Gemma 4's chat template keeps thinking off unless enable_thinking
+    // asks for it, so without --no-thinking or a request flag a Gemma 4 server answers directly.
+    if (!options_.enable_thinking && engine_->load_summary().architecture == "Gemma4ForCausalLM") {
+        options_.enable_thinking = false;
+    }
     request_capacity_ = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
     count_capacity_ = std::make_shared<RequestCapacity>(
@@ -407,20 +418,8 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& incomin
                                                 ContextCacheHints context_cache,
                                                 CacheParticipation cache_participation,
                                                 DeadlinePolicy deadline_policy) const {
-    std::optional<GenerationRequest> unconstrained;
-    if (incoming.structured_output.kind != StructuredOutputKind::None &&
-        !options_.structured_output) {
-        if (!options_.unconstrained_response_format) {
-            ApiError error;
-            error.message =
-                "structured output requires the server to start with --structured-output";
-            error.param = "response_format";
-            error.code  = "response_format_not_supported";
-            throw ApiException(std::move(error));
-        }
-        unconstrained.emplace(incoming);
-        unconstrained->structured_output = {};
-    }
+    const std::optional<GenerationRequest> unconstrained = drop_unavailable_constraints(
+        incoming, options_.structured_output, options_.unconstrained_response_format);
     const GenerationRequest& request = unconstrained ? *unconstrained : incoming;
     if (!request.cache_prompt) { cache_participation = CacheParticipation::Disabled; }
     PreparedRequest prepared;

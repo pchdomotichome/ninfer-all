@@ -10,6 +10,10 @@ zero-centred norms drop their stored ``1 + w`` and ``ssm_a`` becomes ``A_log`` a
 move without re-quantising, so its Use carries an ``input_columns`` auxiliary: column ``c`` of the
 stored matrix multiplies element ``input_columns[c]`` of the grouped activation.
 
+The GDN controls ``ssm_alpha`` and ``ssm_beta`` are BF16 operands of the Engine. Exporters store
+them as BF16 words or as Q8_0 blocks (Underdog-Saluki and similar releases), whose values are
+rounded to BF16: the one place a stored value changes.
+
 Vision comes from the release's ``mmproj`` GGUF (``--source vision=mmproj.gguf``) with the official
 Vision formats, DFlash2 from ``--source dflash2`` and the frontend resources from ``--model``, which
 needs only the base checkpoint's config and tokenizer files.
@@ -55,6 +59,8 @@ from .ternary import (
 )
 
 MTP_BLOCK = LAYERS
+# The storage the GDN controls may have (gdn_control_source).
+GDN_CONTROL_TYPES = ("BF16", "Q8_0")
 
 EXPECTED_HEADER = {
     "general.architecture": "qwen35",
@@ -94,8 +100,9 @@ def _layer_tensors(prefix: str) -> dict[str, tuple[tuple[int, ...], str]]:
     }
 
 
-def expected_tensors(mtp: bool) -> dict[str, tuple[tuple[int, ...], str]]:
-    """Row-major shape and kind ("blocks" = any stored ggml block type) of every tensor."""
+def expected_tensors(mtp: bool) -> dict[str, tuple[tuple[int, ...], str | tuple[str, ...]]]:
+    """Row-major shape and kind of every tensor: "blocks" (any stored ggml block type) or the
+    ggml type names it may have."""
 
     out = {
         "token_embd.weight": ((VOCABULARY, HIDDEN), "blocks"),
@@ -112,8 +119,8 @@ def expected_tensors(mtp: bool) -> dict[str, tuple[tuple[int, ...], str]]:
             p + "attn_qkv.weight": ((GDN_CHANNELS, HIDDEN), "blocks"),
             p + "attn_gate.weight": ((GDN_VALUE_DIM, HIDDEN), "blocks"),
             p + "ssm_out.weight": ((HIDDEN, GDN_VALUE_DIM), "blocks"),
-            p + "ssm_alpha.weight": ((GDN_VALUE_HEADS, HIDDEN), "BF16"),
-            p + "ssm_beta.weight": ((GDN_VALUE_HEADS, HIDDEN), "BF16"),
+            p + "ssm_alpha.weight": ((GDN_VALUE_HEADS, HIDDEN), GDN_CONTROL_TYPES),
+            p + "ssm_beta.weight": ((GDN_VALUE_HEADS, HIDDEN), GDN_CONTROL_TYPES),
             p + "ssm_a": ((GDN_VALUE_HEADS,), "F32"),
             p + "ssm_dt.bias": ((GDN_VALUE_HEADS,), "F32"),
             p + "ssm_conv1d.weight": ((GDN_CHANNELS, GDN_TAPS), "F32"),
@@ -157,9 +164,19 @@ def validate(gguf: GGUFFile) -> None:
     for name, (shape, kind) in expected.items():
         info = gguf.tensors[name]
         stored = info.type_id in GGUF_FORMATS_BY_TYPE
-        if info.shape != shape or (kind == "blocks") != stored or (
-            kind != "blocks" and info.type_name != kind
-        ):
+        is_ssm_pair = name.endswith(("ssm_alpha.weight", "ssm_beta.weight"))
+        if info.shape != shape:
+            raise ValueError(f"{gguf.path}: {name} is {info.type_name} {info.shape}")
+        if is_ssm_pair:
+            # GGUF community releases disagree on this pair: GSQ-RCO ships BF16,
+            # agentionai Q8_0, mudler APEX Q3_K. Accept any stored block type
+            # and dequantize on read.
+            if not stored and info.type_name != "BF16":
+                raise ValueError(f"{gguf.path}: {name} is {info.type_name} {info.shape}")
+        elif kind == "blocks":
+            if not stored:
+                raise ValueError(f"{gguf.path}: {name} is {info.type_name} {info.shape}")
+        elif info.type_name not in ((kind,) if isinstance(kind, str) else kind):
             raise ValueError(f"{gguf.path}: {name} is {info.type_name} {info.shape}")
     end = max(info.offset + info.nbytes for info in gguf.tensors.values())
     if gguf.data_bytes_available < end:
@@ -170,6 +187,7 @@ def block_format(gguf: GGUFFile, tensor: str) -> str:
     return GGUF_FORMATS_BY_TYPE[gguf.info(tensor).type_id].name
 
 
+GGML_Q8_0 = 8
 GGML_Q2_0 = 42
 
 
@@ -185,10 +203,40 @@ def dequantize_q2_0(blocks: np.ndarray) -> np.ndarray:
     return ((codes.astype(np.float32) - 1.0) * d).reshape(rows, -1)
 
 
+def dequantize_q8_0(blocks: np.ndarray) -> np.ndarray:
+    """ggml Q8_0 rows: 32 values per 34-byte block, a binary16 d then 32 signed code bytes q;
+    value j is d * q[j], exact in FP32."""
+
+    rows = blocks.shape[0]
+    b = np.ascontiguousarray(blocks).reshape(rows, -1, 34)
+    d = b[..., :2].copy().view("<f2").astype(np.float32)
+    q = b[..., 2:].copy().view(np.int8).astype(np.float32)
+    return (q * d).reshape(rows, -1)
+
+
+def quantize_q8_0(values: np.ndarray) -> np.ndarray:
+    """ggml quantize_row_q8_0_ref over rows of whole blocks, in FP32: per 32 values a binary16
+    d = amax / 127 and codes round(x / d), halves away from zero. Returns [rows, row bytes]."""
+
+    rows = values.shape[0]
+    blocks = np.ascontiguousarray(values, dtype=np.float32).reshape(rows, -1, 32)
+    d = np.abs(blocks).max(axis=-1) / np.float32(127.0)
+    inverse = np.divide(np.float32(1.0), d, out=np.zeros_like(d), where=d != 0)
+    scaled = blocks * inverse[..., None]
+    codes = (np.sign(scaled) * np.floor(np.abs(scaled) + np.float32(0.5))).astype(np.int8)
+    out = np.empty((rows, blocks.shape[1], 34), dtype=np.uint8)
+    out[..., :2] = d.astype("<f2")[..., None].view(np.uint8)
+    out[..., 2:] = codes.view(np.uint8)
+    return out.reshape(rows, -1)
+
+
 def _dequantize(gguf: GGUFFile, tensor: str, first: int, last: int) -> torch.Tensor:
     blocks = gguf.read_blocks(tensor, first, last)
-    if gguf.info(tensor).type_id == GGML_Q2_0:
-        values = dequantize_q2_0(blocks)
+    local = {GGML_Q2_0: dequantize_q2_0, GGML_Q8_0: dequantize_q8_0}.get(
+        gguf.info(tensor).type_id
+    )
+    if local is not None:
+        values = local(blocks)
         return torch.from_numpy(np.ascontiguousarray(values)).reshape(last - first, -1)
     try:
         from gguf import GGMLQuantizationType
@@ -229,6 +277,94 @@ def block_source(
     return LogicalSource(
         shape, f"{tensor}[{format}]{list(shape)}", _flat(values, shape[1]), encoded
     )
+
+
+def gdn_control_source(gguf: GGUFFile, tensor: str) -> LogicalSource:
+    """A GDN A/B control as its BF16 operand, its value heads in the grouped order: BF16 words
+    as stored, Q8_0 values rounded to BF16."""
+
+    if gguf.info(tensor).type_id == GGML_Q8_0:
+        values = untile(_dequantize(gguf, tensor, 0, GDN_VALUE_HEADS).numpy(), 1)
+        return array_source(
+            torch.from_numpy(np.ascontiguousarray(values)).to(torch.bfloat16), tensor
+        )
+    words = untile(gguf.read_bf16_words(tensor), 1)
+    return array_source(
+        torch.from_numpy(np.ascontiguousarray(words.view(np.int16))).view(torch.bfloat16),
+        tensor,
+    )
+
+
+def q2_native_source(
+    gguf: GGUFFile, tensor: str, shape: tuple[int, int], select: RowMap
+) -> LogicalSource:
+    """Import GSQ Q2_0 as native offset codes and the exact signed binary16 scale words.
+
+    The row map selects rows within a tensor or flattened expert bank. The physical K padding
+    holds logical integer zero (stored code 1); wholly padding groups have positive-zero scales.
+    No floating-point dequantization or quantizer participates in the encoded import.
+    """
+    if gguf.info(tensor).type_id != GGML_Q2_0:
+        raise ValueError(f"{tensor}: native Q2 import requires stored Q2_0 blocks")
+    if len(shape) != 2 or shape[1] != gguf.info(tensor).shape[-1] or shape[1] % 64:
+        raise ValueError(f"{tensor}: native Q2 import requires complete 64-value blocks")
+    raw_source = block_source(gguf, tensor, shape, select)
+    k = shape[1]
+    groups, padded_groups = k // 64, ((k + 127) // 128) * 2
+
+    def encoded(begin: int, end: int) -> EncodedRows:
+        index = select(begin, end)
+        low, high = int(index.min()), int(index.max()) + 1
+        blocks = gguf.read_blocks(tensor, low, high)[index - low].reshape(end - begin, groups, 18)
+        scale_words = np.zeros((end - begin, padded_groups), dtype="<u2")
+        scale_words[:, :groups] = np.ascontiguousarray(blocks[..., :2]).view("<u2").squeeze(-1)
+        scales = scale_words.view("<f2")
+        if not np.isfinite(scales).all():
+            raise ValueError(f"{tensor}: Q2 scales must be finite binary16 words")
+        codes = np.full((end - begin, padded_groups, 16), 0x55, dtype=np.uint8)
+        codes[:, :groups] = blocks[..., 2:]
+        return EncodedRows("q2_g64_fp16", torch.from_numpy(codes.reshape(end - begin, -1)),
+                           torch.from_numpy(scales), packed=True)
+
+    return LogicalSource(shape, f"{tensor}[q2_g64_fp16]{list(shape)}",
+                         raw_source.read_values, encoded)
+
+
+def q8_native_source(
+    gguf: GGUFFile, tensor: str, shape: tuple[int, int], select: RowMap
+) -> LogicalSource:
+    """Preserve compatible Q8_0 integer codes and binary16 scales as native Q8 planes.
+
+    Native Q8 excludes -128 and negative-zero scales, and requires zero codes for zero-scale
+    groups. Refuse an incompatible source instead of silently changing its representation.
+    """
+    if gguf.info(tensor).type_id != 8:
+        raise ValueError(f"{tensor}: native Q8 import requires stored Q8_0 blocks")
+    if len(shape) != 2 or shape[1] != gguf.info(tensor).shape[-1] or shape[1] % 32:
+        raise ValueError(f"{tensor}: native Q8 import requires complete 32-value blocks")
+    raw_source = block_source(gguf, tensor, shape, select)
+    groups, padded_groups = shape[1] // 32, ((shape[1] + 127) // 128) * 4
+
+    def encoded(begin: int, end: int) -> EncodedRows:
+        index = select(begin, end)
+        low, high = int(index.min()), int(index.max()) + 1
+        blocks = gguf.read_blocks(tensor, low, high)[index - low].reshape(end - begin, groups, 34)
+        raw_words = np.ascontiguousarray(blocks[..., :2]).view("<u2").squeeze(-1)
+        raw_scales = raw_words.view("<f2")
+        raw_codes = blocks[..., 2:]
+        if (not np.isfinite(raw_scales).all() or (raw_words == 0x8000).any() or
+                (raw_codes == 0x80).any() or
+                ((raw_scales == 0)[..., None] & (raw_codes != 0)).any()):
+            raise ValueError(f"{tensor}: Q8_0 source is outside the native Q8 code/scale contract")
+        scales = np.zeros((end - begin, padded_groups), dtype="<f2")
+        scales[:, :groups] = raw_scales
+        codes = np.zeros((end - begin, padded_groups, 32), dtype=np.uint8)
+        codes[:, :groups] = raw_codes
+        return EncodedRows("q8_g32_fp16", torch.from_numpy(codes.reshape(end - begin, -1)),
+                           torch.from_numpy(scales), packed=True)
+
+    return LogicalSource(shape, f"{tensor}[q8_g32_fp16]{list(shape)}",
+                         raw_source.read_values, encoded)
 
 
 def tiled_input_columns() -> np.ndarray:
@@ -315,13 +451,7 @@ def text_sources(
             gguf, g + "ssm_out.weight", (HIDDEN, GDN_VALUE_DIM), rows()
         )
         for role, tensor in (("a_projection", "ssm_alpha.weight"), ("b_projection", "ssm_beta.weight")):
-            words = untile(gguf.read_bf16_words(g + tensor), 1)
-            direct[n + role] = array_source(
-                torch.from_numpy(np.ascontiguousarray(words.view(np.int16))).view(
-                    torch.bfloat16
-                ),
-                g + tensor,
-            )
+            direct[n + role] = gdn_control_source(gguf, g + tensor)
         ssm_a = untile(gguf.read_direct(g + "ssm_a"), 1).astype(np.float64)
         if not np.all(ssm_a < 0):
             raise ValueError(f"{g}ssm_a must be strictly negative (-exp(A_log))")
@@ -498,8 +628,11 @@ __all__ = [
     "block_format",
     "block_source",
     "expected_tensors",
+    "gdn_control_source",
     "has_mtp",
     "qwen3_8_27b_gguf",
+    "q2_native_source",
+    "q8_native_source",
     "text_sources",
     "tiled_input_columns",
     "validate",

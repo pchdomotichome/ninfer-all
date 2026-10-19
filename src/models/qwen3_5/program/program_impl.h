@@ -1,5 +1,6 @@
 #pragma once
-#include "models/qwen3_5/program/speculative/mtp_adaptive.h"
+#include "runtime/contract/grammar_masks.h"
+#include "runtime/contract/mtp_adaptive.h"
 #include "models/qwen3_5/program/internal.h"
 
 #include "core/arena.h"
@@ -11,6 +12,7 @@
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/sampling.h"
 #include "core/decode_graph.h"
+#include "models/qwen3_5/execution/expert_runtime.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 #include "models/qwen3_5/program/graft_injection.h"
 
@@ -52,6 +54,8 @@
 
 namespace ninfer::models::qwen3_5::detail {
 
+using runtime::MtpAdaptiveBatchController;
+using runtime::MtpAdaptiveSignal;
 using PreparedPromptData    = qwen3_5::PreparedPromptData;
 using RewriteCheckpointKind = qwen3_5::RewriteCheckpointKind;
 using RewriteCheckpointSpec = qwen3_5::RewriteCheckpointSpec;
@@ -298,6 +302,8 @@ struct CapturePressureCandidateImpl : ResourceCandidateState {};
 struct HybridQuoteImpl {
     runtime::RequestPlanSummary summary;
     ops::SamplingConfig sampling;
+    std::shared_ptr<text::GrammarState> grammar;
+    bool logprobs                             = false;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     std::shared_ptr<const qwen3_5::VisionControlPlan> vision_control_plan;
@@ -527,6 +533,13 @@ struct RequestControl {
     PendingCandidate pending;
     ops::SamplingConfig sampling_host;
     std::shared_ptr<text::GrammarState> grammar;
+    // With a grammar: whether its masks are cheap enough for its rounds to verify drafts, and
+    // while they are not, the mask of its next token computing ahead of its next round, started
+    // at the ledger frontier it was computed for.
+    runtime::GrammarMaskCost mask_cost;
+    std::shared_ptr<runtime::GrammarMaskJob> next_mask;
+    std::uint32_t next_mask_frontier = 0;
+    std::chrono::steady_clock::time_point next_mask_started;
     bool logprobs = false;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
@@ -571,11 +584,16 @@ struct RequestControl {
 
     std::optional<Prefill> prefill;
 
-    // Returns the request slot to Empty once its lane's resources have been released.
+    // Returns the request slot to Empty once its lane's resources have been released. Nothing of
+    // the request survives into the lane's next one: its grammar and its logprob switch belong to
+    // the request, whichever admission path installs the next.
     void retire() noexcept {
         prefill.reset();
         lifecycle            = Lifecycle::Empty;
         pending              = {};
+        mask_cost            = {};
+        next_mask_frontier   = 0;
+        logprobs             = false;
         active_resources     = {};
         optional_resources   = {};
         publish_continuation = true;
@@ -583,6 +601,8 @@ struct RequestControl {
         lease_space_limited  = false;
         lease_minimum_target = {};
         lease_ceiling        = 0;
+        grammar.reset();
+        next_mask.reset();
     }
 };
 
@@ -621,12 +641,13 @@ public:
     };
 
     ProgramImpl(const execution::Parameters& parameters, const SequencePlanImpl& plan,
-                DeviceContext& device, const StartupObserver& startup_observer);
+                DeviceContext& device, const StartupObserver& startup_observer,
+                std::unique_ptr<execution::NativeExpertRuntime> experts);
     ~ProgramImpl() noexcept;
 
     [[nodiscard]] RequestBasePlan plan_request(const PreparedPromptData& prompt,
                                                const runtime::ResolvedExecutionOptions& options,
-                                               std::optional<std::uint32_t> branch_anchor = {});
+                                               std::span<const std::uint32_t> engine_anchors = {});
     [[nodiscard]] std::uint32_t matched_prefix_tokens(const ContinuationHandle& owner,
                                                       const PreparedPromptData& prompt) const;
     [[nodiscard]] std::uint32_t matched_prefix_tokens(const SharedPrefixHandle& owner,
@@ -681,6 +702,7 @@ public:
     // the lane must not be given a prefill unit, and every other lane keeps running.
     [[nodiscard]] bool vision_pending(SequenceHandle sequence) const noexcept;
     void update_sampling(SequenceHandle sequence, const ResolvedSamplingParameters& sampling);
+    [[nodiscard]] StructuredReadiness structured_readiness(SequenceHandle sequence);
     [[nodiscard]] bool wait_context_transfer() noexcept;
     [[nodiscard]] bool try_claim_seal_window() noexcept;
     void release_seal_window() noexcept;
@@ -851,8 +873,9 @@ public:
     const std::size_t kv_payload_bytes;
     const std::size_t graph_allowance_bytes;
     // Free device memory CUDA Graph preparation consumed at startup (instantiate, upload and one
-    // launch of every executable), for comparison with graph_allowance_bytes.
-    std::size_t graph_measured_bytes = 0;
+    // launch of every executable), for comparison with graph_allowance_bytes; empty when no free
+    // memory was left to measure it by.
+    std::optional<std::size_t> graph_measured_bytes = 0;
     const WorkspacePlan workspace_plan;
 
     // Overlay Vision residency only: the persistent arena is VMM-backed so free KV granules can be
@@ -937,6 +960,9 @@ public:
     std::array<RequestControl, kMaximumConcurrency> requests;
     std::array<std::uint64_t, kMaximumConcurrency> lane_epochs{};
 
+    // Declared before Graphs so all graph users die before the delivery tables and service.
+    std::unique_ptr<execution::NativeExpertRuntime> experts;
+    ExpertDeliveryStats expert_startup_stats;
     DecodeGraphFamily ordinary_graphs;
     DecodeGraphFamily mtp_graphs;
     DecodeGraphFamily dflash_graphs;
@@ -1622,6 +1648,13 @@ private:
                                      qwen3_5::ContinuationSummary& summary) noexcept;
     bool salvage_continuation(SequenceState& state, RequestControl& request, std::uint32_t lane,
                               std::uint32_t continuation_index, qwen3_5::AbortResult& out) noexcept;
+    // Keeps the checkpoints a cancelled prefill has already captured when its live state cannot
+    // be salvaged as an endpoint: they are published as a continuation without one, truncated to
+    // the deepest checkpoint. Declines, leaving the lane untouched for the strict clear, unless
+    // the lane holds a retained checkpoint and a settled exclusive writer.
+    bool retain_prefill_progress(SequenceState& state, RequestControl& request, std::uint32_t lane,
+                                 std::uint32_t continuation_index,
+                                 qwen3_5::AbortResult& out) noexcept;
     [[nodiscard]] detail::PhysicalResources
     release_checkpoint_reference(StateImageHandle checkpoint) noexcept;
     [[nodiscard]] bool can_release_shared_prefix_state(std::uint32_t index,
@@ -1672,6 +1705,15 @@ private:
                                        std::span<const std::uint32_t> starts,
                                        std::span<const std::uint32_t> counts);
     void validate_licensed_tokens(std::span<const TokenId> tokens) const;
+    // The drafts a lane's round may verify: none for a structured lane whose masks cost more than
+    // a verification hides, so its round computes one mask for it.
+    [[nodiscard]] static std::uint32_t speculative_extent(const RequestControl& request) noexcept;
+    // The lane's next mask computed ahead (structured_readiness), handed to the round when it
+    // verifies no drafts; otherwise none and the round starts the lane's masks itself.
+    [[nodiscard]] std::shared_ptr<runtime::GrammarMaskJob>
+    take_next_mask(RequestControl& request, const SequenceState& sequence, std::uint32_t extent);
+    // After a round: rethrows a mask job's error and updates each structured lane's mask cost.
+    void observe_masks(std::span<const std::uint32_t> lanes);
     void mark_workspace_usage(std::size_t phase_bytes) noexcept;
     [[nodiscard]] std::vector<NgramProposer::Match>
     propose_ngram(std::span<const std::uint32_t> lanes,

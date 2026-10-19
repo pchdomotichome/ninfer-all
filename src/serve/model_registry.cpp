@@ -1,6 +1,8 @@
+#include "serve/console_log.h"
 #include "serve/model_registry.h"
 
 #include <algorithm>
+#include <exception>
 #include <stdexcept>
 #include <utility>
 
@@ -179,6 +181,16 @@ bool ModelRegistry::make_room_locked(std::unique_lock<std::mutex>& lock, std::si
             if (models_[*victim].service->suspendable()) {
                 try {
                     put_to_sleep_locked(lock, *victim);
+                } catch (const std::invalid_argument& error) {
+                    // A refusal that will not change: this Engine cannot suspend at all, the same
+                    // way it would refuse every retry. Make room by unloading the victim, as the
+                    // router does for a model that cannot sleep.
+                    write_console_log(ConsoleLogLevel::Warning,
+                                      "model '" + models_[*victim].definition.id +
+                                          "' cannot suspend (" + error.what() +
+                                          "); it is unloaded to make room");
+                    unload_locked(lock, *victim);
+                    continue;
                 } catch (...) {
                     // Its Engine is still settling the request that just let go of it; look again
                     // shortly rather than spin.
@@ -344,15 +356,16 @@ void ModelRegistry::sleep(std::string_view model, bool hold, bool wait) {
 }
 
 ModelStatusSnapshot ModelRegistry::snapshot_locked(const Slot& slot) const {
-    return ModelStatusSnapshot{.id         = slot.definition.id,
-                               .aliases    = slot.definition.aliases,
-                               .state      = slot.state,
-                               .arguments  = slot.definition.arguments,
-                               .failed     = slot.failed,
-                               .last_error = slot.last_error,
-                               .leases     = slot.leases,
-                               .last_used  = slot.last_used,
-                               .held       = slot.held};
+    return ModelStatusSnapshot{.id          = slot.definition.id,
+                               .aliases     = slot.definition.aliases,
+                               .state       = slot.state,
+                               .arguments   = slot.definition.arguments,
+                               .max_context = slot.definition.options.max_context,
+                               .failed      = slot.failed,
+                               .last_error  = slot.last_error,
+                               .leases      = slot.leases,
+                               .last_used   = slot.last_used,
+                               .held        = slot.held};
 }
 
 std::vector<ModelStatusSnapshot> ModelRegistry::status() const {

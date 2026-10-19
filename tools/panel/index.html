@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel ninfer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230e1420'/%3E%3Crect x='4' y='4' width='8' height='8' rx='2' fill='none' stroke='%233fc0c9' stroke-width='1.5'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/css/panel.css">
+</head>
+<body>
+<aside class="sidenav" id="sidenav">
+  <div class="brand">
+    <div class="brand-logo">
+      <svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div>
+      <h1>NInfer <span class="badge-version" id="hdr-ver">—</span></h1>
+    </div>
+  </div>
+  <nav id="nav">
+    <button data-pg="dash" class="active"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>Dashboard</button>
+    <button data-pg="bench" data-group="bench"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Bench<span class="caret"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span></button>
+    <div class="subnav" id="subnav-bench" hidden>
+      <button data-pg="bench" data-sub="aiperf" class="active">AIPerf</button>
+      <button data-pg="bench" data-sub="probe">LLM Probe</button>
+      <button data-pg="bench" data-sub="rank">Ranking</button>
+    </div>
+    <button data-pg="control"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a1 1 0 0 1 0 1.82 1.65 1.65 0 0 1-1.82.33 1.65 1.65 0 0 0-1 1.51V21a1 1 0 0 1-1 1 1 1 0 0 1-1-1v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a1 1 0 0 1-1.82 0 1.65 1.65 0 0 1-.33-1.82 1.65 1.65 0 0 0-1.51-1H3a1 1 0 0 1-1-1 1 1 0 0 1 1-1h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a1.65 1.65 0 0 0 1.82-1.82 1.65 1.65 0 0 0-.33-1.82 1.65 1.65 0 0 0-1.51-1H3a1 1 0 0 1-1-1 1 1 0 0 1 1-1h.09A1.65 1.65 0 0 0 4.6 5a1.65 1.65 0 0 0 .33-1.82l-.06-.06a1.65 1.65 0 0 0 1.82 0 1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a1 1 0 0 1-1-1 1 1 0 0 1 1-1h.09A1.65 1.65 0 0 0 4.6 3a1.65 1.65 0 0 0-.33-1.82l-.06-.06a1 1 0 0 1 0-1.82A1.65 1.65 0 0 1 6.03 3z"/></svg>Models</button>
+    <button data-pg="router"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a11 11 0 0 0 11 11"/></svg>Router</button>
+    <button data-pg="fit"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="8" y="9" width="8" height="6" rx="1"/></svg>Fit</button>
+    <button data-pg="convert"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Convert</button>
+  </nav>
+  <span class="sidenav-foot sub" id="hdrsub">loading…</span>
+</aside>
+<div class="topwrap">
+<header>
+  <span class="hchips" id="hostchips"></span>
+</header>
+<div class="rail" id="rail">
+          <div class="rail-row" id="rail-global"></div>
+          <div class="rail-rows" id="rail-models"></div>
+        </div>
+</div>
+<main>
+  <div id="banner"></div>
+
+  <!-- ═══════════════ DASHBOARD ═══════════════ -->
+  <div class="pg active" id="pg-dash">
+    <!-- Band 1: the verdict + what the engine is doing right now. The
+         verdict line answers "is it fine?" in one sentence (InferenceInquire), not
+         with a lone dot: the detail sits beside it, it does not replace it. -->
+    <section id="now">
+      <div class="sechead verdict">
+        <h2><span class="dot off" id="vd-dot"></span><span id="verdict">connecting…</span></h2>
+        <span class="note" id="vd-detail"></span>
+        <span class="spacer"></span>
+        <span class="note" id="liveupd"></span>
+      </div>
+      <div id="alerts" hidden></div>
+      <div class="now-metrics" id="now-metrics"></div>
+      <div id="livebody"></div>
+    </section>
+
+    <!-- Band 2: metrics + charts -->
+    <section id="metrics">
+      <div class="sechead"><h2>Metrics</h2><span class="note" id="livenote"></span></div>
+      <div style="padding:15px">
+        <div class="tiles" id="tiles"></div>
+        <div class="slots-host" id="slots-host"></div>
+        <div class="charts">
+          <div class="chartbox"><div class="k">Throughput (tok/s)</div>
+            <div class="wins" id="w-tp"></div>
+            <div class="canvas-wrap"><canvas id="c-tp"></canvas></div></div>
+          <div class="chartbox"><div class="k">Prefill (tok/s)</div>
+            <div class="wins" id="w-decode"></div>
+            <div class="canvas-wrap"><canvas id="c-decode"></canvas></div></div>
+          <div class="chartbox">
+            <div class="k">Acceptance by position</div>
+            <div class="subnote" id="sp-note"></div>
+            <div id="spec-pos" class="specpos-wrap"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Band 3: requests | models (rows, not cards) -->
+    <div class="two">
+      <section id="reqs" class="tight">
+        <div class="sechead">
+          <h2>Recent requests</h2>
+          <span class="note" id="reqs-note"></span>
+          <span class="spacer"></span>
+          <button id="q-reqmore" style="white-space:nowrap">More columns</button>
+        </div>
+        <div class="scroll-y">
+        <table id="tbl-req">
+          <thead><tr id="thead-req"></tr></thead>
+          <tbody id="tbody-req"></tbody>
+        </table>
+        </div>
+        <div class="empty" id="empty-req" hidden>No requests yet — run something or wait for the server to process.</div>
+      </section>
+
+      <section id="modelsec" class="tight">
+        <div class="sechead"><h2>Models</h2><span class="note" id="modelnote"></span></div>
+        <div class="quick" id="quickload" hidden></div>
+        <div class="model-rows" id="modelrows"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ═══════════════ BENCHMARK ═══════════════ -->
+  <div class="pg" id="pg-bench">
+   <div class="subpg active" data-subpg="aiperf">
+    <div class="strip" id="strip"></div>
+    <section id="bench">
+      <div class="sechead">
+        <h2>Benchmarks / AIPerf</h2>
+        <span class="note" id="benchnote"></span>
+        <span class="spacer"></span>
+        <button id="live-toggle" style="display:none">Live: off</button>
+      </div>
+      <form class="run" id="runform">
+        <label class="f grow">Model<select id="f-model"></select></label>
+        <label class="f">Profile<select id="f-profile"></select></label>
+        <label class="f">Dataset<select id="f-dataset"></select></label>
+        <label class="f">Conc.<input id="f-conc" type="number" min="1" max="32" value="2" style="width:70px"></label>
+        <label class="f">Requests<input id="f-req" type="number" min="1" value="24" style="width:80px"></label>
+        <label class="f">OSL<input id="f-osl" type="number" min="1" value="128" style="width:70px"></label>
+        <label class="f grow">Tokenizer<input id="f-tok" style="min-width:260px"
+          title="Must match the model: with another tokenizer AIPerf produces no results and the run is never registered"></label>
+        <button class="primary" id="btn-run">Run</button>
+        <button id="btn-stop" disabled>Stop</button>
+      </form>
+      <div id="livejobs"></div>
+    </section>
+
+    <section id="results">
+      <div class="sechead">
+        <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg> Registry / ranking</h2>
+        <span class="note" id="resnote"></span>
+        <span class="spacer"></span>
+        <span class="note">filters</span>
+        <select id="q-profile"><option value="">all</option></select>
+        <select id="q-engine"><option value="">any engine</option></select>
+        <select id="q-spec"><option value="">any spec</option></select>
+        <select id="q-dataset"><option value="">any dataset</option></select>
+        <button id="btn-compare" style="white-space:nowrap" title="Tick 2 runs with the checkbox to compare"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg> Compare (0/2)</button>
+        <button id="btn-export-csv" style="white-space:nowrap" title="Export the current view to CSV"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> CSV</button>
+        <button id="q-more" style="white-space:nowrap">More columns</button>
+      </div>
+      <div style="overflow-x:auto">
+      <table id="tbl">
+        <thead><tr id="thead"></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      </div>
+      <div class="empty" id="empty" hidden>No runs yet.</div>
+      <div class="pager" id="pager"></div>
+    </section>
+   </div>
+
+   <div class="subpg" data-subpg="probe">
+    <section id="probe">
+      <div class="sechead">
+        <h2>Bench / LLM Probe</h2>
+        <span class="note" id="probenote">protocol conformance and model capability</span>
+        <span class="spacer"></span>
+        <select id="probe-model"></select>
+        <button id="probe-run">Run probe</button>
+      </div>
+      <div id="probe-gate"></div>
+      <div id="probe-cards"></div>
+      <div class="model-rows" id="probe-runs"></div>
+    </section>
+   </div>
+
+   <div class="subpg" data-subpg="rank">
+    <section id="rank">
+      <div class="sechead">
+        <h2>Bench / Ranking</h2>
+        <span class="note">gates first, then the axes. No single score.</span>
+        <span class="spacer"></span>
+        <select id="rank-order">
+          <option value="agentic">agentic fit</option>
+          <option value="decode">decode</option>
+        </select>
+      </div>
+      <div id="rank-gates"></div>
+      <div id="rank-rows"></div>
+    </section>
+   </div>
+  </div>
+
+  <!-- ═══════════════ CONTROL ═══════════════ -->
+  <div class="pg" id="pg-control">
+    <section id="ctl-engine">
+      <div class="sechead"><h2>Models</h2>
+        <span class="note" id="ctl-note"></span>
+        <span class="spacer"></span>
+        <span class="note" id="ctl-upd"></span>
+      </div>
+      <div id="ctl-body" style="padding:0"></div>
+    </section>
+
+    <section id="ctl-recipe">
+      <div class="sechead"><h2>Recipes / Profiles</h2>
+        <span class="note">server flags → form → preset</span>
+        <span class="spacer"></span>
+        <span class="note" id="rec-note"></span>
+      </div>
+      <div class="two" style="padding:15px">
+        <div>
+          <label class="f" style="margin-bottom:8px">Artifact<select id="r-artifact"></select></label>
+          <div class="note" id="r-recipe" style="margin-bottom:8px">Pick an artifact: its
+            components decide the flags.</div>
+          <div id="r-flags"></div>
+        </div>
+        <div>
+          <label class="f" style="margin-bottom:8px">Generated preset</label>
+          <pre id="r-preview" style="max-height:420px;overflow-y:auto"></pre>
+          <div style="display:flex;gap:8px;margin-top:10px">
+            <button class="primary" id="r-save">Save preset</button>
+            <button id="r-launch">Save + launch</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="ctl-endpoint">
+      <div class="sechead"><h2>Endpoint for agents</h2>
+        <span class="note">how to point a client at the router</span>
+        <span class="spacer"></span>
+        <button id="ep-copy">Copy</button>
+      </div>
+      <div style="padding:15px">
+        <div class="two">
+          <div><div class="dgroup"><h4>Configuration</h4><dl class="kv" id="ep-kv"></dl></div></div>
+          <div><div class="dgroup">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <h4>Integration example</h4>
+              <div class="code-tabs">
+                <button class="code-tab active" data-lang="curl">cURL</button>
+                <button class="code-tab" data-lang="python">Python</button>
+                <button class="code-tab" data-lang="js">TypeScript / Node</button>
+              </div>
+            </div>
+            <pre id="ep-example"></pre></div></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ═══════════════ ROUTER ═══════════════ -->
+  <div class="pg" id="pg-router">
+    <div id="router-status" style="padding:12px 15px"></div>
+    <section id="router-cat">
+      <div class="sechead"><h2>Router catalog</h2>
+        <span class="note" id="router-note"></span>
+        <span class="spacer"></span>
+        <button id="router-restart">Restart router</button>
+      </div>
+      <div style="padding:15px">
+        <div id="router-rows" class="router-rows"></div>
+        <div id="router-restart-note" class="note" style="margin-top:10px"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ═══════════════ FIT ═══════════════ -->
+  <div class="pg" id="pg-fit">
+    <section id="fit-form">
+      <div class="sechead">
+        <h2>Fit</h2>
+        <span class="note">does this model fit on this card — every constant measured on this
+          fork, none of them estimated</span>
+      </div>
+      <form class="run" autocomplete="off">
+        <label class="f grow">Model (router catalog)<select id="fit-src"></select></label>
+        <label class="f">Weights, GiB<input id="fit-size" type="text" inputmode="decimal"
+          size="7" placeholder="from disk"></label>
+        <label class="f">Measured profile<select id="fit-profile"></select></label>
+        <label class="f">Speculation<select id="fit-spec"></select></label>
+        <label class="f">KV format<select id="fit-kv"></select></label>
+        <label class="f">Context<input id="fit-ctx" type="text" inputmode="numeric" size="8"></label>
+        <label class="f">OS reserve, MiB<input id="fit-reserve" type="text" inputmode="numeric"
+          size="6"></label>
+        <label class="f">GPU<select id="fit-gpu"></select></label>
+      </form>
+    </section>
+
+    <section id="fit-budget">
+      <div class="sechead"><h2>Memory budget</h2>
+        <span class="spacer"></span>
+        <span class="note">weights + cache + state + graphs, against the card's free VRAM</span>
+      </div>
+      <div style="padding:15px" id="fit-out"></div>
+    </section>
+
+    <section id="fit-prober">
+      <div class="sechead"><h2>Prober</h2>
+        <span class="note">a size nobody measured here: the artifact you are about to convert, or
+          a GGUF straight from the Hub</span>
+      </div>
+      <div style="padding:15px">
+        <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+          <label class="f grow" style="min-width:280px">Hugging Face repo
+            <input id="fit-hf-repo" type="text" placeholder="search the Hub, or paste owner/repo"></label>
+          <button class="primary" id="fit-hf-go">Read sizes</button>
+        </div>
+        <!-- Instant results while typing; picking one runs the probe on it. -->
+        <div id="fit-hf-hits" style="max-height:300px;overflow-y:auto"></div>
+        <div id="fit-hf-out"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ═══════════════ CONVERT ═══════════════ -->
+  <div class="pg" id="pg-convert">
+    <section id="conv">
+      <div class="sechead">
+        <h2>Convert</h2>
+        <span class="note">GGUF / safetensors → .ninfer</span>
+        <span class="spacer"></span>
+        <span class="note" id="convnote"></span>
+      </div>
+      <div class="two" style="padding:15px">
+        <div>
+          <label class="f" style="margin-bottom:8px">.ninfer artifact to inspect
+            <select id="c-artifacts" style="width:100%"></select></label>
+          <button id="c-inspect" style="width:100%">Read artifact</button>
+          <div id="convresult" style="margin-top:14px"></div>
+        </div>
+        <div>
+          <label class="f" style="margin-bottom:8px">Source (checkpoint / GGUF)
+            <span style="display:flex;gap:6px">
+              <select id="c-sources" style="flex:1;min-width:0"></select>
+              <button id="c-hf" title="Search models on Hugging Face" style="flex-shrink:0;white-space:nowrap"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg> HF</button>
+            </span></label>
+          <label class="f" style="margin:8px 0">Recipe<select id="c-recipe" style="width:100%">
+            <option value="qwen3_8_27b">qwen3_8_27b</option>
+            <option value="qwen3_5_9b">qwen3_5_9b</option>
+            <option value="qwen3_6_27b">qwen3_6_27b</option>
+          </select></label>
+          <div id="c-flagsum" style="font:11px var(--mono);color:var(--dim);margin:0 0 8px"></div>
+          <label id="c-del-wrap" title="Opt-in: deletes only the staging the panel downloaded (ninfer/inbox/), never a file you already had."
+                 style="display:flex;align-items:center;gap:7px;margin-bottom:8px;font:11px var(--sans);color:var(--text-muted);cursor:pointer">
+            <input type="checkbox" id="c-del" disabled>
+            <span>delete the downloaded GGUF (inbox) when the conversion finishes</span>
+          </label>
+          <button class="primary" id="c-run" style="width:100%">Convert</button>
+          <div id="convlog" style="margin-top:14px"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Run comparison modal -->
+  <div id="modal-compare" class="modal-backdrop" style="display:none">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/></svg> Run comparator</h3>
+        <button id="modal-compare-close" style="padding:4px 9px">✕</button>
+      </div>
+      <div class="modal-body" id="modal-compare-body"></div>
+    </div>
+  </div>
+
+  <!-- Hugging Face search modal -->
+  <div id="modal-hf" class="modal-backdrop" style="display:none">
+    <div class="modal-box" style="width:640px;max-width:94vw">
+      <div class="modal-head">
+        <h3><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg> Models on Hugging Face</h3>
+        <button id="modal-hf-close" style="padding:4px 9px">✕</button>
+      </div>
+      <div class="modal-body">
+        <input id="hf-q" type="text" placeholder="search a model… (e.g. qwen3.8-27b)"
+               style="width:100%;margin-bottom:12px">
+        <div id="hf-status" style="font:11.5px var(--mono);color:var(--dim);margin-bottom:8px"></div>
+        <div id="hf-results" style="max-height:380px;overflow-y:auto"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- A model's config. It shows the router's REAL launch tree (status.args)
+       rather than a form: those flags live in router-preset.ini and are edited by
+       hand. A modal that pretended to save would be worse than this note. -->
+  <div id="modal-cfg" class="modal-backdrop" style="display:none">
+    <div class="modal-box" style="width:660px;max-width:94vw">
+      <div class="modal-head">
+        <h3><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> <span id="modal-cfg-title">Model config</span></h3>
+        <button id="modal-cfg-close" style="padding:4px 9px">✕</button>
+      </div>
+      <div class="modal-body" id="modal-cfg-body"></div>
+    </div>
+  </div>
+</main>
+
+
+<script src="/vendor-chart.umd.js"></script>
+<script type="module" src="/js/boot.js"></script>
+</body>
+</html>

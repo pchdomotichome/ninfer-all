@@ -2,11 +2,14 @@
 #include "models/qwen3_5/execution/rotation.h"
 
 #include "core/weight_view.h"
+#include "ninfer/ops/linear_swiglu.h"
 
 #include <array>
 #include <limits>
+#include <optional>
 #include <type_traits>
 #include <stdexcept>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -24,7 +27,8 @@ auto with_context(const std::string& context, Function&& function) {
 
 class Prepare {
 public:
-    explicit Prepare(const Model& model) : model_(model) {}
+    Prepare(const Model& model, std::vector<DeviceBuffer>& expert_tables)
+        : model_(model), tables_(expert_tables) {}
 
     // The integer-activation route is an sm_86 addition: it feeds groupwise-int weights to the s8
     // tensor cores, which Ampere has and which no A16 route uses. It is registered per exact shape
@@ -166,10 +170,86 @@ public:
         out.verify_gate_up_policy = out.gate_up.policy;
 #if defined(NINFER_SM8X_COMPAT)
         if (model_.options().mlp_a8_decode && out.gate_up.weight.qtype == QType::Q4_G64_FP16 &&
-            out.gate_up.weight.n == 34816 && out.gate_up.weight.k == 5120) {
+            ops::linear_swiglu_compiles_a8_int_decode(out.gate_up.weight.n, out.gate_up.weight.k)) {
             out.verify_gate_up_policy = ops::LinearPolicy::AllowA8IntDecode;
         }
 #endif
+        return out;
+    }
+
+    // One bank: a device table of every expert's base pointer. Each expert is a WeightId whose rows
+    // are a contiguous slice of the artifact's fused parent, so a table entry is that slice's device
+    // address and row_bytes is the parent's row stride in its own block format. This is the same
+    // table qwen4_exp builds, without the off-device residency that model adds on top.
+    ops::GgufExpertTable bank(std::span<const WeightId> ids) const {
+        if (ids.empty()) { throw std::invalid_argument("SparseMoe GGUF: empty expert bank"); }
+        QType format           = QType::GGUF_Q8_0;
+        std::int64_t row_bytes = 0;
+        std::vector<const void*> pointers;
+        pointers.reserve(ids.size());
+        for (const WeightId id : ids) {
+            const Weight w = native_weight(model_.weight(id).view);
+            if (!is_gguf(w.qtype)) {
+                throw std::invalid_argument(model_.weight(id).name +
+                                            ": the expert kernels take GGUF block banks");
+            }
+            const auto block = gguf_block_shape(w.qtype);
+            const auto row = static_cast<std::int64_t>(w.k / block.elements) * block.bytes;
+            if (pointers.empty()) {
+                format    = w.qtype;
+                row_bytes = row;
+            } else if (w.qtype != format || row != row_bytes) {
+                throw std::invalid_argument(model_.weight(id).name +
+                                            ": every expert of a bank must share its block type");
+            }
+            pointers.push_back(w.qdata);
+        }
+        tables_.emplace_back(pointers.size() * sizeof(void*));
+        DeviceBuffer& table = tables_.back();
+        table.copy_from_host(pointers.data(), pointers.size() * sizeof(void*));
+        return {format, static_cast<const void* const*>(table.p), row_bytes};
+    }
+
+    // The experts of a GGUF-blocks artifact: the base-pointer tables the expert Op reads, plus the
+    // router and shared gate as the tensors the router Op projects from. Empty for native banks,
+    // which keep going to prepare_sparse_moe_weights.
+    std::optional<GgufMoeParameters> gguf_moe(const MoeWeights& w) const {
+        if (w.experts.empty()) { return std::nullopt; }
+        if (!is_gguf(native_weight(model_.weight(w.experts.front().gate).view).qtype)) {
+            return std::nullopt;
+        }
+        std::vector<WeightId> gate, up, down;
+        gate.reserve(w.experts.size());
+        up.reserve(w.experts.size());
+        down.reserve(w.experts.size());
+        for (const auto& expert : w.experts) {
+            gate.push_back(expert.gate);
+            up.push_back(expert.up);
+            down.push_back(expert.down);
+        }
+        GgufMoeParameters out;
+        out.banks.gate        = bank(gate);
+        out.banks.up          = bank(up);
+        out.banks.down        = bank(down);
+        // The shared expert is one entry per bank; a span cannot be built from a braced list, so
+        // the single-element vectors are named rather than inlined.
+        const std::vector<WeightId> shared_gate{w.shared.gate}, shared_up{w.shared.up},
+            shared_down{w.shared.down};
+        out.banks.shared_gate = bank(shared_gate);
+        out.banks.shared_up   = bank(shared_up);
+        out.banks.shared_down = bank(shared_down);
+        // The router Op takes tensors, and reads the router as one row of `hidden` per expert. The
+        // artifact stores exactly that, as [experts, hidden]; tensor() reverses the view's axes, so
+        // the Tensor comes out as [hidden, experts] over the same memory. The shared gate is the
+        // [1, hidden] shared_score row -- one dot product per token -- not the shared expert's own
+        // gate projection, which is a [shared, hidden] matrix with a different meaning entirely.
+        out.router      = tensor(w.router);
+        out.shared_gate = tensor(w.shared_score);
+        out.top_k       = std::get<MoeConfig>(model_.config().text.ffn).num_experts_per_tok;
+        out.banks.experts = static_cast<std::int32_t>(gate.size());
+        // The expert Op selects its instantiation from this, and no tensor of the call states it.
+        out.banks.width         = native_weight(model_.weight(w.experts.front().gate).view).n;
+        out.banks.device_resident = true;
         return out;
     }
 
@@ -178,6 +258,71 @@ public:
         const auto& moe = std::get<MoeWeights>(w.ffn);
         if (std::get<MoeConfig>(model_.config().text.ffn).num_experts_per_tok != 8) {
             throw std::invalid_argument("SparseMoe implements top-8 routing");
+        }
+        // Experts stored as GGUF blocks run a different Op over a different representation, so they
+        // are prepared before the native path rather than inside it.
+        if (auto gguf = gguf_moe(moe)) { return *gguf; }
+        if (moe.delivery_layer) {
+            const auto& source = model_.expert_sources().layers.at(*moe.delivery_layer);
+            const std::array router{model_.input(moe.router), model_.input(moe.shared_score)};
+            ops::SparseMoeWeights out;
+            out.router_shared_gate = ops::prepare_linear_weight(router).weight;
+            out.shared_gate_up = ops::prepare_linear_swiglu_weight(
+                model_.input(moe.shared.gate), model_.input(moe.shared.up)).weight;
+            out.shared_down = ops::prepare_linear_weight(model_.input(moe.shared.down)).weight;
+            out.routed_gate_up.qtype = source.gate_up.format;
+            out.routed_down.qtype = source.down.format;
+            const auto gu = out.routed_gate_up.qtype, down = out.routed_down.qtype;
+            const bool grouped = out.shared_gate_up.qtype == QType::Q8_G32_FP16 &&
+                                  out.shared_down.qtype == QType::Q8_G32_FP16 &&
+                ((gu == QType::Q4_G64_FP16 &&
+                  (down == QType::Q5_G64_FP16 || down == QType::Q6_G64_FP16)) ||
+                 (gu == QType::Q8_G32_FP16 && down == QType::Q8_G32_FP16));
+            const bool nvfp4 = gu == QType::NVFP4 && down == QType::NVFP4 &&
+                                out.shared_gate_up.qtype == QType::NVFP4 &&
+                                out.shared_down.qtype == QType::NVFP4;
+            if ((!grouped && !nvfp4) || out.router_shared_gate.qtype != QType::BF16 ||
+                out.router_shared_gate.n != 257 || out.router_shared_gate.k != 2048 ||
+                moe.experts.size() != 256 || out.shared_gate_up.n != 1024 ||
+                out.shared_gate_up.k != 2048 || out.shared_down.n != 2048 ||
+                out.shared_down.k != 512) {
+                throw std::invalid_argument("streamed SparseMoe native geometry/profile differs");
+            }
+            if (nvfp4) {
+#if defined(NINFER_SM8X_COMPAT) && !defined(NINFER_SM120_NVFP4)
+                throw std::invalid_argument("SparseMoe NVFP4 expert banks need an sm_120a build");
+#endif
+                std::optional<float> activation_divisor, down_divisor;
+                for (const auto& e : moe.experts) {
+                    for (const auto id : {e.gate, e.up, e.down}) {
+                        const auto& uses = model_.weight(id).uses;
+                        if (uses.size() != 1 || uses[0].policy != ops::LinearPolicy::AllowA4 ||
+                            !uses[0].activation_input_divisor) {
+                            throw std::invalid_argument("streamed NVFP4 experts require AllowA4");
+                        }
+                        if (id == e.down) {
+                            if (!down_divisor) { down_divisor = uses[0].activation_input_divisor; }
+                            if (down_divisor != uses[0].activation_input_divisor) {
+                                throw std::invalid_argument("streamed NVFP4 down activation divisors differ");
+                            }
+                            continue;
+                        }
+                        if (!activation_divisor) { activation_divisor = uses[0].activation_input_divisor; }
+                        if (activation_divisor != uses[0].activation_input_divisor) {
+                            throw std::invalid_argument("streamed NVFP4 gate/up activation divisors differ");
+                        }
+                    }
+                }
+                out.routed_gate_up.input_scale_divisor = *activation_divisor;
+                out.routed_down.input_scale_divisor = *down_divisor;
+                if (model_.input(moe.shared.gate).policy != ops::LinearPolicy::AllowA4 ||
+                    model_.input(moe.shared.up).policy != ops::LinearPolicy::AllowA4 ||
+                    model_.input(moe.shared.down).policy != ops::LinearPolicy::AllowA4 ||
+                    *activation_divisor != out.shared_gate_up.input_scale_divisor) {
+                    throw std::invalid_argument("streamed NVFP4 shared activation profile differs");
+                }
+            }
+            return StreamedMoeParameters{out, *moe.delivery_layer};
         }
         std::vector<ops::WeightInput> gate_up, down;
         gate_up.reserve(2 * moe.experts.size());
@@ -277,15 +422,17 @@ public:
         out.final_norm          = tensor(w.final_norm);
         // A bank whose parts share no contiguous parent -- GGUF parts of different block types, or
         // mixed formats such as Q8 K/V beside BF16 Q/gate -- has no packed form, and the dense
-        // rows below serve alone.
+        // rows below serve alone. Which architectures reach that is not this function's business:
+        // the Op that reads the rows projects each one on its own, whatever produced it. `packed`
+        // still wins wherever it exists, so a model whose parts do join is untouched.
+        //
+        // A MoE-architecture MTP lands here whenever its GGUF release splits the projections the way
+        // this one does -- query and gate head-interleaved in one tensor, key and value in two more.
         const bool packable = ops::joins(inputs);
-        if (!packable && model_.config().text.architecture != Architecture::Qwen3_5) {
-            throw std::invalid_argument("MTP attention weights share no contiguous parent");
-        }
         if (packable) {
             out.projection.packed = ops::prepare_linear_weight(inputs);
         }
-        if (model_.config().text.architecture == Architecture::Qwen3_5) {
+        if (!packable || model_.config().text.architecture == Architecture::Qwen3_5) {
             out.projection.rows = {linear(a.query), linear(a.key), linear(a.gate), linear(a.value)};
         }
         out.query_norm  = tensor(a.query_norm);
@@ -402,12 +549,17 @@ public:
 
 private:
     const Model& model_;
+    // The device arrays of expert base pointers a GgufMoeParameters names. Owned by the Parameters
+    // being built, not here: this builder is transient and they outlive it. DeviceBuffer's move
+    // hands over its allocation without changing the address, so a vector reallocation does not
+    // invalidate the pointers already handed out.
+    std::vector<DeviceBuffer>& tables_;
 };
 
 } // namespace
 
 Parameters::Parameters(const Model& source) : model(source) {
-    const Prepare prepare(model);
+    const Prepare prepare(model, expert_tables);
     const auto& w        = model.weights();
     text.token_embedding = native_weight(model.weight(w.text.token_embedding).view);
     text.output_head     = prepare.head(w.text.output_head_use);

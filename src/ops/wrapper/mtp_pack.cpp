@@ -55,19 +55,26 @@ void mtp_split_attn_in(const Tensor& attn_in, Tensor& q, Tensor& k, Tensor& gate
     require_bf16_contiguous_nonnull(v, op, "v");
     const std::int32_t tokens = attn_in.ne[1];
     if (tokens <= 0) { throw std::invalid_argument("mtp_split_attn_in: T must be positive"); }
-    require_shape(attn_in, 14336, tokens, op, "attn_in");
-    if (q.ne[0] != 256 || q.ne[1] != 24 || q.ne[2] != tokens || q.ne[3] != 1) {
-        throw std::invalid_argument("mtp_split_attn_in: invalid shape for q");
-    }
-    if (k.ne[0] != 256 || k.ne[1] != 4 || k.ne[2] != tokens || k.ne[3] != 1) {
-        throw std::invalid_argument("mtp_split_attn_in: invalid shape for k");
-    }
-    if (gate.ne[0] != 256 || gate.ne[1] != 24 || gate.ne[2] != tokens || gate.ne[3] != 1) {
-        throw std::invalid_argument("mtp_split_attn_in: invalid shape for gate");
-    }
-    if (v.ne[0] != 256 || v.ne[1] != 4 || v.ne[2] != tokens || v.ne[3] != 1) {
-        throw std::invalid_argument("mtp_split_attn_in: invalid shape for v");
-    }
+    // The parent is q and gate (each heads x head_dim) plus k and v (each KV heads x head_dim),
+    // flattened to rows: two times the query rows plus two times the KV rows. Every one of those is
+    // read from the operands, so a model with a different head count or head dimension is checked
+    // by construction instead of against a shape written down here.
+    // q/gate are [head_dim, query_heads, T] views and k/v are [head_dim, kv_heads, T]; a
+    // projection's row count is head_dim * heads, and the output's own stride per token is the
+    // same product, so indexing it linearly by that stride is exact.
+    const std::int32_t q_rows    = q.ne[0] * q.ne[1];
+    const std::int32_t kv_rows   = k.ne[0] * k.ne[1];
+    const std::int32_t attn_rows = 2 * (q_rows + kv_rows);
+    require_shape(attn_in, attn_rows, tokens, op, "attn_in");
+    const auto check = [&](const Tensor& t, std::int32_t rows, const char* name) {
+        if (t.ne[2] != tokens || t.ne[3] != 1 || t.ne[0] * t.ne[1] != rows) {
+            throw std::invalid_argument(std::string("mtp_split_attn_in: invalid shape for ") + name);
+        }
+    };
+    check(q, q_rows, "q");
+    check(k, kv_rows, "k");
+    check(gate, q_rows, "gate");
+    check(v, kv_rows, "v");
 
     detail::mtp_split_attn_in_launch(attn_in, q, k, gate, v, stream);
 }

@@ -4,7 +4,7 @@
 #include "ops/attn_input_proj/q8/q8_attn_input_kernels_unified.h"
 #include "ops/linear/common/route_table.h"
 #include "core/device.h"
-#include "ops/linear/q8/q8_k2048_decode.cuh"
+#include "ops/linear/q8/q8_decode.cuh"
 
 namespace ninfer::ops::detail {
 
@@ -18,7 +18,7 @@ void launch_companion_decode(const Tensor& x, const Weight& weight, Tensor& q, T
     using Output = Q8SplitOutput3<4096, 1024, 1024>;
     const Output output{static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
                         static_cast<__nv_bfloat16*>(v.data)};
-    q8_k2048_decode_kernel<kRows, RowsPerCta><<<kRows / RowsPerCta, RowsPerCta * 32, 0, stream>>>(
+    q8_decode_kernel<kRows, 2048, RowsPerCta><<<kRows / RowsPerCta, RowsPerCta * 32, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
         static_cast<const std::uint8_t*>(weight.scales), output);
     CUDA_CHECK(cudaGetLastError());
@@ -39,7 +39,7 @@ void q8_attn_input_decode_launch(const Tensor& x, const Weight& weight, Tensor& 
     const Output output{static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
                         static_cast<__nv_bfloat16*>(gate.data),
                         static_cast<__nv_bfloat16*>(v.data)};
-    q8_k2048_decode_kernel<kRows, kRowsPerCta>
+    q8_decode_kernel<kRows, 2048, kRowsPerCta>
         <<<kRows / kRowsPerCta, kRowsPerCta * 32, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),

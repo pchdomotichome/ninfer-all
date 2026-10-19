@@ -2,6 +2,7 @@
 
 #include "ninfer/types.h"
 
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -41,6 +42,11 @@ inline void apply_default_ngram_draft_tokens(SpeculativeOptions& options,
 }
 
 inline void validate_speculative_cli_options(const SpeculativeOptions& options) {
+    if (!std::isfinite(options.draft_min_p) || options.draft_min_p < 0 ||
+        options.draft_min_p > 1 ||
+        (options.draft_min_p != 0 && options.backend != SpeculativeBackend::Mtp)) {
+        throw std::invalid_argument("--draft-min-p requires --spec mtp and a finite value in [0,1]");
+    }
     if (options.ngram_archive_bytes != 0 &&
         (options.ngram_draft_tokens == 0 || options.ngram_session_bytes < (1ULL << 20) ||
          options.ngram_session_bytes > options.ngram_archive_bytes)) {
@@ -64,9 +70,9 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
     }
     switch (options.backend) {
     case SpeculativeBackend::None:
-        if (options.draft_tokens != 0 || options.proposal_head != ProposalHead::Full) {
-            throw std::invalid_argument(
-                "--draft-tokens and --lm-head-draft require --spec mtp|dflash|dflash2");
+        if (options.draft_tokens != 0 || options.proposal_head != ProposalHead::Auto) {
+            throw std::invalid_argument("--draft-tokens, --lm-head-draft and --full-draft-head "
+                                        "require --spec mtp|dflash|dflash2");
         }
         if (options.mtp_policy != MtpDraftPolicy::Fixed) {
             throw std::invalid_argument("--adaptive-mtp requires --spec mtp");

@@ -11,16 +11,15 @@
 namespace ninfer::ops::detail {
 namespace {
 
-constexpr int kRows = 5120;
-
 // residual_out[col, row] += W x, in the bf16 residual stream: the same fp32 add and single
 // rounding as the GEMV and split2 residual epilogues.
-struct Q5SmallTResidualEpilogue {
+template <int Rows>
+struct Q5SmallTResidualEpilogueT {
     __nv_bfloat16* out;
     int columns;
 
     __device__ __forceinline__ void add(int row, int col, float value) const {
-        __nv_bfloat16& slot = out[static_cast<std::int64_t>(col) * kRows + row];
+        __nv_bfloat16& slot = out[static_cast<std::int64_t>(col) * Rows + row];
         slot                = __float2bfloat16_rn(__bfloat162float(slot) + value);
     }
 
@@ -36,11 +35,11 @@ struct Q5SmallTResidualEpilogue {
     }
 };
 
-template <int K, int XCols, int Stages, int KWarps = 8>
+template <int Rows, int K, int XCols, int Stages, int KWarps = 8>
 void launch(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t stream) {
-    const Q5SmallTResidualEpilogue epilogue{static_cast<__nv_bfloat16*>(residual_out.data),
-                                            x.ne[1]};
-    q5_small_t_mma_launch<kRows, K, XCols, Stages, Q5SmallTResidualEpilogue, KWarps>(
+    const Q5SmallTResidualEpilogueT<Rows> epilogue{
+        static_cast<__nv_bfloat16*>(residual_out.data), x.ne[1]};
+    q5_small_t_mma_launch<Rows, K, XCols, Stages, Q5SmallTResidualEpilogueT<Rows>, KWarps>(
         stream, static_cast<const __nv_bfloat16*>(x.data),
         static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint8_t*>(w.qhigh),
         static_cast<const std::uint8_t*>(w.scales), epilogue, x.ne[1]);
@@ -62,17 +61,17 @@ void launch(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t
 //   17408  32   222.2    146.4              215.0 / 166.9 (s2)
 //
 // (A two-deep ring at 32 columns and four K warps needs 50.7 KB, past the static limit.)
-template <int K>
+template <int Rows, int K>
 void launch_columns(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t stream) {
     const int columns = x.ne[1];
     if (columns <= 4) {
-        launch<K, 4, 2>(x, w, residual_out, stream);
+        launch<Rows, K, 4, 2>(x, w, residual_out, stream);
     } else if (columns <= 8) {
-        launch<K, 8, 1>(x, w, residual_out, stream);
+        launch<Rows, K, 8, 1>(x, w, residual_out, stream);
     } else if (columns <= 16) {
-        launch<K, 16, 2, 4>(x, w, residual_out, stream);
+        launch<Rows, K, 16, 2, 4>(x, w, residual_out, stream);
     } else {
-        launch<K, 32, 1, 4>(x, w, residual_out, stream);
+        launch<Rows, K, 32, 1, 4>(x, w, residual_out, stream);
     }
 }
 
@@ -83,15 +82,27 @@ void q5_linear_add_small_t_mma_launch(const Tensor& x, const Weight& w, Tensor& 
     if (x.ne[1] < 1 || x.ne[1] > 32) {
         throw std::invalid_argument("q5 linear_add small-T MMA: T must be in [1,32]");
     }
-    if (residual_out.ne[0] != kRows || w.n != kRows) {
-        throw std::invalid_argument("q5 linear_add small-T MMA: rows must be 5120");
+    // The residual's own row count is the projection's output width and the weight's input
+    // width is the reduction; both come from the operands, so a new pair is a new
+    // instantiation here rather than another literal.
+    if (w.n != residual_out.ne[0]) {
+        throw std::invalid_argument("q5 linear_add small-T MMA: weight and residual disagree on rows");
     }
-    if (w.k == 6144 && w.padded_shape[1] == 6144) {
-        launch_columns<6144>(x, w, residual_out, stream);
-    } else if (w.k == 17408 && w.padded_shape[1] == 17408) {
-        launch_columns<17408>(x, w, residual_out, stream);
+    if (w.k != w.padded_shape[1]) {
+        throw std::invalid_argument("q5 linear_add small-T MMA: weight K is padded");
+    }
+    if (w.n == 5120 && w.k == 6144) {
+        launch_columns<5120, 6144>(x, w, residual_out, stream);
+    } else if (w.n == 5120 && w.k == 17408) {
+        launch_columns<5120, 17408>(x, w, residual_out, stream);
+    } else if (w.n == 4096 && w.k == 4096) {
+        launch_columns<4096, 4096>(x, w, residual_out, stream);
+    } else if (w.n == 4096 && w.k == 12288) {
+        launch_columns<4096, 12288>(x, w, residual_out, stream);
+    } else if (w.n == 24576 && w.k == 4096) {
+        launch_columns<24576, 4096>(x, w, residual_out, stream);
     } else {
-        throw std::invalid_argument("q5 linear_add small-T MMA: unsupported exact K");
+        throw std::invalid_argument("q5 linear_add small-T MMA: unsupported exact shape");
     }
     CUDA_CHECK(cudaGetLastError());
 }

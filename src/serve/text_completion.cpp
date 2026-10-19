@@ -163,16 +163,6 @@ void require_neutral_controls(const Json& body) {
                         control.key, std::string(control.key) + "_not_supported");
         }
     }
-    if (present(body, "grammar")) {
-        const Json& grammar = body.at("grammar");
-        if (!grammar.is_string()) { bad_request("grammar must be a string", "grammar"); }
-        if (!grammar.get_ref<const std::string&>().empty()) {
-            bad_request(
-                "grammar requests constrained decoding by a GBNF grammar, which NInfer does "
-                "not provide; use json_schema or response_format",
-                "grammar", "constrained_decoding_not_supported");
-        }
-    }
     if (present(body, "lora")) {
         const Json& lora = body.at("lora");
         if (!lora.is_array()) { bad_request("lora must be an array", "lora"); }
@@ -256,18 +246,21 @@ void parse_structured_output_fields(const Json& body, TextCompletionDialect dial
         output.structured_output =
             parse_structured_output(body.at("response_format"), true, "response_format");
     }
-    if (dialect != TextCompletionDialect::LlamaCpp || !present(body, "json_schema")) { return; }
-    if (output.structured_output.kind != StructuredOutputKind::None) {
-        bad_request("json_schema and response_format are exclusive", "json_schema");
+    if (dialect == TextCompletionDialect::LlamaCpp && present(body, "json_schema")) {
+        if (output.structured_output.kind != StructuredOutputKind::None) {
+            bad_request("json_schema and response_format are exclusive", "json_schema");
+        }
+        // llama.cpp's json_schema is the bare schema; an empty one admits any JSON object.
+        const Json& schema = body.at("json_schema");
+        const Json format =
+            schema.is_object() && schema.empty()
+                ? Json{{"type", "json_object"}}
+                : Json{{"type", "json_schema"},
+                       {"json_schema", Json{{"name", "json_schema"}, {"schema", schema}}}};
+        output.structured_output       = parse_structured_output(format, true, "json_schema");
+        output.structured_output_param = "json_schema";
     }
-    // llama.cpp's json_schema is the bare schema; an empty one admits any JSON object.
-    const Json& schema = body.at("json_schema");
-    const Json format =
-        schema.is_object() && schema.empty()
-            ? Json{{"type", "json_object"}}
-            : Json{{"type", "json_schema"},
-                   {"json_schema", Json{{"name", "json_schema"}, {"schema", schema}}}};
-    output.structured_output = parse_structured_output(format, true, "json_schema");
+    parse_constrained_decoding_extensions(body, output);
 }
 
 std::vector<std::string> parse_response_fields(const Json& body) {
@@ -484,6 +477,11 @@ std::string make_text_completion_response(const TextCompletionContext& context,
                        openai_finish_reason(outcome.finish_reason))});
     payload["usage"]   = openai_usage_json(outcome);
     payload["timings"] = completion_timings_json(outcome);
+    if (outcome.metrics.speculative_rounds != 0 ||
+        outcome.metrics.speculative_draft_tokens != 0) {
+        payload["metrics"] =
+            OutJson{{"speculative_decoding", spec_decode_metrics_json(outcome.metrics)}};
+    }
     add_slot_identity(payload, outcome);
     return dump(payload);
 }
@@ -604,8 +602,14 @@ std::vector<std::string> TextCompletionStream::finish(const GenerationOutcome& o
     OutJson final_chunk = openai_base(context_);
     final_chunk["choices"] =
         OutJson::array({openai_choice(std::string(), openai_finish_reason(outcome.finish_reason))});
+    const bool has_spec_decode = outcome.metrics.speculative_rounds != 0 ||
+                                 outcome.metrics.speculative_draft_tokens != 0;
     if (!context_.response.include_usage) {
         final_chunk["timings"] = completion_timings_json(outcome);
+        if (has_spec_decode) {
+            final_chunk["metrics"] =
+                OutJson{{"speculative_decoding", spec_decode_metrics_json(outcome.metrics)}};
+        }
         add_slot_identity(final_chunk, outcome);
     }
     events.push_back(event(final_chunk));
@@ -614,6 +618,10 @@ std::vector<std::string> TextCompletionStream::finish(const GenerationOutcome& o
         usage["choices"] = OutJson::array();
         usage["usage"]   = openai_usage_json(outcome);
         usage["timings"] = completion_timings_json(outcome);
+        if (has_spec_decode) {
+            usage["metrics"] =
+                OutJson{{"speculative_decoding", spec_decode_metrics_json(outcome.metrics)}};
+        }
         add_slot_identity(usage, outcome);
         events.push_back(event(usage));
     }

@@ -1,0 +1,159 @@
+# The ninfer panel — configuration
+#
+# Se lee con tomllib (stdlib, Python 3.11+). Editar y reiniciar el panel.
+# If a section is missing the panel still starts and warns on the console.
+
+[panel]
+host = "0.0.0.0"
+port = 9080
+# Speed baseline per model and alerts. This is state, not configuration:
+# the panel creates and refreshes it on its own, so do not edit by hand.
+state_file = "/root/ninfer-lab/panel-state.json"
+# Behind an NPM proxy: set host to "127.0.0.1" and let the proxy expose it.
+
+[ninfer]
+# Binary built from this checkout. `git describe` gives the version.
+binary = "/root/ninfer-all/build-sm86/apps/ninfer-serve"
+# Repo compiled into that binary: the rev is stored with each registry run,
+# to compare a baseline against a fix.
+repo = "/root/ninfer-all"
+url = "http://127.0.0.1:9081"
+api_key = ""
+# Server requests jsonl (--request-log-jsonl): source of the table
+# of recent dashboard requests.
+log = "/root/ninfer-lab/logs/server.requests.jsonl"
+# Lab artifact catalog (artifact, size_gib, recipe, trust, formats).
+catalog = "/root/ninfer-lab/models.json"
+
+[aiperf]
+# The key: false hides the whole tab and does not touch the venv.
+enabled = true
+venv = "/root/AIPerf/venv"
+plugins = ["/root/AIPerf/plugins/aiperf-ninfer"]
+# AIPerf requires an explicit, local --tokenizer; it never downloads tokenizers.
+tokenizer = "/mnt/models_local/ninfer/checkpoints/qwen35-4b"
+runs_dir = "/root/AIPerf/runs"
+registry = "/root/AIPerf/registry.jsonl"
+datasets_dir = "/root/AIPerf/datasets"
+# Download of public HuggingFace datasets (AIPerf's cache).
+hf_cache = "/root/AIPerf/hf"
+# Per-model tokenizer from the router. Without an entry here the above default
+# which is only correct if the model belongs to that family (bug 2026-10-11).
+# Without an entry the form falls back to `tokenizer` above, which is only
+# correct for the Qwen3.5 family: a model from another family then silently
+# measures with the wrong tokenizer.
+[aiperf.tokenizers]
+qwen35-9b = "/mnt/models_local/ninfer/checkpoints/qwen35-9b"
+apex35b-mtp = "/mnt/models_local/ninfer/checkpoints/qwen36-35b-config"
+qwen36-35b-a3b = "/mnt/models_local/ninfer/checkpoints/qwen36-35b-config"
+qwen36-35b-a3b-compact = "/mnt/models_local/ninfer/checkpoints/qwen36-35b-config"
+qwen38-27b-iq3s = "/mnt/models_local/ninfer/checkpoints/qwen38-config"
+qwen38-27b-iq3xxs = "/mnt/models_local/ninfer/checkpoints/qwen38-config"
+saluki27b = "/mnt/models_local/ninfer/checkpoints/qwen38-config"
+gemma4-26b = "/mnt/models_local/ninfer/checkpoints/gemma4-26b-it"
+
+[llmprobe]
+# Pinned npm install, not `npx` per run: the report stays reproducible and the run
+# does not depend on the network or on whatever version the registry resolves to.
+bin = "/root/ninfer-lab/llmprobe/node_modules/.bin/llmprobe"
+# The JSON reports each run writes.
+dir = "/root/ninfer-lab/bench"
+url = "http://127.0.0.1:9081/v1"
+version = "0.6.16"
+
+[convert]
+# tools/convert: GGUF o safetensors -> .ninfer
+enabled = true
+# Este venv tiene torch + safetensors + numpy (el de AIPerf no).
+venv = "/root/ninfer-lab/venv"
+out_dir = "/mnt/models_local/ninfer/artifacts"
+# Roots where the panel looks for artifacts (.ninfer) and sources (.gguf/checkpoints)
+# for the Convert tab, plus HF_HOME if it is set.
+# huggingface/ queda solo por los .gguf dentro de hub/; lo nuestro vive en ninfer/.
+# strata/ entra porque DFlash2 es draft head de ninfer y los Flash-Next son
+# convertibles (familia Qwen4ExpForCausalLM).
+roots = [
+    "/mnt/models_local/ninfer",
+    "/mnt/models_local/strata",
+    "/mnt/models_local/huggingface",
+    "/mnt/models_fast/huggingface",
+]
+
+# ---------------------------------------------------------------- benchmarks
+# Cada perfil es una familia de tarea. El registro guarda el id del perfil
+# with each run, so the ranking never mixes incomparable things: comparing
+# requires the same id (or an explicit flag to cross over).
+#
+# dataset.public  -> --public-dataset   (se descarga de HF)
+# dataset.file    -> --input-file + --custom-dataset-type single_turn
+
+[[benchmarks]]
+id = "spec"
+label = "Spec-decode (acceptance length)"
+note = "Replaces the synthetic 550-token prompt with licensed datasets."
+datasets = ["spec_al_gsm8k", "spec_al_math500", "spec_al_humaneval", "spec_al_mbpp"]
+concurrency = [1, 2, 4]
+output_tokens_mean = 512
+sweep_flags = ["--spec mtp", "--draft-tokens 3", "--no-spec"]
+
+[[benchmarks]]
+id = "chat"
+label = "Conversational chat"
+datasets = ["sharegpt"]
+concurrency = [1, 4, 8]
+
+[[benchmarks]]
+id = "code"
+label = "Code generation and editing"
+datasets = ["instruct_coder", "blazedit_5k"]
+concurrency = [1, 4]
+
+[[benchmarks]]
+id = "longctx"
+label = "Long context / agentic"
+note = "Sesiones reales de coding agent; KV-cache aware."
+datasets = ["semianalysis_cc_traces_weka_061526"]
+concurrency = [1, 2]
+
+[[benchmarks]]
+id = "vision"
+label = "Vision"
+datasets = ["mmstar", "llava_onevision"]
+concurrency = [1, 4]
+
+# ------------------------------------------------------------------------------
+# [router] — front to edit models registered in ninfer-router. The panel reads
+# and writes the preset file; changes there need a router restart to take effect.
+[router]
+models_dir = "/root/ninfer-lab/router-models"
+preset = "/root/ninfer-lab/router-preset.ini"
+
+# ------------------------------------------------------------------------------
+# [fit] — cards this box does not have, so the Fit view can answer "would this
+# fit if I bought one". Its verdict and its context are real for any card; the
+# speed tables stay the ones measured here, since a kernel route is per card.
+#
+# mib is the card's own memory, GB x 1024, which is the convention nvidia-smi
+# reports in -- a 24 GB card shows 24,576 MiB -- so a projection sits directly
+# beside the real figure without a conversion nobody can check.
+# Every card listed here is one this fork ships a built-in kernel-route profile
+# for, so the projection is about a configuration that exists.
+[[fit.cards]]
+name = "RTX 3090"
+mib = 24576
+
+[[fit.cards]]
+name = "RTX 4090"
+mib = 24576
+
+[[fit.cards]]
+name = "RTX 5090"
+mib = 32768
+
+[[fit.cards]]
+name = "RTX PRO 6000 Blackwell"
+mib = 98304
+
+[[fit.cards]]
+name = "Tesla V100-SXM2-16GB"
+mib = 16384

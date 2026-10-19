@@ -1,5 +1,6 @@
 #include "core/layout.h"
 #include "core/weight.h"
+#include "core/weight_view.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer/ops/silu_mul.h"
@@ -7,15 +8,21 @@
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/gguf/gguf_linear.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/sm70/sm70_dequantize.h"
+#include "ops/linear/sm70/sm70_gemm.h"
+#include "ops/linear/sm70/sm70_integer.h"
+#include "ops/linear/sm70/sm70_project.h"
 #include "ops/linear_swiglu/fp8/fp8_linear_swiglu_plan.h"
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_kernels.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_plan.h"
 #include "ops/linear_swiglu/q4a8/q4a8_linear_swiglu.h"
+#include "ops/linear_swiglu/q4cublas/cublas_prefill_gate.h"
 #include "ops/linear_swiglu/q4cublas/w4_cublas_prefill.h"
 #include "ops/linear_swiglu/q8/q8_linear_swiglu_plan.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <stdexcept>
 
@@ -42,13 +49,48 @@ void validate_policy(LinearPolicy policy) {
     throw std::invalid_argument("linear_swiglu: invalid compute policy");
 }
 
+// One row per compiled model width: the hidden size and the FFN intermediate. The gate/up parent
+// is twice the intermediate and reduces over the hidden width, so a row fixes every operand's
+// shape and an unregistered pair is not compiled here. The two flags are routes bound to one
+// model's release rather than to the shape, so a new row states explicitly whether they apply
+// instead of inheriting them by default: `native_formats` for the non-integer NVFP4/FP8/T2
+// weights that release carries, and `a8_int_decode` for the A8 integer decode mainloop, which
+// is measured at one width and nowhere else.
+struct SwiGluShape {
+    std::int32_t hidden;
+    std::int32_t intermediate;
+    bool native_formats;
+    bool a8_int_decode;
+};
+
+constexpr std::array<SwiGluShape, 3> kSwiGluShapes{{
+    {5120, 17408, true, true},   // the 5120-hidden model
+    {2048, 6144, false, false},  // the 2048-hidden model
+    {4096, 12288, false, false}, // the 4096-hidden dense model
+}};
+
+// The row the operands name, or null when they do not name one. The padded shape is checked
+// because the integer routes index a tile width taken from it, so a parent padded to something
+// else is not the shape it was registered as.
+const SwiGluShape* registered_shape(const Tensor& x, const Tensor& out, const Weight& gate_up) {
+    for (const auto& row : kSwiGluShapes) {
+        const std::int32_t gate_up_rows = 2 * row.intermediate;
+        if (x.ne[0] == row.hidden && out.ne[0] == row.intermediate &&
+            gate_up.n == gate_up_rows && gate_up.k == row.hidden &&
+            gate_up.padded_shape[0] == gate_up_rows && gate_up.padded_shape[1] == row.hidden) {
+            return &row;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
 
-std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gate_up_rows,
-                                                   std::int32_t input_rows, LinearPolicy policy,
-                                                   std::int32_t min_tokens,
-                                                   std::int32_t max_tokens) {
-    validate_policy(policy);
+namespace {
+
+std::size_t linear_swiglu_route_workspace_bytes(QType qtype, std::int32_t gate_up_rows,
+                                                std::int32_t input_rows, LinearPolicy policy,
+                                                std::int32_t min_tokens, std::int32_t max_tokens) {
     if (min_tokens <= 0 || max_tokens < min_tokens || (gate_up_rows % 2) != 0) {
         throw std::invalid_argument("linear_swiglu workspace: invalid profile or token interval");
     }
@@ -78,12 +120,17 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
         const bool integer_a8 = allows_a8_int(policy);
         if (!integer_a8 || gate_up_rows != 34816 || input_rows != 5120) { return a16; }
         // The cuBLAS route holds a materialised int8 weight and an int32 output tile, so it is far
-        // and away the widest claimant wherever it is admitted. Any interval reaching its width
-        // gate has to reserve for it, because the resolver will pick it at that T.
-        if (allows_cublas_prefill(policy) && max_tokens >= kCublasPrefillMinTokens) {
-            return std::max(a16, detail::w4_cublas_prefill_workspace_capacity_bytes(
-                                     gate_up_rows, input_rows,
-                                     std::max(min_tokens, kCublasPrefillMinTokens), max_tokens));
+        // and away the widest claimant wherever it is admitted. An interval it takes any width of
+        // reserves for it from the narrowest such width, which the device profile places, on top
+        // of the integer routes the policy admits as well.
+        if (allows_cublas_prefill(policy)) {
+            const std::size_t integer = linear_swiglu_route_workspace_bytes(
+                qtype, gate_up_rows, input_rows, LinearPolicy::AllowA8Int, min_tokens, max_tokens);
+            const std::int32_t first =
+                detail::cublas_prefill_first_width(detail::kCublasGateUp, min_tokens, max_tokens);
+            if (first == 0) { return integer; }
+            return std::max(integer, detail::w4_cublas_prefill_workspace_capacity_bytes(
+                                         gate_up_rows, input_rows, first, max_tokens));
         }
         // The small-T integer route stages quantised activations too, over its padded tile width.
         const auto decode_bytes = [&](std::int32_t t) -> std::size_t {
@@ -117,6 +164,28 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
     throw std::invalid_argument("linear_swiglu workspace: unsupported weight format");
 }
 
+// The policy sm_70's routes read: the T2 gate/up pair stays on its A16 route at decode widths, as
+// it does on the other targets, unless the integer gate/up trade (AllowA8IntDecode,
+// --mlp-a8-decode) is asked for.
+LinearPolicy sm70_policy(LinearPolicy policy) {
+    return policy == LinearPolicy::AllowA8IntDecode ? policy : LinearPolicy::A16Only;
+}
+
+} // namespace
+
+std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gate_up_rows,
+                                                   std::int32_t input_rows, LinearPolicy policy,
+                                                   std::int32_t min_tokens,
+                                                   std::int32_t max_tokens) {
+    validate_policy(policy);
+    const auto routes = [&](std::int32_t lo, std::int32_t hi) {
+        return linear_swiglu_route_workspace_bytes(qtype, gate_up_rows, input_rows, policy, lo, hi);
+    };
+    // Every width of a dense format takes an sm_70 route there.
+    return detail::sm70::capacity(qtype, gate_up_rows, input_rows, min_tokens, max_tokens,
+                                  sm70_policy(policy), routes);
+}
+
 std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gate_up_rows,
                                                    std::int32_t input_rows, std::int32_t min_tokens,
                                                    std::int32_t max_tokens) {
@@ -135,14 +204,14 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         detail::gguf_swiglu(x, gate_up_weight, nullptr, out, ws, stream);
         return;
     }
-    const bool large_shape = x.ne[0] == 5120 && out.ne[0] == 17408 && gate_up_weight.n == 34816 &&
-                             gate_up_weight.k == 5120 && gate_up_weight.padded_shape[0] == 34816 &&
-                             gate_up_weight.padded_shape[1] == 5120;
-    const bool q8_shape = x.ne[0] == 2048 && out.ne[0] == 6144 && gate_up_weight.n == 12288 &&
-                          gate_up_weight.k == 2048 && gate_up_weight.padded_shape[0] == 12288 &&
-                          gate_up_weight.padded_shape[1] == 2048;
+    // The registered widths, one row per model: its hidden size and the FFN intermediate it
+    // produces. The gate/up parent is twice that intermediate and reduces over the hidden width,
+    // so the pair fixes the shape and no other width is compiled. `native_formats` marks the rows
+    // whose releases also carry NVFP4/FP8/T2 weights, which are bound to one model rather than
+    // to the shape.
+    const SwiGluShape* shape = registered_shape(x, out, gate_up_weight);
     if (t <= 0 || x.ne[2] != 1 || x.ne[3] != 1 || out.ne[1] != t || out.ne[2] != 1 ||
-        out.ne[3] != 1 || (!large_shape && !q8_shape)) {
+        out.ne[3] != 1 || shape == nullptr) {
         throw std::invalid_argument("linear_swiglu: invalid tensor shape");
     }
     if (!x.is_contiguous() || !out.is_contiguous()) {
@@ -152,26 +221,37 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         throw std::invalid_argument("linear_swiglu: x/out must be non-null and 16-byte aligned");
     }
 
+    // The panel layout is RowSplit's bytes permuted (sm_70 loads, read by its routes).
     const bool common_row_split =
-        gate_up_weight.layout == QuantLayout::RowSplit &&
-        gate_up_weight.scale_dtype == DType::FP16 && gate_up_weight.ndim == 2 &&
-        gate_up_weight.shape[0] == gate_up_weight.n &&
+        is_row_split(gate_up_weight.layout) && gate_up_weight.scale_dtype == DType::FP16 &&
+        gate_up_weight.ndim == 2 && gate_up_weight.shape[0] == gate_up_weight.n &&
         gate_up_weight.shape[1] == gate_up_weight.k && gate_up_weight.qdata != nullptr &&
         gate_up_weight.scales != nullptr;
-    const bool q4_weight = large_shape && gate_up_weight.qtype == QType::Q4_G64_FP16 &&
+    const bool any_shape = shape != nullptr;
+    const bool q4_weight = any_shape && gate_up_weight.qtype == QType::Q4_G64_FP16 &&
                            gate_up_weight.group_size == 64 && gate_up_weight.group == 64 &&
                            common_row_split;
     const bool q8_weight =
-        (q8_shape || large_shape) && gate_up_weight.qtype == QType::Q8_G32_FP16 &&
+        any_shape && gate_up_weight.qtype == QType::Q8_G32_FP16 &&
         gate_up_weight.group_size == 32 && gate_up_weight.group == 32 &&
         gate_up_weight.qhigh == nullptr && gate_up_weight.high_plane_bytes == 0 && common_row_split;
-    const bool nvfp4_weight = large_shape && gate_up_weight.qtype == QType::NVFP4;
-    const bool fp8_weight   = large_shape && gate_up_weight.qtype == QType::FP8_E4M3FN_ROW_BF16;
-    const bool t2_weight    = large_shape && gate_up_weight.qtype == QType::T2_G128_FP16 &&
+    const bool native_formats = shape->native_formats;
+    const bool nvfp4_weight = native_formats && gate_up_weight.qtype == QType::NVFP4;
+    const bool fp8_weight   = native_formats && gate_up_weight.qtype == QType::FP8_E4M3FN_ROW_BF16;
+    const bool t2_weight    = native_formats && gate_up_weight.qtype == QType::T2_G128_FP16 &&
                               gate_up_weight.qhigh == nullptr &&
                               gate_up_weight.high_plane_bytes == 0 && common_row_split;
     if (!q4_weight && !q8_weight && !nvfp4_weight && !fp8_weight && !t2_weight) {
         throw std::invalid_argument("linear_swiglu: unsupported weight");
+    }
+
+    if (detail::sm70::covers(gate_up_weight, t)) {
+        auto scope            = ws.scope();
+        const auto activation = detail::sm70::prepare_for(
+            x, gate_up_weight.n, ws, stream,
+            detail::sm70::integer_takes(gate_up_weight, t, sm70_policy(policy)));
+        detail::sm70::swiglu_for(activation, gate_up_weight, nullptr, out, stream);
+        return;
     }
 
     if (t2_weight) {
@@ -204,9 +284,11 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
     }
 
     // The cuBLAS route first, where it is admitted and wide enough to pay: about 2x the integer
-    // mainloop at 4096 tokens, 1.83x at 1024, and a loss below that -- hence the width gate rather
-    // than an unconditional preference. Everything narrower falls through to the routes below.
-    if (allows_cublas_prefill(policy) && t >= kCublasPrefillMinTokens && q4_weight &&
+    // mainloop at 4096 tokens, 1.83x at 1024, and a loss at narrow widths -- hence the width gate
+    // the device profile places rather than an unconditional preference. Everything narrower falls
+    // through to the routes below.
+    if (allows_cublas_prefill(policy) && q4_weight && gate_up_weight.n == 34816 &&
+        gate_up_weight.k == 5120 && detail::cublas_prefill_takes(detail::kCublasGateUp, t) &&
         detail::w4_cublas_prefill_supported(gate_up_weight, t)) {
         detail::w4_cublas_swiglu_launch(x, gate_up_weight, out, ws, stream);
         return;
@@ -219,9 +301,8 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
     }
     // Decode and verify widths, opt-in only: the integer small-T route wins from sixteen columns
     // up and loses below, so the narrow widths stay on A16 (q4_small_t_mma_i8.cuh has the table).
-    if (policy == LinearPolicy::AllowA8IntDecode && q4_weight &&
-        detail::q4_linear_swiglu_small_t_i8_supported(t) &&
-        gate_up_weight.n == 34816 && gate_up_weight.k == 5120) {
+    if (policy == LinearPolicy::AllowA8IntDecode && q4_weight && shape->a8_int_decode &&
+        detail::q4_linear_swiglu_small_t_i8_supported(t)) {
         detail::q4_linear_swiglu_small_t_tiled_i8_launch(x, gate_up_weight, out, ws, stream);
         return;
     }
@@ -260,6 +341,16 @@ std::size_t linear_swiglu_pair_workspace_capacity_bytes(QType gate_qtype, QType 
     const detail::GgufShape gate{gate_qtype, rows, input_rows};
     const detail::GgufShape up{up_qtype, rows, input_rows};
     return detail::gguf_swiglu_workspace_bytes(gate, &up, min_tokens, max_tokens);
+}
+
+bool linear_swiglu_compiles_a8_int_decode(std::int32_t gate_up_rows, std::int32_t input_rows) {
+    for (const auto& row : kSwiGluShapes) {
+        if (row.a8_int_decode && gate_up_rows == 2 * row.intermediate &&
+            input_rows == row.hidden) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace ninfer::ops

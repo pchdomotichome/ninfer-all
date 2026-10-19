@@ -4,6 +4,7 @@
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 
 #include "models/qwen3_5/frontend/chat_template.h"
+#include "models/qwen3_5/frontend/gemma_output.h"
 #include "models/qwen3_5/frontend/media_cache.h"
 #include "models/qwen3_5/frontend/processor.h"
 #include "models/qwen3_5/frontend/test_access.h"
@@ -184,6 +185,53 @@ fi::ProcessorOptions processor_options(const FrontendResources& resources) {
     return options;
 }
 
+// Gemma 4's processor_config.json: patches of 16 pooled 3 x 3, pixels rescaled by 1/255 with no
+// normalization (or a mean of 0 and a deviation of 1), bicubic resizing, and the soft-token
+// budgets of an image and of a video frame.
+fi::GemmaMediaOptions gemma_media_options(const FrontendResources& resources) {
+    constexpr std::string_view kResource = "processor_config.json";
+    const Json config = parse_resource_json(resources.processor_config_json, kResource);
+    const Json& image = require_object(config, "image_processor", kResource);
+    const Json& video = require_object(config, "video_processor", kResource);
+    fi::GemmaMediaOptions out;
+    for (const auto* processor : {&image, &video}) {
+        if (require_integer(*processor, "patch_size", kResource) != out.patch ||
+            require_integer(*processor, "pooling_kernel_size", kResource) != out.pooling) {
+            throw std::invalid_argument(
+                "processor_config.json does not match the compiled Gemma 4 patch geometry");
+        }
+        if (processor->contains("resample") && (!(*processor)["resample"].is_number_integer() ||
+                                                (*processor)["resample"].get<int>() != 3)) {
+            throw std::invalid_argument(
+                "processor_config.json resample must select bicubic interpolation");
+        }
+        if (number_or_default(*processor, "rescale_factor", kResource, 1.0 / 255.0) !=
+            1.0 / 255.0) {
+            throw std::invalid_argument(
+                "processor_config.json rescale_factor does not match the compiled pixels");
+        }
+        for (const char* field : {"image_mean", "image_std"}) {
+            if (!processor->contains(field)) { continue; }
+            const Json& values = processor->at(field);
+            const double expected = std::string_view(field) == "image_mean" ? 0.0 : 1.0;
+            if (!values.is_array() || values.size() != 3 ||
+                std::any_of(values.begin(), values.end(), [&](const Json& value) {
+                    return !value.is_number() || value.get<double>() != expected;
+                })) {
+                throw std::invalid_argument(
+                    "processor_config.json normalization does not match the compiled pixels");
+            }
+        }
+    }
+    out.image_tokens = fi::gemma_budget_at_most(static_cast<std::uint64_t>(
+        positive_u64(require_integer(image, "max_soft_tokens", kResource), "max_soft_tokens")));
+    out.video_tokens = fi::gemma_budget_at_most(static_cast<std::uint64_t>(
+        positive_u64(require_integer(video, "max_soft_tokens", kResource), "max_soft_tokens")));
+    out.frames = static_cast<int>(
+        positive_u64(integer_or_default(video, "num_frames", kResource, 32), "num_frames"));
+    return out;
+}
+
 void validate_tokenizer_config(const FrontendResources& resources) {
     const Json tokenizer_config =
         parse_resource_json(resources.tokenizer_config_json, "tokenizer_config.json");
@@ -200,8 +248,9 @@ void validate_tokenizer_config(const FrontendResources& resources) {
 }
 
 fi::CompiledChatTemplate compile_chat_template(const FrontendResources& resources,
-                                               const std::filesystem::path& override_path) {
-    validate_tokenizer_config(resources);
+                                               const std::filesystem::path& override_path,
+                                               bool qwen = true) {
+    if (qwen) { validate_tokenizer_config(resources); }
     nlohmann::ordered_json tokens = nlohmann::ordered_json::object();
     const auto config             = nlohmann::ordered_json::parse(resources.tokenizer_config_json);
     for (const char* key : {"bos_token", "eos_token", "pad_token", "unk_token", "sep_token",
@@ -282,6 +331,7 @@ std::vector<fi::ChatMessage> convert_messages(std::vector<ChatMessage> messages)
                 media.media_type          = std::move(part.media.media_type);
                 media.bytes               = std::move(part.media.bytes);
                 media.image_resize_policy = part.media.image_resize_policy;
+                media.image_detail        = part.media.image_detail;
                 switch (part.media.kind) {
                 case MediaKind::Image:
                     target.parts.push_back(fi::ChatPart::image(std::move(media)));
@@ -303,7 +353,7 @@ std::vector<fi::ChatMessage> convert_messages(std::vector<ChatMessage> messages)
     return result;
 }
 
-fi::ChatRenderOptions render_options(const PromptOptions& options,
+fi::ChatRenderOptions render_options(const PromptOptions& options, fi::ToolCallSyntax syntax,
                                      std::span<const PromptCacheMarker> cache_markers = {}) {
     fi::ChatRenderOptions rendered{.continuation              = options.continuation,
                                    .enable_thinking           = options.enable_thinking,
@@ -312,7 +362,8 @@ fi::ChatRenderOptions render_options(const PromptOptions& options,
                                    .chat_template_kwargs_json = options.chat_template_kwargs_json,
                                    .add_vision_id             = options.add_vision_id,
                                    .tool_jsons                = options.tool_jsons,
-                                   .forced_tool_name          = options.forced_tool_name};
+                                   .forced_tool_name          = options.forced_tool_name,
+                                   .tool_call_syntax          = syntax};
     rendered.cache_markers.assign(cache_markers.begin(), cache_markers.end());
     return rendered;
 }
@@ -527,15 +578,17 @@ bool exact_vision_frontier(std::uint32_t frontier, std::span<const VisionItem> i
     return true;
 }
 
-PreparedContextCache prepare_context_cache(
-    ContextCacheHints hints, std::size_t message_count,
-    std::span<const std::optional<std::uint32_t>> message_boundaries,
-    std::span<const PromptCacheMarker> rendered_markers,
-    std::span<const std::optional<std::uint32_t>> cache_boundaries,
-    std::span<const VisionItem> vision_items, std::optional<std::size_t> engine_tool_marker_index,
-    std::optional<std::uint32_t> leading_boundary, std::uint32_t full_prompt_frontier,
-    std::uint32_t automatic_long_anchors, std::uint32_t long_anchor_min_spacing,
-    std::uint32_t graft_frontier, std::uint32_t direct_graft_slots) {
+PreparedContextCache
+prepare_context_cache(ContextCacheHints hints, std::size_t message_count,
+                      std::span<const std::optional<std::uint32_t>> message_boundaries,
+                      std::span<const PromptCacheMarker> rendered_markers,
+                      std::span<const std::optional<std::uint32_t>> cache_boundaries,
+                      std::span<const VisionItem> vision_items,
+                      std::optional<std::size_t> engine_tool_marker_index,
+                      std::optional<std::uint32_t> leading_boundary,
+                      std::uint32_t full_prompt_frontier, std::uint32_t automatic_long_anchors,
+                      std::uint32_t long_anchor_min_spacing, std::uint32_t progress_anchor_tokens,
+                      std::uint32_t graft_frontier, std::uint32_t direct_graft_slots) {
     if (hints.markers.size() > kMaximumExplicitPromptCacheMarkers) {
         throw std::invalid_argument("PromptInput supports at most four explicit cache markers");
     }
@@ -616,8 +669,12 @@ PreparedContextCache prepare_context_cache(
         }
     }
 
+    const std::uint32_t progress_anchors =
+        progress_anchor_tokens == 0 || full_prompt_frontier == 0
+            ? 0U
+            : (full_prompt_frontier - 1U) / progress_anchor_tokens;
     out.opportunities.reserve(8U + (hints.allow_engine_prefix_grid ? kPrefixGridCandidates : 0U) +
-                              automatic_long_anchors);
+                              automatic_long_anchors + progress_anchors);
     const auto add_opportunity = [&](PromptCacheMarkerKind kind, SharedCandidateEvidence evidence,
                                      std::uint32_t frontier, std::uint32_t input_order) {
         // A direct graft's positions are restored whole from its pinned slot, so nothing at or
@@ -730,6 +787,18 @@ PreparedContextCache prepare_context_cache(
         add_opportunity(PromptCacheMarkerKind::PrivateLongAnchor,
                         SharedCandidateEvidence::EngineStructural, *boundary, engine_order++);
     }
+    // Progress anchors sit at absolute multiples of the stride, whatever the prompt's shape, so a
+    // prompt with no message boundary still leaves restore points behind when its prefill is
+    // cancelled. The prompt's own end is the endpoint's.
+    for (std::uint32_t index = 1; index <= progress_anchors; ++index) {
+        const std::uint32_t frontier = index * progress_anchor_tokens;
+        if (std::any_of(out.opportunities.begin(), out.opportunities.end(),
+                        [&](const auto& existing) { return existing.frontier == frontier; })) {
+            continue;
+        }
+        add_opportunity(PromptCacheMarkerKind::PrivateLongAnchor, SharedCandidateEvidence::None,
+                        frontier, engine_order++);
+    }
     return out;
 }
 
@@ -786,6 +855,19 @@ PreparedTapHints prepare_tap_hints(const ContextCacheHints& hints,
 
 ModelSamplingDefaults default_sampling(Architecture architecture) {
     ModelSamplingDefaults sampling;
+    if (architecture == Architecture::Gemma4) {
+        // generation_config.json of the Gemma 4 releases (top_k 64), thinking or not, with
+        // top_k held at the 20 candidates the sampler keeps.
+        sampling.thinking      = {.temperature       = 1.0F,
+                                  .top_k             = 20,
+                                  .top_p             = 0.95F,
+                                  .min_p             = 0.0F,
+                                  .presence_penalty  = 0.0F,
+                                  .frequency_penalty = 0.0F};
+        sampling.non_thinking  = sampling.thinking;
+        sampling.post_thinking = sampling.thinking;
+        return sampling;
+    }
     sampling.thinking     = {.temperature      = 1.0F,
                              .top_k            = 20,
                              .top_p            = 0.95F,
@@ -806,24 +888,48 @@ ModelSamplingDefaults default_sampling(Architecture architecture) {
 class Frontend::Impl {
 public:
     Impl(const FrontendResources& resources, FrontendOptions options)
-        : chat_template(compile_chat_template(resources, options.chat_template_path)),
+        : chat_template(compile_chat_template(resources, options.chat_template_path,
+                                              options.architecture != Architecture::Gemma4)),
           tokenizer(resources.tokenizer),
-          processor(options.vision_enabled ? processor_options(resources) : fi::ProcessorOptions{}),
+          processor(!options.vision_enabled                        ? fi::ProcessorOptions{}
+                    : options.architecture == Architecture::Gemma4 ? fi::ProcessorOptions{}
+                                                                   : processor_options(resources)),
           vision_enabled(options.vision_enabled), max_context(options.max_context),
           automatic_long_anchors(options.automatic_long_anchors),
           long_anchor_min_spacing_tokens(options.long_anchor_min_spacing_tokens),
+          progress_anchor_tokens(options.progress_anchor_tokens),
           grafts(std::move(options.grafts)) {
-        fi::bound_merged_tokens(processor, options.vision_max_merged_tokens);
+        if (progress_anchor_tokens != 0 && progress_anchor_tokens < kMinimumProgressAnchorTokens) {
+            throw std::invalid_argument("progress anchors need a stride of at least " +
+                                        std::to_string(kMinimumProgressAnchorTokens) + " tokens");
+        }
+        const bool gemma_media = options.architecture == Architecture::Gemma4 && vision_enabled;
+        if (gemma_media) {
+            fi::GemmaMediaOptions& g = processor.gemma.emplace(gemma_media_options(resources));
+            g.max_tokens   = fi::gemma_budget_at_most(options.vision_max_merged_tokens);
+            g.image_tokens = std::min(g.image_tokens, g.max_tokens);
+            g.video_tokens = std::min(g.video_tokens, g.max_tokens);
+        } else {
+            fi::bound_merged_tokens(processor, options.vision_max_merged_tokens);
+        }
         if (options.max_context == 0) {
             throw std::invalid_argument("frontend max_context must be nonzero");
         }
         const std::uint64_t vision_tokens =
             std::min<std::uint64_t>(options.max_context, kMaximumPromptVisionTokens);
+        // Raw patches per soft token and values per patch: Gemma 4 pools 3 x 3 patches of
+        // 3 x 16 x 16, Qwen merges 2 x 2 patches of 2 x 3 x 16 x 16.
+        const std::uint64_t patches_per_token =
+            gemma_media ? std::uint64_t(processor.gemma->pooling) * processor.gemma->pooling
+                  : kRawPatchesPerVisionToken;
+        const std::uint64_t patch_features =
+            gemma_media ? std::uint64_t(3) * processor.gemma->patch * processor.gemma->patch
+                  : kPreparedVisionPatchFeatures;
         processor.max_vision_tokens = vision_tokens;
-        processor.max_raw_patches   = vision_tokens * kRawPatchesPerVisionToken;
+        processor.max_raw_patches   = vision_tokens * patches_per_token;
         if (vision_enabled) {
             const std::uint64_t minimum_live =
-                processor.max_raw_patches * kPreparedVisionPatchFeatures * sizeof(std::uint16_t);
+                processor.max_raw_patches * patch_features * sizeof(std::uint16_t);
             if (minimum_live > options.media_live_bytes) {
                 throw std::invalid_argument(
                     "media live-byte capacity cannot hold the maximum supported Vision prompt");
@@ -854,6 +960,11 @@ public:
                     "generation_config.json contains a stop token outside the vocabulary");
             }
             defaults.token_ids.push_back(token);
+        }
+        if (options.architecture == Architecture::Gemma4) {
+            // Gemma's reasoning channel has no early-close control: thinking budgets do not apply.
+            gemma = std::make_shared<const fi::GemmaMarkers>(fi::GemmaMarkers::from(*tokenizer));
+            return;
         }
         std::string control_suffix(kThinkingControl);
         const char* control_name = "canonical thinking control suffix";
@@ -900,6 +1011,11 @@ public:
         }
     }
 
+    // The syntax the model writes its calls in, which a forced call's opener has to match.
+    [[nodiscard]] fi::ToolCallSyntax tool_call_syntax() const noexcept {
+        return gemma ? fi::ToolCallSyntax::Gemma : fi::ToolCallSyntax::Qwen;
+    }
+
     // The graft a request names, or null for none.
     [[nodiscard]] const PromptGraft* find_graft(const std::string& name) const {
         if (name.empty()) { return nullptr; }
@@ -918,6 +1034,7 @@ public:
     StopPolicy defaults;
     ModelSamplingDefaults sampling;
     std::shared_ptr<const std::vector<TokenId>> thinking_control_tokens;
+    std::shared_ptr<const fi::GemmaMarkers> gemma; // the Gemma 4 dialect, null for Qwen
     bool ngram_sources_enabled = false;
     bool ngram_archive_enabled = false;
     std::vector<TokenId> ngram_think_open, ngram_think_close;
@@ -929,6 +1046,7 @@ public:
     // without a data race on a const shared implementation.
     mutable std::atomic<std::uint32_t> automatic_long_anchors{0};
     std::uint32_t long_anchor_min_spacing_tokens = 0;
+    std::uint32_t progress_anchor_tokens         = 0;
     std::vector<PromptGraft> grafts;
 };
 
@@ -1101,14 +1219,14 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
                 if (remaining == 0) { break; }
                 if (part.kind != fi::ChatPartKind::Text) { continue; }
                 fi::check_preparation_control(control, "ngram proposal sources");
-                for (const auto& source : fi::ngram_numbered_sources(part.text)) {
+                fi::for_each_ngram_numbered_source(part.text, [&](std::string&& source) {
                     fi::check_preparation_control(control, "ngram proposal sources");
-                    if (remaining == 0) { break; }
                     auto tokens = impl_->tokenizer->encode(source, {.max_tokens = remaining});
                     fi::check_preparation_control(control, "ngram proposal sources");
                     remaining -= tokens.size();
                     result.ngram_sources.push_back(std::move(tokens));
-                }
+                    return remaining != 0;
+                });
             }
         }
     }
@@ -1119,9 +1237,10 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
                                 impl_->media_cache);
         fi::ProcessedInput processed;
         try {
-            processed =
-                processor.process(std::move(messages), render_options(options, rendered_markers),
-                                  control, prompt_context);
+            processed = processor.process(
+                std::move(messages),
+                render_options(options, impl_->tool_call_syntax(), rendered_markers), control,
+                prompt_context);
         } catch (const fi::ProcessorError& error) { throw_processor_error(error); }
         result.token_ids.assign(processed.input_ids.begin(), processed.input_ids.end());
         result.starts_in_reasoning = processed.starts_in_reasoning;
@@ -1155,7 +1274,8 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
         cache_boundaries   = std::move(processed.cache_boundaries);
     } else {
         const fi::RenderedChat rendered = impl_->chat_template.render(
-            messages, render_options(options, rendered_markers), control);
+            messages, render_options(options, impl_->tool_call_syntax(), rendered_markers),
+            control);
         result.starts_in_reasoning  = rendered.starts_in_reasoning;
         const auto tokenize_started = Clock::now();
         fi::EncodedChat encoded     = fi::encode_rendered_chat(
@@ -1249,7 +1369,7 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
         cache_boundaries, result.vision_items, engine_tool_marker_index, leading_boundary,
         checked_token_count(result.token_ids.size()),
         impl_->automatic_long_anchors.load(std::memory_order_relaxed),
-        impl_->long_anchor_min_spacing_tokens,
+        impl_->long_anchor_min_spacing_tokens, impl_->progress_anchor_tokens,
         (graft && !is_direct_graft) ? graft_context_slots(*graft) : 0U,
         is_direct_graft ? graft_context_slots(*graft) : 0U);
     if (impl_->ngram_sources_enabled) {
@@ -1274,8 +1394,8 @@ std::uint32_t Frontend::count_tokens(PromptInput input, const PreparationControl
         throw std::invalid_argument("Vision is disabled for this Engine");
     }
     if (!has_media) {
-        const fi::RenderedChat rendered =
-            impl_->chat_template.render(messages, render_options(options), control);
+        const fi::RenderedChat rendered = impl_->chat_template.render(
+            messages, render_options(options, impl_->tool_call_syntax()), control);
         const std::uint32_t count = checked_token_count(
             graft_tokens + fi::encode_rendered_chat(*impl_->tokenizer, rendered).input_ids.size());
         fi::check_preparation_control(control, "tokenization");
@@ -1286,8 +1406,9 @@ std::uint32_t Frontend::count_tokens(PromptInput input, const PreparationControl
                             impl_->media_cache);
     try {
         return checked_token_count(
-            graft_tokens +
-            processor.count_tokens(std::move(messages), render_options(options), control));
+            graft_tokens + processor.count_tokens(
+                               std::move(messages),
+                               render_options(options, impl_->tool_call_syntax()), control));
     } catch (const fi::ProcessorError& error) { throw_processor_error(error); }
 }
 
@@ -1378,18 +1499,24 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
     StopPolicy policy = merge_stop_policy(*impl_->tokenizer, caller_stop);
     std::shared_ptr<text::GrammarState> grammar;
     text::validate_structured_output(structured);
-    if (structured.kind != StructuredOutputKind::None) {
-        if (!caller_stop.token_ids.empty() || !caller_stop.strings.empty() ||
-            !caller_stop.include_model_defaults || output.raw || output.preserve_special_tokens ||
-            caller_stop.publish_stop_token) {
+    const auto& tools       = prompt.data_->tool_call_output;
+    const bool strict_tools = tools && fi::has_strict_tools(*tools);
+    if (strict_tools && impl_->gemma) {
+        throw std::invalid_argument(
+            "strict tool arguments need Qwen's tool-call syntax, which Gemma 4 does not use");
+    }
+    if (structured.kind != StructuredOutputKind::None || strict_tools) {
+        if (structured.kind != StructuredOutputKind::None &&
+            (!caller_stop.token_ids.empty() || !caller_stop.strings.empty() ||
+             !caller_stop.include_model_defaults || output.raw || output.preserve_special_tokens ||
+             caller_stop.publish_stop_token)) {
             throw std::invalid_argument(
                 "structured output requires default stops and decoded text output");
         }
         text::StructuredOutputEnvelope envelope;
         if (prompt.data_->starts_in_reasoning) { envelope.reasoning_close = "</think>"; }
-        if (prompt.data_->tool_call_output) {
-            envelope.alternative_format =
-                fi::structured_tool_call_format(*prompt.data_->tool_call_output);
+        if (structured.kind != StructuredOutputKind::None && tools) {
+            envelope.alternative_format = fi::structured_tool_call_format(*tools);
         }
         std::lock_guard lock(impl_->grammar_mutex);
         if (!impl_->grammar_compiler) {
@@ -1404,12 +1531,16 @@ OutputSession Frontend::make_output_session(const PreparedPrompt& prompt,
             impl_->grammar_compiler = std::make_unique<text::StructuredCompiler>(
                 std::move(vocab), impl_->tokenizer->default_stop_token_ids());
         }
-        grammar = impl_->grammar_compiler->compile(structured, envelope);
+        grammar = structured.kind != StructuredOutputKind::None
+                      ? impl_->grammar_compiler->compile(structured, envelope)
+                      : impl_->grammar_compiler->compile_format(fi::tool_call_text_format(*tools),
+                                                                envelope);
     }
     if (output.raw) { policy.publish_stop_token = true; }
-    return OutputSession(
-        impl_->tokenizer, std::move(policy), output, prompt.data_->starts_in_reasoning, thinking,
-        impl_->thinking_control_tokens, prompt.data_->tool_call_output, std::move(grammar));
+    return OutputSession(impl_->tokenizer, std::move(policy), output,
+                         prompt.data_->starts_in_reasoning, thinking,
+                         impl_->thinking_control_tokens, prompt.data_->tool_call_output,
+                         std::move(grammar), impl_->gemma);
 }
 
 const StopPolicy& Frontend::default_stop_policy() const noexcept { return impl_->defaults; }

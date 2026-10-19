@@ -32,7 +32,13 @@ struct RouteSpec {
     Q4LinearSwiGluScheduleId schedule;
 };
 
-constexpr Q4LinearSwiGluProblem kShape{34816, 17408, 5120, 5120, 1};
+// One entry per served model: gate_up rows are twice the FFN intermediate, output rows are
+// that intermediate, and k is the hidden width. The column field is not part of the shape.
+constexpr std::array<Q4LinearSwiGluProblem, 2> kShapes{{
+    {34816, 17408, 5120, 5120, 1},
+    // The 4096-hidden dense model: FFN intermediate 12288.
+    {24576, 12288, 4096, 4096, 1},
+}};
 
 constexpr std::array<RouteSpec, 5> kRoutes{{
     {{1, 1}, Q4LinearSwiGluScheduleId::GemvPair},
@@ -130,9 +136,14 @@ constexpr bool catalog_is_closed() noexcept {
 static_assert(catalog_is_closed(), "Q4 LinearSwiGLU routes must be exact, contiguous, and closed");
 
 bool supported_shape(const Q4LinearSwiGluProblem& problem) noexcept {
-    return problem.gate_up_rows == kShape.gate_up_rows &&
-           problem.output_rows == kShape.output_rows && problem.k == kShape.k &&
-           problem.padded_k == kShape.padded_k;
+    for (const Q4LinearSwiGluProblem& shape : kShapes) {
+        if (problem.gate_up_rows == shape.gate_up_rows &&
+            problem.output_rows == shape.output_rows && problem.k == shape.k &&
+            problem.padded_k == shape.padded_k) {
+            return true;
+        }
+    }
+    return false;
 }
 
 template <class Allocator>
@@ -184,7 +195,10 @@ bool q4_linear_swiglu_admits(const Q4LinearSwiGluProblem& problem) noexcept {
 Q4LinearSwiGluPlan q4_linear_swiglu_resolve_plan(const Q4LinearSwiGluProblem& problem) {
     if (!q4_linear_swiglu_admits(problem)) {
         throw std::invalid_argument(
-            "q4 linear_swiglu: exact problem or column count is not admitted");
+            "q4 linear_swiglu: exact problem or column count is not admitted gu=" +
+            std::to_string(problem.gate_up_rows) + " out=" + std::to_string(problem.output_rows) +
+            " k=" + std::to_string(problem.k) + " pk=" + std::to_string(problem.padded_k) +
+            " cols=" + std::to_string(problem.cols));
     }
     // Materialized needs a workspace sized from the compiled bands, so profiles choose among the
     // workspace-free schedules only.

@@ -17,6 +17,7 @@
 namespace ninfer::serve {
 
 struct GenerationOutcome;
+struct GenerationMetrics;
 
 struct OpenAIChatRequest {
     std::string model;
@@ -56,6 +57,9 @@ nlohmann::json completion_timings_json(std::uint32_t prompt_tokens, std::uint32_
 nlohmann::json completion_prompt_progress_json(const ninfer::PromptProgress& progress);
 nlohmann::json openai_usage_json(const GenerationOutcome& outcome);
 const char* openai_finish_reason(ninfer::FinishReason reason) noexcept;
+// The per-request speculative-decoding acceptance record at response root
+// `metrics.speculative_decoding`; see the serving docs for the payload contract.
+nlohmann::json spec_decode_metrics_json(const GenerationMetrics& metrics);
 
 class OpenAIChatStream {
 public:

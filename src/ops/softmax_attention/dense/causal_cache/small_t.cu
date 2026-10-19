@@ -9,6 +9,9 @@
 #include "ops/kv_cache/d256_profile.h"
 #include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t_bf16.cuh"
+#if defined(NINFER_TIER_VOLTA)
+#    include "ops/softmax_attention/dense/causal_cache/small_t_sm70.cuh"
+#endif
 #include "ops/softmax_attention/dense/causal_cache/small_t_i8_launch.h"
 #include "core/device.h" // CUDA_CHECK
 #include "ninfer/ops/softmax_attention.h"
@@ -19,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace ninfer::ops::detail {
 
@@ -90,8 +94,8 @@ std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens
                                         KvCacheStorage storage) {
     // There used to be a SmallTMaximumSplits bump here for Fp8E4M3Row256 at tokens==1 and
     // window>8198, and the device asked for that bump for *every* quantized storage while only
-    // fp8 was granted it. TODO.md section 2c read the asymmetry as the host shortchanging nvfp4
-    // and k8v4 -- 69 splits where their kernels asked for 85 -- and proposed extending the grant.
+    // fp8 was granted it. The asymmetry read as the host shortchanging nvfp4 and k8v4 -- 69 splits
+    // where their kernels asked for 85 -- and extending the grant was proposed.
     //
     // Measured on this 3090, and it is the other way round: more splits at depth is worse.
     // Extending the grant to nvfp4 and k8v4 cost them 2.3-3.1% on the 35B at every depth, against
@@ -107,6 +111,18 @@ std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens
     //
     // The 27B was not conclusive either way (its fp8 control moved +-3% between identical runs,
     // which is worth knowing before trusting any single-sample result on that model).
+
+    // BF16 is one split per whole key tile (causal_small_t_bf16_active_splits). A speculative
+    // verify appends a draft column and extends the window by one key; a tile-aligned partition
+    // keeps the anchor's online-softmax merge bit-identical to single-token decode, which the
+    // greedy-equivalence witness requires. Only while the tile grid fits the split budget: past
+    // SmallTMaximumSplits the reduction scratch cannot hold one slot per tile, and the measured
+    // default tier below applies instead. The int8 and quantized tiers keep their own measured
+    // policies. This is the device function's rule restated; the two are duplicated by design.
+    if (storage == KvCacheStorage::BFloat16) {
+        const std::int32_t tiles = div_up(window, kCausalSmallTTileKeys);
+        if (tiles < Geometry::SmallTMaximumSplits) { return tiles; }
+    }
 
     // A 64-key default split just above a 32-key boundary makes the partial kernel execute a
     // nearly empty second tile. T=5 uses one 32-key tile per split; the short T>=6 profile keeps
@@ -143,6 +159,12 @@ std::int32_t causal_small_t_launch_capacity(CausalAttentionExecutionEnvelope env
     };
     include(envelope.min_visible_keys);
     include(envelope.max_visible_keys);
+    // The tile-aligned BF16 partition peaks one tile short of SmallTMaximumSplits -- at that window
+    // the tile grid is still inside the budget and as large as it ever gets. That point is neither
+    // an interval end nor a policy segment end, so without it an envelope containing the peak would
+    // size its partial buffer for less than the device can activate.
+    include(static_cast<std::uint32_t>((Geometry::SmallTMaximumSplits - 1) *
+                                       kCausalSmallTTileKeys));
     // The policy is monotonic inside these finite segments and may drop when crossing a boundary.
     // Evaluating every segment end plus both interval ends gives the exact interval maximum.
     constexpr std::uint32_t ends[] = {128, 160, 512, 4096, 5000, 8198, 16390};
@@ -155,6 +177,21 @@ std::int32_t causal_small_t_launch_capacity(CausalAttentionExecutionEnvelope env
 // tier when it routes one.
 template <typename Geometry>
 int i8_partial_ctas_per_sm(std::int32_t tokens, std::int32_t window, KvCacheStorage storage) {
+#if defined(NINFER_TIER_VOLTA)
+    if (current_device_volta()) {
+        // Volta's kernel (small_t_sm70.cuh) holds its own count, from its registers and shared
+        // memory.
+        int ctas = 1;
+        [&]<int... T>(std::integer_sequence<int, T...>) {
+            ((tokens == T + 1
+                  ? (ctas =
+                         sm70_attention::i8_resident_ctas<T + 1, (T + 1) * Geometry::GroupSize>())
+                  : 0),
+             ...);
+        }(std::make_integer_sequence<int, 8>{});
+        return ctas;
+    }
+#endif
     if (const int routed = small_t_i8_routed_ctas_per_sm(Geometry::QHeads, storage, tokens, window);
         routed > 0) {
         return routed;
@@ -195,14 +232,12 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
                             PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
                             std::int32_t logical_capacity, std::int32_t splits, Tensor& partial_acc,
                             Tensor& partial_m, Tensor& partial_l, cudaStream_t stream) {
-    constexpr int kBlock = 32 * WarpsPerCta;
     const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
     Tensor& cache_k = cache.k_pages;
     Tensor& cache_v = cache.v_pages;
-    // bf16 kernel uses only static smem (no dynamic staging).
-    causal_attention_small_t_tc_partial_bf16_kernel<Geometry, TokenTile, WarpsPerCta, MultiBatch,
-                                                    Masked, CacheInput>
-        <<<grid, kBlock, 0, stream>>>(
+    // Every kernel takes the same arguments and uses only static shared memory.
+    const auto launch = [&](auto kernel, int block) {
+        kernel<<<grid, block, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(q.data), input,
             static_cast<const std::int32_t*>(pos.data), static_cast<__nv_bfloat16*>(cache_k.data),
             static_cast<__nv_bfloat16*>(cache_v.data),
@@ -216,7 +251,30 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
             cache.block_tables.ne[0], invocation.width, invocation.full_width,
             invocation.column_begin, logical_capacity, scale, static_cast<float*>(partial_acc.data),
             static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
-    CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaGetLastError());
+    };
+#if defined(NINFER_TIER_VOLTA)
+    if (current_device_volta()) {
+        // Volta's own kernel (small_t_sm70.cuh): same grid, splits and partial outputs.
+        launch(causal_attention_small_t_sm70_bf16_kernel<Geometry, TokenTile, MultiBatch, Masked,
+                                                         CacheInput>,
+               32 * sm70_attention::Shape<TokenTile * Geometry::GroupSize>::kWarps);
+        return;
+    }
+#endif
+    if constexpr (kBuildPostVolta) {
+        with_shape_set([&]<bool TuringShapes>() {
+            if constexpr (TuringShapes) {
+                launch(causal_attention_small_t_tc_partial_bf16_turing_kernel<
+                           Geometry, TokenTile, WarpsPerCta, MultiBatch, Masked, CacheInput>,
+                       32 * WarpsPerCta);
+            } else {
+                launch(causal_attention_small_t_tc_partial_bf16_kernel<
+                           Geometry, TokenTile, WarpsPerCta, MultiBatch, Masked, CacheInput>,
+                       32 * WarpsPerCta);
+            }
+        });
+    }
 }
 
 } // namespace
@@ -299,10 +357,18 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     do {                                                                                           \
         const auto launch_profile = [&]<bool MultiBatch, bool Masked>() {                          \
             if (kv_cache_is_int8_family(cache.storage)) {                                          \
-                launch_small_t_i8<Geometry, (TOKENS), CacheInput>(                                 \
-                    MultiBatch, Masked, q, input, pos, scale, cache, invocation, logical_capacity, \
-                    implementation_window, splits, wave_splits, partial_acc, partial_m, partial_l, \
-                    stream);                                                                       \
+                /* Registered int8 geometries are (16 q, 2 kv) and (24 q, 4 kv). A new        */ \
+                /* geometry needs its own launch_small_t_i8 instantiations before it lands    */ \
+                /* here; until then refuse loudly instead of running the wrong K/V stride.   */ \
+                if constexpr (Geometry::KVHeads == 2 || Geometry::QHeads == 24) {                  \
+                    launch_small_t_i8<Geometry, (TOKENS), CacheInput>(                             \
+                        MultiBatch, Masked, q, input, pos, scale, cache, invocation,               \
+                        logical_capacity, implementation_window, splits, wave_splits, partial_acc, \
+                        partial_m, partial_l, stream);                                             \
+                } else {                                                                           \
+                    throw std::invalid_argument(                                                   \
+                        "causal small-T: int8 route is not registered for this head geometry");    \
+                }                                                                                  \
             } else {                                                                               \
                 launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS), MultiBatch, Masked>(           \
                     q, input, pos, scale, cache, invocation, logical_capacity, splits,             \
@@ -365,14 +431,14 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
         const dim3 grid(Geometry::QHeads, div_up(kCausalHeadDim, kDChunk),
                           invocation.width * invocation.batch_size);
         causal_attention_small_t_reduce_output_kernel<Geometry, kDChunk, Int8, MultiBatch, Masked,
-                                                        Offset><<<grid, kReduceBlock, 0, stream>>>(
+                                                        Offset, !Int8><<<grid, kReduceBlock, 0, stream>>>(
             static_cast<const float*>(partial_acc.data), static_cast<const float*>(partial_m.data),
             static_cast<const float*>(partial_l.data), static_cast<const std::int32_t*>(pos.data),
             invocation.valid_columns
-                  ? static_cast<const std::int32_t*>(invocation.valid_columns->data)
-                  : nullptr,
+                ? static_cast<const std::int32_t*>(invocation.valid_columns->data)
+                : nullptr,
             invocation.width, invocation.full_width, invocation.column_begin, invocation.batch_size,
-            splits, Int8 ? wave_splits : 0, static_cast<__nv_bfloat16*>(out.data),
+            logical_capacity, splits, Int8 ? wave_splits : 0, static_cast<__nv_bfloat16*>(out.data),
             static_cast<const __nv_bfloat16*>(gate));
     };
     const auto launch_profile = [&]<bool Int8, bool MultiBatch, bool Masked>() {
@@ -442,6 +508,12 @@ void causal_attention_small_t_launch(const Tensor& q, const Tensor& k, const Ten
             out, stream, gate);
         return;
     }
+    if (cache.num_kv_heads == CausalD256H16Kv4::KVHeads) {
+        causal_attention_small_t_launch_for<CausalD256H16Kv4>(
+            q, input, pos, scale, cache, invocation, envelope, partial_acc, partial_m, partial_l,
+            out, stream, gate);
+        return;
+    }
     causal_attention_small_t_launch_for<CausalD256H16Kv2>(q, input, pos, scale, cache, invocation,
                                                           envelope, partial_acc, partial_m,
                                                           partial_l, out, stream, gate);
@@ -479,6 +551,12 @@ void causal_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, 
     const PagedKVBatchLayerView batch_cache = single_row_paged_kv_batch_view(cache);
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
         causal_attention_small_t_launch_for<CausalD256H24Kv4>(q, input, pos, scale, batch_cache,
+                                                              invocation, envelope, partial_acc,
+                                                              partial_m, partial_l, out, stream);
+        return;
+    }
+    if (cache.num_kv_heads == CausalD256H16Kv4::KVHeads) {
+        causal_attention_small_t_launch_for<CausalD256H16Kv4>(q, input, pos, scale, batch_cache,
                                                               invocation, envelope, partial_acc,
                                                               partial_m, partial_l, out, stream);
         return;
@@ -560,6 +638,12 @@ void causal_attention_small_t_tiles_launch(const Tensor& q, const Tensor& positi
                                                               invocation, envelope, partial_acc,
                                                               partial_m, partial_l, out, stream,
                                                               gate);
+        return;
+    }
+    if (cache.num_kv_heads == CausalD256H16Kv4::KVHeads) {
+        causal_attention_small_t_launch_for<CausalD256H16Kv4>(
+            q, input, positions, scale, cache, invocation, envelope, partial_acc, partial_m,
+            partial_l, out, stream, gate);
         return;
     }
     causal_attention_small_t_launch_for<CausalD256H16Kv2>(q, input, positions, scale, cache,

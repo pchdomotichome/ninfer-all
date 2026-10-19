@@ -31,6 +31,7 @@ namespace ninfer::models::qwen3_5 {
 
 namespace execution {
 class Parameters;
+class NativeExpertRuntime;
 }
 
 namespace detail {
@@ -67,6 +68,13 @@ struct DeviceKVLeaseShortfall {
 struct DeviceKVPages {
     std::uint32_t main    = 0;
     std::uint32_t backend = 0;
+};
+
+// Whether a structured-output sequence can join the next decode round: not while the mask of its
+// next token is still computing, and never once that mask failed (`failure` says why).
+struct StructuredReadiness {
+    bool ready = true;
+    std::optional<std::string> failure;
 };
 
 enum class TextPhase {
@@ -1004,12 +1012,15 @@ public:
 
     // Engine owns scheduling and logical residency policy. Program owns physical lanes, opaque
     // capabilities, model state and one immutable pending transaction at a time.
-    // `branch_anchor`: a prompt depth at which the plan also captures a private long anchor
-    // (EngineOptions::context_cache.branch_anchors), the depth this prompt matched retained content
-    // to below any checkpoint that could resume it.
+    // `engine_anchors`: prompt depths at which the plan also captures private long anchors the
+    // Engine chose: a branch anchor (EngineOptions::context_cache.branch_anchors), the depth this
+    // prompt matched retained content to below any checkpoint that could resume it, and an
+    // endpoint anchor (context_cache.endpoint_anchors), a retained endpoint the prompt extends.
+    // An anchor at the endpoint the request then resumes from in place is captured before the
+    // suffix is prefilled, from the endpoint's own state.
     [[nodiscard]] RequestBasePlan plan_request(const PreparedPrompt& prompt,
                                                const runtime::ResolvedExecutionOptions& options,
-                                               std::optional<std::uint32_t> branch_anchor = {});
+                                               std::span<const std::uint32_t> engine_anchors = {});
     // Tokens the prompt shares with a retained owner's ledger from position zero, with the prefix
     // identity agreeing over them (zero when it does not); a stale or identity-less owner is zero.
     [[nodiscard]] std::uint32_t matched_prefix_tokens(const ContinuationHandle& owner,
@@ -1068,6 +1079,10 @@ public:
     // Replaces the sampling of an active sequence from its next round; the grammar mask and the
     // penalty counts carry over.
     void update_sampling(SequenceHandle sequence, const ResolvedSamplingParameters& sampling);
+    // A decode-ready sequence whose grammar masks are costly decodes without drafts, its next mask
+    // computing on a thread of its own from the first call after its last commit; the Engine
+    // leaves the lane out of rounds until it is ready, so its mask holds no other lane's round.
+    [[nodiscard]] StructuredReadiness structured_readiness(SequenceHandle sequence);
     // Blocks until the open context transaction's submitted Host transfer completes, so an idle
     // worker resumes the transaction as soon as it can progress. Returns false, without
     // waiting, when no transfer is in flight. A failed transfer surfaces at the next progress.
@@ -1214,6 +1229,7 @@ public:
     [[nodiscard]] runtime::ProgramResourceRevision resource_revision() const noexcept;
     [[nodiscard]] PhysicalUsageSnapshot physical_usage() const noexcept;
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
+    [[nodiscard]] ExpertResidencyStats expert_residency_stats() const;
     // Largest output budget for a prompt of `prompt_tokens` whose admission entitlement (main KV and
     // any MTP/DFlash backend KV, draft window included) fits one lane's share of each pool, so that
     // every configured lane can hold such a request at once; clamped to the remaining context. Reads
@@ -1238,7 +1254,8 @@ private:
     std::unique_ptr<detail::ProgramImpl> impl_;
 
     friend std::unique_ptr<Program> create_program(const execution::Parameters&, SequencePlan&&,
-                                                   DeviceContext&, const StartupObserver&);
+                                                   DeviceContext&, const StartupObserver&,
+                                                   std::unique_ptr<execution::NativeExpertRuntime>);
 };
 
 namespace detail {
@@ -1408,5 +1425,9 @@ struct RuntimeContractAccess {
 [[nodiscard]] std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
                                                       SequencePlan&& plan, DeviceContext& device,
                                                       const StartupObserver& startup_observer);
+[[nodiscard]] std::unique_ptr<Program> create_program(const execution::Parameters& parameters,
+                                                      SequencePlan&& plan, DeviceContext& device,
+                                                      const StartupObserver& startup_observer,
+                                                      std::unique_ptr<execution::NativeExpertRuntime> experts);
 
 } // namespace ninfer::models::qwen3_5

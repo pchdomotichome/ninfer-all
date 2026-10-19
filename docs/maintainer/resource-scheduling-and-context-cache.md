@@ -549,6 +549,28 @@ token。它不进入 prompt identity，所以不妨碍 endpoint 复用；代价�
 `ninfer-serve` 只对至少 512 token 的 raw prompt 打开它（RTX 3090、27B：额外 pass 约 20 ms，重复的 1,602-token prompt
 TTFT 从 615 ms 降到 26 ms）；benchmark 与测试的 `prepare_tokens` 默认不打开，执行分解保持不变。
 
+Endpoint anchor（`ContextCacheOptions::endpoint_anchors`，默认开启，`ninfer-serve --no-endpoint-anchors`
+关闭）由 Engine 而不是 Frontend 提出：base plan 之前，ResourceManager 找出 prompt 逐 token 且 identity 一致地
+匹配到其 endpoint 的最深 catalogued private continuation；该 endpoint 若比此 owner 的 long anchors 至少高
+`kEndpointAnchorMinimumGainTokens`（1024），base plan 就在这个 frontier 加入一个 `PrivateLongAnchor` capture
+（与 branch anchor 同一条 engine-anchor 通道，获得 identity 并按 client marker 定价）。请求以 in-place Move
+恢复该 endpoint（`PrivateEndpoint`、`ConsumeToActive`、无 state fork）时，这个 capture 正好落在 reuse base：
+它在 suffix prefill 之前从 endpoint 自己的 StateImage 取得（有空闲 Device slot 时 Device Fork，否则 Host
+snapshot），不增加 prefill split。恢复会让 endpoint 随对话推进，新的 endpoint 与 TurnClosure 都位于新 turn
+之后；没有这个 anchor，在旧 endpoint 处分叉的请求（对同一回答的另一条回复、编辑最后一条 message）找不到
+root 与新 turn 之间的任何 checkpoint。其他 reuse 路径下，这个 capture 位于 reuse base 之上时照常在 prefill
+中执行，在 reuse base 及以下时丢弃。它占用 `max_long_anchors_per_continuation`，满额时由
+`select_long_anchor_replacement` 按覆盖损失选出被替换的 anchor。
+
+从 private long anchor 恢复（`PrivateLongAnchor`）与 rewrite restore 使用同一条 source 规则。必须保留 source
+的请求（不发布 continuation、在该 frontier 声明显式 boundary、属于另一 session）Retain：Fork anchor，对话
+保持不变。其余请求先检查 cache 现状下能否把分支放在对话旁边：anchor 的 Retain candidate 在 identity 上物理
+可行，且 private catalog 有空位可发布分支时，同样 Retain；否则 ConsumeToActive，对话从 anchor 处改写：
+endpoint、rewrite checkpoint 与 reuse base 之上的 anchors 被释放，被选中的 anchor 本身仍是新 lineage 的
+checkpoint，所以 state 走 Fork 而不是 Move。默认 C=1、H=1 时，续写一轮之后两个 Device slot 由对话 endpoint
+与 endpoint anchor 占满，兄弟分支于是改写对话并从 anchor 恢复，而不是从 root 重新 prefill；代价是旧分支的
+endpoint，之后回到旧分支的请求同样从 anchor 恢复。
+
 Shared catalog 是 Engine-wide 公共容量，不是每条 lineage 的配额。启用 context cache 时，默认 logical
 capacity 同时覆盖 active concurrency 下限和单请求最多七个 prepared candidates，即
 `max(max_concurrency, kMaximumPreparedPromptCacheCandidatesPerRequest)`；显式配置仍完整覆盖默认值。这个下限允许较早的
@@ -986,6 +1008,20 @@ Abort 保证：
 采用 abort result 中的实际终态，而不是回放中间 receipts。
 
 若 Program 已无法形成可解释的稳定状态，则进入 Engine-wide failure。
+
+取消一个仍在 prefill 的 active 请求时，`ProgramImpl::abort` 先尝试 salvage：把 active state 作为
+endpoint 发布在 prefill cursor（需要至少 1024 tokens；MTP 还需要 tail hidden state，即只有最后一个
+chunk 之后才行；DFlash 的 draft context 需要追上）。salvage 不成立时，`retain_prefill_progress` 发布
+该 lane 已经 capture 的 checkpoint（long anchor 或 rewrite checkpoint）：前提是没有未应答的 capture
+offer、没有未 settle 的 state fork、没有 live endpoint，且 active image 是独占 writer。ledger、prefix
+identity、digests 与 rebuild work 截断到最深 checkpoint 的 frontier，KV 截断到其 required frontier，
+active StateImage 释放，continuation 没有 endpoint，以 Disposable retention 进入 catalog。任何条件不满足
+时它在第一次 mutation 前返回，lane 走原来的 strict clear。若该 cell 绑定了 slot file（原地复用已保存的
+session），Engine 解除绑定，因为没有 endpoint 的 continuation 不能保存为 session。
+`ContextCacheOptions::progress_anchor_tokens`（`ninfer-serve --progress-anchor-tokens N`，默认 16384）让
+Frontend 在 prompt 内部按绝对 token 栅格提出 `PrivateLongAnchor` opportunities，使没有 message boundary
+的超长单条 prompt 被取消时也有 checkpoint 可保留；它们与其他 long anchor 共用
+`max_long_anchors_per_continuation`。Hybrid 模式不使用它，ladder snapshot 覆盖同一情形。
 
 ---
 

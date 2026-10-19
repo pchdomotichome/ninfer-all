@@ -6,10 +6,18 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tools.convert.methods import fp8_row_maxabs, grouped_search, import_encoded
+from tools.convert.methods import (
+    cast_direct,
+    fp8_row_maxabs,
+    grouped_search,
+    import_encoded,
+)
 from tools.convert.model import Model, Parameter
 from tools.convert.official_recipes import (
     RECIPES,
+    qwen3_5_9b,
+    qwen3_6_35b_a3b,
+    qwen3_6_35b_a3b_apex,
     qwen3_8_27b,
     qwen3_8_27b_imatrix,
     qwen3_8_27b_nvfp4_nvidia,
@@ -65,6 +73,103 @@ def _single(formats: dict[str, set[str]], name: str) -> str:
 
 def test_q6_recipe_is_registered() -> None:
     assert RECIPES["qwen3_8_27b_q6"] is qwen3_8_27b_q6
+
+
+def test_flash_next_quality_recipe_writes_grouped_experts_and_preserves_sensitive_values(tmp_path):
+    from tools.artifact.codecs.direct import decode_direct
+    from tools.artifact.codecs.row_split import dequantize_row_split
+    from tools.artifact.reader import Artifact
+    from tools.artifact.schema import binding_parts
+    from tools.convert.pipeline import convert
+    from tools.convert.qwen4_exp_gguf import NGRAM_TENSOR
+    from tools.convert.sources.gguf import GGUFFile, write_gguf
+
+    model = Model({
+        "text": {"config": {"architectures": ["Qwen4ExpForCausalLM"]}},
+        "ngram": {"config": {"rows": 2, "row_width": 160}},
+        "mtp": {"config": {"architectures": ["Qwen4ExpMTP"]}, "target": "text"},
+        "vision": {"config": {}, "target": "text"},
+    })
+    values, expected = {}, {}
+    for prefix in ("text/layers/0/moe/", "mtp/layer/moe/"):
+        gate_up, downs = [], []
+        for expert in range(2):
+            for role in ("gate", "up", "down"):
+                name = prefix + f"experts/{expert}/{role}"
+                expected[name] = Q5 if prefix.startswith("text/") and role == "down" else Q4
+                (downs if role == "down" else gate_up).append(name)
+        model.packing_groups.extend((tuple(gate_up), tuple(downs)))
+    expected.update({
+        "text/token_embedding": Q8, "text/output_head": Q6,
+        "text/layers/0/attention/query": Q8, "text/layers/0/moe/shared/gate": Q8,
+        "text/layers/0/gdn/a_projection": "bf16", "text/layers/0/attn_hc/down": "bf16",
+        "text/layers/0/moe/router": "bf16", "text/layers/0/ple/key": "bf16",
+        "text/layers/0/indexer/query": "bf16", "mtp/fc_hidden": "bf16",
+        "mtp/layer/moe/shared/down": "bf16", "vision/layers/0/mlp/fc1": "bf16",
+    })
+    for index, name in enumerate(expected):
+        value = (torch.arange(256).float() * .17 + index).sin().reshape(2, 128).bfloat16()
+        values[name] = value
+        inputs = () if name == "text/token_embedding" else (name + "/input",)
+        model.add(Parameter(name, value.shape, array_source(value, name), inputs=inputs))
+    path = tmp_path / "table.gguf"
+    write_gguf(path, {}, [(NGRAM_TENSOR, (2, 160), 20, bytes(180))])
+    with GGUFFile(path) as table:
+        recipe = Recipe(model)
+        RECIPES["qwen3_8_flash_next"](model, recipe, {"ngram": table})
+        output = tmp_path / "quality.ninfer"
+        convert(model, recipe, output, device="cpu", rows_per_chunk=1)
+    with Artifact(output) as artifact:
+        parents = {}
+        for name, format in expected.items():
+            (parent, begin, end), = binding_parts(artifact.directory.bindings[name], artifact.by_id)
+            obj = artifact.object(parent)
+            assert obj.format == format
+            raw = artifact.read_object(obj.id)
+            decoded = (decode_direct(raw, format, obj.shape) if format == "bf16" else
+                       dequantize_row_split(raw, format, obj.shape, dtype=torch.float32))
+            value = decoded.flatten()[begin:end].reshape(values[name].shape)
+            if format == "bf16":
+                assert torch.equal(value, values[name])
+            else:
+                levels = {Q4: 7, Q5: 15, Q6: 31, Q8: 127}[format]
+                assert (value.float() - values[name].float()).abs().max() <= .501 / levels
+            parents[name] = obj.id
+        for group in model.packing_groups:
+            assert len({parents[name] for name in group}) == 1
+        uses = {u["parameter"]: u for u in artifact.directory.uses}
+        assert uses["text/layers/0/moe/experts/1/down"]["activation_policy"] == "AllowA8"
+        assert uses["text/layers/0/moe/router"]["activation_policy"] == "A16Only"
+
+
+def test_flash_next_quality_recipe_refuses_another_family_before_reading_the_table():
+    model = _dense_model()
+    with pytest.raises(ValueError, match="Flash-Next mathematics"):
+        RECIPES["qwen3_8_flash_next"](model, Recipe(model), {})
+
+
+def test_flash_next_mtp_refuses_unscaled_fused_fp8_experts():
+    from tools.convert.official_recipes import flash_next_mtp_formats
+
+    model = Model({"mtp": {"config": {}}})
+    name = "mtp/layer/moe/experts/0/gate"
+    codes = torch.ones((2, 128)).to(torch.float8_e4m3fn)
+    model.add(Parameter(name, codes.shape, array_source(codes, "HF fused FP8"), inputs=("x",)))
+    recipe = Recipe(model)
+    flash_next_mtp_formats(model, recipe)
+    with pytest.raises(ValueError, match="fused FP8 source scales"):
+        recipe.prepare(device="cpu")
+
+
+def test_flash_next_quality_recipe_does_not_ignore_a_selected_gguf_mtp(tmp_path):
+    from tools.convert.sources.gguf import GGUFFile, write_gguf
+
+    path = tmp_path / "mtp.gguf"
+    write_gguf(path, {}, [])
+    model = Model({"text": {"config": {"architectures": ["Qwen4ExpForCausalLM"]}},
+                   "mtp": {"config": {}, "target": "text"}})
+    with GGUFFile(path) as mtp, pytest.raises(ValueError, match="HF safetensors MTP source"):
+        RECIPES["qwen3_8_flash_next"](model, Recipe(model), {"mtp": mtp})
 
 
 def test_registered_recipe_gives_the_mlp_pair_q4() -> None:
@@ -165,6 +270,234 @@ def _selection_formats(recipe: Recipe) -> dict[str, set[str]]:
         name: {selection.format for selection in selections}
         for name, selections in recipe.selections.items()
     }
+
+
+# APEX grades a forty-layer routed MoE on these boundaries: its six-bit edge tier
+# covers the ten edge layers. Only `down` can carry it, because the engine admits
+# (Q4, Q5) and (Q4, Q6) expert profiles and no gate at Q6.
+APEX_EDGE_40 = frozenset({0, 1, 2, 3, 4, 35, 36, 37, 38, 39})
+APEX_MIDDLE_40 = (5, 9, 10, 29, 30, 34)
+
+MOE_ROLES = (
+    "moe/experts/0/gate",
+    "moe/experts/0/up",
+    "moe/experts/0/down",
+    "moe/shared/gate",
+    "moe/shared/down",
+    "gdn/query",
+    "gdn/output",
+)
+
+
+# Qwen3.5-9B is dense: eight full-attention layers on range(3, 32, 4) and twenty-four
+# GDN ones. The inventory stores the mixer projections fused, so each pair below is one
+# object in that inventory and two logicals here.
+NINEB_FULL = 3
+NINEB_GDN = 4
+
+NINEB_ATTENTION = ("query", "key", "gate", "value", "output")
+NINEB_MLP = ("gate", "up", "down")
+NINEB_GDN_MIXER = ("query", "key", "value", "z", "output")
+# 1-D tensors: the builder gives them no inputs, which is what makes `projection` false.
+NINEB_DIRECT = (
+    "input_norm", "post_attention_norm",
+    "attention/query_norm", "attention/key_norm",
+    "gdn/norm", "gdn/convolution", "gdn/a_projection", "gdn/b_projection",
+)
+
+
+def _dense_9b_model() -> Model:
+    model = Model({"text": {"config": {"hidden_size": 4096, "vocab_size": 248320,
+                                       "num_hidden_layers": 32}}})
+    matrices = ["text/token_embedding", "text/output_head"]
+    for layer, mixer in ((NINEB_FULL, "attention"), (NINEB_GDN, "gdn")):
+        p = f"text/layers/{layer}/"
+        matrices += [p + "attention/" + r for r in NINEB_ATTENTION]
+        matrices += [p + "mlp/" + r for r in NINEB_MLP]
+        if mixer == "gdn":
+            matrices += [p + "gdn/" + r for r in NINEB_GDN_MIXER]
+    for name in ["text/final_norm"] + [
+        f"text/layers/{layer}/{role}"
+        for layer in (NINEB_FULL, NINEB_GDN)
+        for role in NINEB_DIRECT
+    ]:
+        vectors = (256,)
+        model.add(Parameter(
+            name, vectors, array_source(torch.ones(vectors, dtype=torch.bfloat16), name)
+        ))
+    for name in matrices:
+        shape = (256, 64)
+        inputs = () if name.startswith("text/") and name.count("/") == 1 else ("input",)
+        model.add(Parameter(
+            name, shape, array_source(torch.ones(shape, dtype=torch.bfloat16), name),
+            inputs=inputs,
+        ))
+    return model
+
+
+def _nineb_formats() -> dict[str, set[str]]:
+    model = _dense_9b_model()
+    recipe = Recipe(model)
+    qwen3_5_9b(model, recipe, {})
+    return _selection_formats(recipe)
+
+
+def test_nineb_recipe_is_registered() -> None:
+    assert RECIPES["qwen3_5_9b"] is qwen3_5_9b
+
+
+def test_nineb_recipe_splits_the_fused_pairs_onto_one_width() -> None:
+    """The inventory stores `query_key` at Q4 and `gate_value` at Q5 for attention, so
+    each pair's halves match, and it puts `gate_up` at Q4 with `down` at Q5."""
+    formats = _nineb_formats()
+    for role in ("query", "key"):
+        assert _single(formats, f"text/layers/{NINEB_FULL}/attention/{role}") == Q4
+    for role in ("gate", "value"):
+        assert _single(formats, f"text/layers/{NINEB_FULL}/attention/{role}") == Q5
+    assert _single(formats, f"text/layers/{NINEB_FULL}/attention/output") == Q5
+    assert _single(formats, f"text/layers/{NINEB_GDN}/gdn/output") == Q5
+    for role in ("gate", "up"):
+        assert _single(formats, f"text/layers/{NINEB_FULL}/mlp/{role}") == Q4
+    assert _single(formats, f"text/layers/{NINEB_FULL}/mlp/down") == Q5
+
+
+def test_nineb_recipe_holds_the_gdn_mixer_on_one_width() -> None:
+    """The inventory grades GDN `query_key` at Q4 and `value_z` at Q5, but those four
+    projections reach one op as a `std::span<WeightInput const, 4>` that validates a
+    single parent format, so a mix fails at load. All four sit at Q8_G32, which is what
+    `qwen3_6_35b_a3b` does and packs them into one stored object."""
+    formats = _nineb_formats()
+    for role in ("query", "key", "value", "z"):
+        name = f"text/layers/{NINEB_GDN}/gdn/{role}"
+        assert _single(formats, name) == Q8, f"{name} must share the mixer's width"
+
+
+def test_nineb_recipe_leaves_the_vectors_bf16() -> None:
+    """`a_projection` and `b_projection` are 32 by 4096 and stay BF16 in the inventory,
+    as do the norms and the convolution. The vectors carry no inputs, so the projection
+    walk skips them, and whatever assigns them lands on `cast_direct` at BF16 rather
+    than on a groupwise codec."""
+    model = _dense_9b_model()
+    recipe = Recipe(model)
+    qwen3_5_9b(model, recipe, {})
+    for layer in (NINEB_FULL, NINEB_GDN):
+        for role in NINEB_DIRECT:
+            selections = recipe.selections[f"text/layers/{layer}/{role}"]
+            assert [s.format for s in selections] == ["bf16"]
+            assert selections[0].method is cast_direct
+    for name in ("text/token_embedding", "text/output_head"):
+        assert [s.format for s in recipe.selections[name]] == [Q6]
+    assert [s.format for s in recipe.selections["text/final_norm"]] == ["bf16"]
+
+
+def test_nineb_recipe_sits_the_vocabulary_endpoints_at_q6() -> None:
+    """Both are 248320 by 4096, which is most of what a Q8 pair costs on a model this
+    small; the inventory has them at Q6, unlike the 27B recipes' Q8."""
+    formats = _nineb_formats()
+    assert _single(formats, "text/token_embedding") == Q6
+    assert _single(formats, "text/output_head") == Q6
+
+
+def test_nineb_recipe_refuses_a_moe_checkpoint() -> None:
+    model = _moe_model()
+    with pytest.raises(ValueError, match="Dense"):
+        qwen3_5_9b(model, Recipe(model), {})
+
+
+
+def _moe_model(layers: int = 40) -> Model:
+    model = Model({"text": {"config": {"num_experts": 256, "num_hidden_layers": layers}}})
+    names = ["text/token_embedding", "text/output_head"]
+    for layer in sorted(APEX_EDGE_40 | set(APEX_MIDDLE_40)) if layers == 40 else range(layers):
+        names.extend(f"text/layers/{layer}/{role}" for role in MOE_ROLES)
+    for name in names:
+        inputs = () if name == "text/token_embedding" else ("input",)
+        source = array_source(torch.ones((4, 8), dtype=torch.bfloat16), name)
+        model.add(Parameter(name, (4, 8), source, inputs=inputs))
+    return model
+
+
+def _apex_formats(recipe_function) -> dict[str, set[str]]:
+    model = _moe_model()
+    recipe = Recipe(model)
+    recipe_function(model, recipe, {})
+    return _selection_formats(recipe)
+
+
+def test_apex_recipe_is_registered() -> None:
+    assert RECIPES["qwen3_6_35b_a3b_apex"] is qwen3_6_35b_a3b_apex
+
+
+@pytest.mark.parametrize("layer", sorted(APEX_EDGE_40))
+def test_apex_recipe_lifts_the_expert_down_across_the_whole_edge(layer) -> None:
+    formats = _apex_formats(qwen3_6_35b_a3b_apex)
+    assert _single(formats, f"text/layers/{layer}/moe/experts/0/down") == Q6
+
+
+@pytest.mark.parametrize("layer", APEX_MIDDLE_40)
+def test_apex_recipe_leaves_the_expert_down_at_q5_away_from_the_edge(layer) -> None:
+    formats = _apex_formats(qwen3_6_35b_a3b_apex)
+    assert _single(formats, f"text/layers/{layer}/moe/experts/0/down") == Q5
+
+
+def test_apex_recipe_holds_gate_and_up_at_the_only_admitted_width() -> None:
+    """`prepare_sparse_moe_weights` admits (Q4, Q5) and (Q4, Q6) only, so the
+    gradient cannot reach gate and up. Q4 is the gate of both profiles."""
+    formats = _apex_formats(qwen3_6_35b_a3b_apex)
+    for layer in sorted(APEX_EDGE_40 | set(APEX_MIDDLE_40)):
+        for role in ("moe/experts/0/gate", "moe/experts/0/up"):
+            assert _single(formats, f"text/layers/{layer}/{role}") == Q4
+
+
+def test_apex_recipe_only_uses_profiles_the_loader_admits() -> None:
+    """Every layer must land on (Q4, Q5) or (Q4, Q6) with a Q8 shared expert."""
+    formats = _apex_formats(qwen3_6_35b_a3b_apex)
+    admitted = {(Q4, Q5), (Q4, Q6)}
+    for layer in sorted(APEX_EDGE_40 | set(APEX_MIDDLE_40)):
+        gate = _single(formats, f"text/layers/{layer}/moe/experts/0/gate")
+        down = _single(formats, f"text/layers/{layer}/moe/experts/0/down")
+        assert (gate, down) in admitted, f"layer {layer} would not bind"
+        for role in ("moe/shared/gate", "moe/shared/down"):
+            assert _single(formats, f"text/layers/{layer}/{role}") == Q8
+
+
+def test_apex_recipe_holds_the_shared_expert_and_attention_at_their_only_route() -> None:
+    """Neither can move off Q8. The groupwise check requires it on the shared
+    expert, and `prepare_input_projection_weight` admits Q8_G32 for this model and
+    nothing else, so the Q8 there is a route rather than a preference."""
+    formats = _apex_formats(qwen3_6_35b_a3b_apex)
+    for layer in sorted(APEX_EDGE_40 | set(APEX_MIDDLE_40)):
+        for role in ("moe/shared/gate", "moe/shared/down", "gdn/query", "gdn/output"):
+            assert _single(formats, f"text/layers/{layer}/{role}") == Q8
+    assert _single(formats, "text/token_embedding") == Q8
+    assert _single(formats, "text/output_head") == Q6
+
+
+def test_apex_recipe_widens_the_edge_the_official_recipe_lifts() -> None:
+    """`qwen3_6_35b_a3b` lifts `down` at three layers, 34, 38 and 39. This one
+    covers the ten edge layers, so it has to move at least the seven it did not."""
+    official = _apex_formats(qwen3_6_35b_a3b)
+    apex = _apex_formats(qwen3_6_35b_a3b_apex)
+    for already in (34, 38, 39):
+        assert _single(official, f"text/layers/{already}/moe/experts/0/down") == Q6
+    moved = [
+        layer
+        for layer in sorted(APEX_EDGE_40)
+        if _single(official, f"text/layers/{layer}/moe/experts/0/down") == Q5
+    ]
+    assert moved == [0, 1, 2, 3, 4, 35, 36, 37]
+    for layer in moved:
+        assert _single(apex, f"text/layers/{layer}/moe/experts/0/down") == Q6
+    # Layer 34 is the official recipe's third lift but APEX's near-edge, so a
+    # symmetric edge boundary gives it back rather than keeping the exception.
+    assert _single(apex, "text/layers/34/moe/experts/0/down") == Q5
+
+
+def test_apex_recipe_needs_moe_mathematics() -> None:
+    model = _dense_model()
+    with pytest.raises(ValueError, match="MoE"):
+        qwen3_6_35b_a3b_apex(model, Recipe(model), {})
+
 
 
 def _imatrix_recipe() -> Recipe:

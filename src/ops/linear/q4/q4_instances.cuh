@@ -32,6 +32,8 @@ using MmaR64T64K64Wr32Wt16S2A2B2 =
 using SlicedK5120T16 = Q4A16SlicedKMmaSchedule<16, 16, 8, 1, Cache::cg, Cache::ca, 6, 5120, 16>;
 using SlicedK5120T24 = Q4A16SlicedKMmaSchedule<16, 24, 8, 1, Cache::cg, Cache::ca, 6, 5120, 24>;
 using SlicedK2048T4  = Q4A16SlicedKMmaSchedule<16, 8, 8, 1, Cache::cg, Cache::ca, 6, 2048, 4>;
+// The 4096-hidden model's proposal head at T=4; the same block as the 2048 one at this width.
+using SlicedK4096T4  = Q4A16SlicedKMmaSchedule<16, 8, 8, 1, Cache::cg, Cache::ca, 6, 4096, 4>;
 
 using SlicedK5120T4 = Q4A16SlicedKMmaSchedule<16, 8, 8, 1, Cache::cg, Cache::ca, 6, 5120, 4>;
 

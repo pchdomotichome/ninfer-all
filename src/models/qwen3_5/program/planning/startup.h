@@ -110,6 +110,7 @@ struct SequencePlanningInputs {
     ops::RopeYarn rope_yarn;
     std::uint32_t mtp_attention_window = 0;
     models::LoadOptions features;
+    std::optional<std::uint64_t> expert_cache_bytes;
     bool use_cuda_graph    = true;
     // Nonzero replaces the computed per-profile CUDA Graph allowance in total.
     std::size_t cuda_graph_allowance_bytes = 0;
@@ -146,6 +147,7 @@ struct SequencePlanImpl {
     ops::RopeYarn rope_yarn;
     std::uint32_t mtp_attention_window = 0;
     models::LoadOptions features;
+    std::optional<std::uint64_t> expert_cache_bytes;
     bool use_cuda_graph    = true;
     bool causal_scoring    = false;
     bool structured_output = false;
@@ -171,6 +173,13 @@ struct SequencePlanImpl {
     return std::max<std::uint64_t>(std::min(plan.prefill_chunk, plan.capacity),
                                    static_cast<std::uint64_t>(plan.max_concurrency) *
                                        (widest_verify_window(plan) + 1U));
+}
+
+// The int32 control block a stage boundary carries for `columns` columns: cache positions,
+// RoPE positions (three rows with multimodal RoPE), KV table rows, valid columns and the source and
+// destination state slots, each at most `columns` entries, plus alignment.
+[[nodiscard]] inline std::uint64_t stage_control_bytes(std::uint64_t columns) noexcept {
+    return (8U * columns + 16U) * sizeof(std::int32_t);
 }
 
 struct SequencePlannerImpl {

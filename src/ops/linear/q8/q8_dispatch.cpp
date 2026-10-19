@@ -26,6 +26,13 @@ constexpr std::array kShapes{
     shape<Q8N1024K2048>(select_q8_n1024_k2048, select_q8_n1024_k2048_unified),
     shape<Q8N1024K5120>(select_q8_n1024_k5120, select_q8_n1024_k5120_unified),
     shape<Q8N2048K4096>(select_q8_n2048_k4096, select_q8_n2048_k4096_unified),
+    // The Qwen3.5-9B MTP layer's five Q8 linears. They have no unified table, so they keep the
+    // legacy routes everywhere rather than borrowing another width's.
+    shape<Q8N4096K4096>(select_q8_n4096_k4096),
+    shape<Q8N4096K8192>(select_q8_n4096_k8192),
+    shape<Q8N4096K12288>(select_q8_n4096_k12288),
+    shape<Q8N10240K4096>(select_q8_n10240_k4096),
+    shape<Q8N24576K4096>(select_q8_n24576_k4096),
     shape<Q8N2048K4608>(select_q8_n2048_k4608, select_q8_n2048_k4608_unified),
     shape<Q8N2048K16384>(select_q8_n2048_k16384, select_q8_n2048_k16384_unified),
     shape<Q8N4608K4608>(select_q8_n4608_k4608, select_q8_n4608_k4608_unified),

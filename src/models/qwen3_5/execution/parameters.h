@@ -1,12 +1,15 @@
 #pragma once
 
 #include "models/qwen3_5/model.h"
+#include "core/arena.h"
+#include "ninfer/ops/moe_experts.h"
 #include "ninfer/ops/weight_input.h"
 
 #include <array>
 #include <memory>
 #include <limits>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <variant>
 #include <vector>
@@ -41,7 +44,35 @@ struct DenseParameters {
     std::optional<LinearParameters> up;
 };
 
-using FfnParameters = std::variant<DenseParameters, ops::SparseMoeWeights>;
+// The routed and shared experts of an artifact that stores them as GGUF blocks. Opposite of
+// SparseMoeWeights: the banks are tables of expert base pointers rather than one fused native
+// Weight per bank, and the router and shared gate arrive already materialised because moe_route
+// projects from tensors, not from weights.
+struct GgufMoeParameters {
+    ops::GgufMoeWeights banks;
+    // BF16 [hidden, experts] and BF16 [hidden].
+    Tensor router;
+    Tensor shared_gate;
+    // Experts a token selects. The router Op's ids and weights are [top_k, tokens], so the caller
+    // has to state it; it is the model's, not the Op's, and the Op only instantiates it.
+    std::int32_t top_k = 0;
+};
+
+// A dense block's FFN, or its experts. A MoE block is one or the other: the GGUF form is separate
+// from the native one because the two run different Ops over different weight representations, not
+// because the mathematics differs.
+struct StreamedMoeParameters {
+    // Routed Weight fields contain only the codec profile; all operand addresses come from the
+    // delivery tables. Router and shared expert remain immutable resident native operands.
+    ops::SparseMoeWeights weights;
+    std::size_t delivery_layer = 0;
+};
+
+// A dense block's FFN, or its experts. A MoE block is one or the other, and there are three MoE
+// forms: the native banks, the GGUF blocks this fork added, and the streamed delivery upstream
+// added. They run different Ops over different weight representations, not different mathematics.
+using FfnParameters = std::variant<DenseParameters, ops::SparseMoeWeights, GgufMoeParameters,
+                                    StreamedMoeParameters>;
 
 struct AttentionParameters {
     ops::ProjectionWeights projection;
@@ -83,6 +114,18 @@ struct TextParameters {
     [[nodiscard]] std::uint32_t stage_end(std::size_t stage) const {
         return stage + 1 < stage_begin.size() ? stage_begin[stage + 1]
                                               : static_cast<std::uint32_t>(layers.size());
+    }
+
+    // The DFlash feature taps among stage `stage`'s layers, in the drafter's order.
+    [[nodiscard]] std::vector<std::uint32_t> stage_taps(std::size_t stage,
+                                                        std::span<const std::uint32_t> taps) const {
+        const std::uint32_t begin = stage_begin.at(stage);
+        const std::uint32_t end   = stage_end(stage);
+        std::vector<std::uint32_t> out;
+        for (const std::uint32_t layer : taps) {
+            if (layer >= begin && layer < end) { out.push_back(layer); }
+        }
+        return out;
     }
 };
 
@@ -174,6 +217,10 @@ public:
     std::optional<VisionParameters> vision;
     std::optional<DraftParameters> draft;
     std::optional<ProposalParameters> proposal;
+    // The device arrays of expert base pointers that a GgufMoeParameters' banks name. Owned here
+    // because the builder that produces them is transient, and these have to outlive the parameters
+    // that point into them; one per MoE bank per layer, plus the shared expert's three.
+    std::vector<DeviceBuffer> expert_tables;
 };
 
 } // namespace ninfer::models::qwen3_5::execution

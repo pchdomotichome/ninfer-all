@@ -30,6 +30,10 @@ inline constexpr std::uint32_t kPrefixGridPageTokens = 256;
 // the shared-prefix opportunities one request can materialize on its own. Prefix-grid points are
 // excluded because they carry only observed evidence and need a second reuse domain.
 inline constexpr std::size_t kMaximumPreparedPromptCacheCandidatesPerRequest = 7;
+// Smallest nonzero ContextCacheOptions::progress_anchor_tokens. Preparation proposes one candidate
+// per multiple, so a finer stride would make a long prompt's candidate list, and the duplicate
+// scan over it, grow without bound.
+inline constexpr std::uint32_t kMinimumProgressAnchorTokens = 256;
 // Aggregate encoded image/video payload retained by one prompt, independent of item count.
 inline constexpr std::size_t kMaximumPromptMediaBytes    = 256ULL << 20;
 inline constexpr std::size_t kDefaultMediaCacheBytes     = 1ULL << 30;
@@ -52,7 +56,7 @@ enum class KvCacheStorage : std::uint8_t {
     Fp8E4M3Row256,
     // RotorQuant rk8v4: rotated INT8 keys with a packed signed int4 value plane over a group-32
     // scale. Ported onto the kv_cache_append Op that owns KV quantization, and opt-in through
-    // --kv-dtype rk8v4. See docs/rtx-3090-windows.md.
+    // --kv-dtype rk8v4. See docs/cli.md, "Context and memory".
     RotatedInt8KeyInt4ValueGroup64,
     // NVFP4 e2m1, group-16 scale, both K and V planes packed two codes per byte.
     Nvfp4Group16,
@@ -101,6 +105,9 @@ struct KvCapacityPolicy {
 };
 
 enum class ProposalHead : std::uint8_t {
+    // The artifact's optimized proposal head when it stores one, the full output head otherwise;
+    // resolved when the model loads.
+    Auto,
     Full,
     Optimized,
 };
@@ -124,7 +131,11 @@ struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
     // Startup-fixed K: MTP, DFlash and DFlash2 1..15 (query width K+1).
     std::uint32_t draft_tokens = 0;
-    ProposalHead proposal_head = ProposalHead::Full;
+    // Flash-Next MTP: truncate verification after the first draft whose absolute probability
+    // is at or below this floor. Zero keeps the full window; drafting still runs the captured chain.
+    float draft_min_p = 0;
+    // An Engine's options() report the resolved head.
+    ProposalHead proposal_head = ProposalHead::Auto;
     // Context-lookup drafting: match this many trailing tokens against the sequence so far and
     // propose whatever followed the last time they appeared. 0 disables it. It costs no device
     // work, it is exact (verify rejects a wrong guess), and it is strongest exactly where a draft
@@ -323,6 +334,15 @@ struct ContextCacheOptions {
     // remainder, and rejects a plan whose state footprint exceeds half the budget.
     // `host_state_slots` and `host_kv_capacity_bytes` are ignored in that mode.
     std::optional<std::size_t> host_cache_budget_bytes;
+    // --host-cache-mib auto: host_cache_budget_bytes is sized at startup, once the weights are
+    // loaded, from the host memory still available (the smaller of the system's available memory
+    // and what the process's memory cgroup allows) less host_cache_reserve_bytes and, with Vision,
+    // the media caches; never above host_cache_max_bytes nor host_cache_percent of the machine's
+    // memory. For a machine that serves this one process: pinned pages cannot be reclaimed.
+    bool host_cache_auto                  = false;
+    std::size_t host_cache_reserve_bytes  = std::size_t{3} << 30;
+    std::optional<std::size_t> host_cache_max_bytes;
+    std::optional<std::uint32_t> host_cache_percent;
     // Bounded private/shared logical catalogs and per-continuation long-anchor count. An engaged
     // host-cache budget raises the anchor count within the state inventory it funds.
     std::optional<std::uint32_t> max_private_continuations;
@@ -394,6 +414,26 @@ struct ContextCacheOptions {
     // from an older checkpoint. Costs a scan of the catalog per planned request and, where it
     // fires, a prefill split and a StateImage. Off by default.
     bool branch_anchors = false;
+    // Endpoint anchors: a request that resumes a retained conversation at its endpoint and
+    // extends it keeps that endpoint as a private long anchor, taken from the resumed state
+    // before the new suffix is prefilled. Resuming moves the endpoint with the conversation, so a
+    // later request that diverges there -- another reply to the same answer, an edited last
+    // message -- would otherwise find no checkpoint between root and the new turn. Fires where
+    // the endpoint lies at least 1024 tokens above the conversation's deeper long anchors. Costs
+    // a StateImage per firing, a Host copy when the Device slots are full, within the long-anchor
+    // capacity; no prefill split. A request that diverges at any private long anchor branches off
+    // the conversation where the cache holds the branch beside it as it stands, and otherwise
+    // rewrites the conversation from the anchor, as a rewrite restore does from its checkpoint.
+    bool endpoint_anchors = true;
+    // Progress anchors: every prompt offers a private long anchor at each multiple of this many
+    // tokens strictly inside it, so a prompt with no message boundary (one very long user message)
+    // still holds checkpoints while it prefills. A prefill that is cancelled part way -- a client
+    // that times out or disconnects -- keeps them when its live state cannot be kept as an
+    // endpoint (under MTP until its last chunk), so the retry resumes from the deepest one instead
+    // of token zero. They share the long-anchor capacity with every other long anchor; each costs
+    // a StateImage and may split a prefill chunk. 0 disables; a nonzero value below
+    // kMinimumProgressAnchorTokens is rejected.
+    std::uint32_t progress_anchor_tokens = 16384;
 };
 
 struct ContextCostOptions {
@@ -449,12 +489,12 @@ struct ModelSuspendOptions {
     bool auto_resume = true;
 };
 
-// Qwen3.8-Flash-Next (Qwen4ExpForCausalLM): where the routed experts' banks live.
+// Where supported MoE families keep routed expert banks (see each family guide).
 enum class ExpertResidency : std::uint8_t {
     // In the weight arena of each layer's stage device.
     Device,
-    // In page-locked host memory, read by the expert kernels across the bus: the model then needs
-    // only its dense weights in device memory.
+    // In host RAM: native experts copy misses into a device cache; an explicit DMA share below
+    // one enables experimental CPU compute. GGUF GPU kernels read uncached pinned bytes.
     Host,
     // Left in the artifact's files and copied into a device cache when a pass routes to them,
     // through the OS page cache: the least host memory, at the cost of a wait for every expert a
@@ -462,14 +502,70 @@ enum class ExpertResidency : std::uint8_t {
     Disk,
 };
 
+// Flash-Next host and disk experts: how a decode or verification call gets the routed experts the
+// device cache lacks. By default every miss executes on the GPU; a DMA share below one lets the CPU
+// compute the rest: for GGUF banks the GPU's results bit for bit, for native banks different
+// numerical results (and concurrency one).
+struct HybridExpertOptions {
+    float dma_share = 1; // 0..1 of distinct uncached experts per decode/verify call
+    // GGUF experts: each call splits its misses between copies and the CPU by measured speeds
+    // instead of a fixed share (dma_share is then unused).
+    bool dma_share_auto = false;
+    std::uint32_t cpu_threads = 0; // automatic, or 1..256
+    // GGUF banks: copy missing experts into device staging while the cached ones run (staged), or
+    // let the expert kernels read host experts across the bus (mapped; host experts only).
+    bool mapped_misses = false;
+    // GGUF host experts with staged misses: 1..9 leaves out of a decode or verification call each
+    // uncached expert that all its tokens rank past this many places of their top ten, without
+    // giving its router weight to the others (lossy); 0 (default) serves every miss.
+    std::uint32_t tail_skip_rank = 0;
+    // GGUF host experts: device buffers a wide prefill call copies its layer's uncached experts
+    // into. 2 copies the next layer's while this layer's experts run, and takes the second
+    // buffer's memory from the expert cache; 1 (default) keeps one.
+    std::uint32_t prefill_buffers = 1;
+    bool adaptive_cache = false;
+    std::filesystem::path routing_profile; // initial per-layer expert counts for this artifact
+    std::filesystem::path record_profile; // write accumulated counts at request boundaries
+};
+
+// Qwen3.8-Flash-Next: where the n-gram table's rows come from.
+enum class NgramResidency : std::uint8_t {
+    // The table's file, with a bounded cache of rows read as the hash addresses them.
+    Disk,
+    // RAM: the whole table is read at startup.
+    Ram,
+    // RAM for the rows a hot-row profile ranks most frequent, as many as the RAM budget holds,
+    // read at startup; the other rows come from the file.
+    RamHot,
+};
+
+// Qwen3.8-Flash-Next: how rows are read from the table's file.
+enum class NgramIo : std::uint8_t {
+    // Positioned reads through the OS page cache.
+    Buffered,
+    // Reads that bypass the page cache (O_DIRECT, FILE_FLAG_NO_BUFFERING): the table takes no
+    // RAM beyond what the residency keeps, and every cache miss reaches the drive.
+    Direct,
+    // Copies out of a read-only mapping of the file, faulted in through the page cache.
+    Mapped,
+};
+
 // The n-gram table of Qwen3.8-Flash-Next's per-layer embedding: the model artifact's own rows, or
-// a separate table artifact holding the table the model names by digest. The rows stay in their
-// file and are read a row at a time.
+// a separate table artifact holding the table the model names by digest.
 struct NgramTableOptions {
     // A table artifact to read the rows from; empty takes the model artifact's own.
     std::filesystem::path path;
-    // Loads the whole table into RAM at startup.
-    bool ram = false;
+    NgramResidency residency = NgramResidency::Disk;
+    NgramIo io               = NgramIo::Buffered;
+    // Disk, RamHot: cached/resident rows and their index take at most this RAM. Empty takes
+    // zero for Disk and 4 GiB for RamHot. Ram always loads the whole table.
+    std::optional<std::uint64_t> ram_budget_bytes;
+    // RamHot: the hot-row profile (ninfer-ngram-profile) the rows are chosen by.
+    std::filesystem::path hot_profile;
+    // Ram, RamHot: lock the resident rows into physical memory (mlock, VirtualLock).
+    bool lock = false;
+    // Row reads in flight at once.
+    std::uint32_t io_depth = 64;
     // Runs the model without its table: a non-standard, experimental mode that badly degrades the
     // output, since the model was trained with the table.
     bool disabled = false;
@@ -493,12 +589,14 @@ struct EngineOptions {
     // Layers per stage, one count per entry of `devices`. Empty lets the engine choose from each
     // device's free memory.
     std::vector<std::uint32_t> stage_layers;
-    // Qwen3.8-Flash-Next only.
+    // Native Qwen MoE, Qwen3.8-Flash-Next and Gemma 4 MoE.
     ExpertResidency expert_residency = ExpertResidency::Device;
-    // Host-resident experts: device memory lent to the cache of the most used experts, split
-    // evenly over the devices. Empty takes what each device has free after startup less a margin;
-    // zero disables the cache.
+    // Host/disk experts: device memory lent to the persistent cache, split
+    // evenly over the devices. Automatic sizing follows each family's KV/workspace reservations.
+    // Zero disables the cache for native Qwen and Gemma, which retain bounded transient slots;
+    // Flash-Next disk residency requires a nonzero cache.
     std::optional<std::uint64_t> expert_cache_bytes;
+    HybridExpertOptions hybrid_experts;
     // Qwen3.8-Flash-Next only.
     NgramTableOptions ngram_table;
     std::uint32_t max_context          = 2048; // Logical ceiling of one request or score window.
@@ -527,18 +625,27 @@ struct EngineOptions {
     // materializing requests and keeps serving the queue, as an out-of-memory failure does, instead
     // of failing the Engine. Eight consecutive recoveries without a completed unit still fail it.
     bool recover_invariant_failures = false;
-    // Windows builds with NINFER_D3D12_RESIDENCY only: allocate the device arenas from a D3D12
-    // heap held resident at maximum priority and budget the runtime against the adapter's
-    // dedicated memory less the weights and a 512 MiB desktop floor, not against what is free now,
-    // on the grounds that WDDM will evict other allocations. Not for a GPU that drives the
-    // desktop, whose allocations are often not evictable.
+    // Windows builds only: budget the runtime against the adapter's dedicated memory less the
+    // weights and a 512 MiB desktop floor, not against what is free now, on the grounds that WDDM
+    // will page other allocations out, and commit every owning device arena at startup. Under
+    // pressure from another process WDDM may page this process's memory out as well, which slows
+    // generation until the memory comes back. Not for a GPU that drives the desktop, whose
+    // allocations are often not evictable.
     bool wddm_evictable_budget         = false;
     ModelSuspendOptions suspend;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(2048);
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
-    std::uint32_t prefill_chunk        = 1024;
+    // Prompt tokens per prefill chunk; 0 is automatic: 1024, or 4096 for a native Qwen3.5-family MoE
+    // whose routed experts live in host memory or files (each chunk carries the whole expert bank
+    // across the bus once). Gemma 4 chooses its own chunk.
+    std::uint32_t prefill_chunk        = 0;
+    // Decode rounds that run before a prefill chunk while other requests generate, proportionally
+    // fewer (at least one) before a shorter prefill unit and more before a longer one. A decode
+    // round takes tens of milliseconds and a chunk hundreds, so strict alternation (1) leaves
+    // decoding streams a token per chunk; 0 is prefill_chunk / 64.
+    std::uint32_t decode_rounds_per_prefill = 0;
     // Prefill with the fast INT8-KV prompt-attention kernel and round prefill_chunk down to whole
     // prompt-attention waves. Off keeps the default kernel and the requested chunk.
     bool fast_prefill_kernel           = false;
@@ -605,6 +712,11 @@ struct EngineOptions {
     // ($NINFER_DEVICE_PROFILES, else $XDG_CACHE_HOME or ~/.cache, /ninfer/device-profiles.json).
     std::string device_profile = "auto";
     std::filesystem::path device_profile_path;
+    // Lowest graphics clock, in MHz, the Engine's GPUs are held at while a generation or scoring
+    // call runs (core/gpu_clock_floor.h): a layer pipeline's stages otherwise wait at idle clocks.
+    // Zero leaves the clocks to the driver. Holding them needs administrator rights (root on
+    // Linux); without them the Engine reports it and runs at the driver's clocks.
+    std::uint32_t gpu_clock_floor_mhz = 0;
     // Prompt grafts a request may select by name through PromptOptions::graft. Each is loaded and
     // validated against the resident model at construction.
     std::vector<GraftSource> grafts;
@@ -682,6 +794,17 @@ struct StopPolicy {
     bool publish_stop_token     = false;
 };
 
+// What the reasoning-loop guard does when the open thinking keeps repeating itself (every 512
+// thinking tokens: the last 2,048 characters repeat a period of at most 64 characters, or the share
+// of the last 2,000 words inside a 12-word passage seen three times reaches 25 %).
+enum class ReasoningLoopAction : std::uint8_t {
+    Off,      // no check
+    Stop,     // end the request there (FinishReason::OutputLimit)
+    Conclude, // inject the thinking-close control (as a reached thinking budget does) and let the
+              // model answer; Stop when early close is unavailable (always on Gemma 4) or the
+              // remaining output budget cannot hold the control span and one more token
+};
+
 struct ThinkingControlOptions {
     // Positive maximum accepted model-origin tokens while the Qwen thinking phase remains open.
     // Omitted means unlimited. Injected target-control tokens consume the total output budget but
@@ -692,9 +815,17 @@ struct ThinkingControlOptions {
     std::optional<std::uint32_t> effective_budget;
     // Whether canonical early-close guidance and control tokens can be inserted.
     bool early_close_available = true;
+    ReasoningLoopAction loop   = ReasoningLoopAction::Off;
 };
 
-enum class StructuredOutputKind : std::uint8_t { None, JsonObject, JsonSchema };
+enum class StructuredOutputKind : std::uint8_t {
+    None,
+    JsonObject,
+    JsonSchema,
+    Regex,
+    Choice,
+    Grammar
+};
 
 struct StructuredOutputOptions {
     StructuredOutputKind kind = StructuredOutputKind::None;
@@ -703,6 +834,11 @@ struct StructuredOutputOptions {
     // unevaluatedProperties) admit only their declared properties, following the OpenAI/Anthropic
     // strict structured-output convention. When false, standard JSON Schema defaults apply.
     bool strict = false;
+    // Regex: a regular expression the whole final response matches. Grammar: a GBNF grammar
+    // (llama.cpp's syntax) whose `root` rule the whole final response matches. Otherwise empty.
+    std::string grammar;
+    // Choice: the final response is exactly one of these strings (at least one, each non-empty).
+    std::vector<std::string> choices;
 };
 
 struct ExecutionOptions {
@@ -757,12 +893,22 @@ enum class ImageResizePolicy : std::uint8_t {
     RejectOversized,
 };
 
+// How finely an image is seen (OpenAI's image detail). Low bounds it at the area of a 512 x 512
+// picture, 256 merged Vision tokens (or the server's own bound if that is smaller); Auto and High
+// use the server's bound (--vision-max-merged).
+enum class ImageDetail : std::uint8_t {
+    Auto,
+    Low,
+    High,
+};
+
 struct OwnedMedia {
     MediaKind kind = MediaKind::Image;
     std::vector<std::uint8_t> bytes;
     std::string media_type;
     std::string source_name;
     ImageResizePolicy image_resize_policy = ImageResizePolicy::Downsize;
+    ImageDetail image_detail              = ImageDetail::Auto;
 };
 
 struct ToolCall {
@@ -830,6 +976,8 @@ struct ToolCallParseDiagnostics {
     bool malformed_call_reported = false;
     // Text after the last call; the model is predicting a tool result there, so it is dropped.
     bool trailing_content_dropped = false;
+    // The structured calls came from a turn that ended on its stop token inside unclosed thinking.
+    bool recovered_from_reasoning = false;
 
     [[nodiscard]] friend constexpr bool
     operator==(const ToolCallParseDiagnostics&, const ToolCallParseDiagnostics&) noexcept = default;
@@ -1253,13 +1401,19 @@ struct SpeculativeStats {
 struct ThinkingBudgetStats {
     std::optional<std::uint32_t> requested_budget;
     std::optional<std::uint32_t> effective_budget;
-    // Model-origin tokens accepted while capped thinking remained open.
+    // Model-origin tokens accepted while thinking remained open, with or without a budget.
     std::uint32_t model_thinking_tokens = 0;
     // Complete tokenizer-derived target-control suffix committed by Engine.
     std::uint32_t injected_tokens = 0;
     bool applied                  = false;
     // The request switched to its post-thinking sampling when its reasoning block closed.
     bool post_thinking_sampling = false;
+    // The reasoning-loop guard fired: after this many model-origin thinking tokens, at this
+    // repeated-passage coverage (ThinkingControlOptions::loop decided the action; `applied` tells
+    // whether it concluded).
+    bool loop_detected                 = false;
+    std::uint32_t loop_thinking_tokens = 0;
+    float loop_coverage                = 0.0F;
 };
 
 enum class PrefixReusePath : std::uint8_t {
@@ -1503,7 +1657,9 @@ struct MemorySummary {
     std::size_t cuda_graph_allowance_bytes        = 0;
     // Device memory CUDA Graph preparation actually took at startup (free memory before minus
     // after instantiating, uploading and launching every executable); 0 without CUDA Graphs.
-    std::size_t cuda_graph_measured_bytes         = 0;
+    // Empty when the device had no free memory left after preparation (WDDM can hand out more
+    // than the card holds), which leaves the difference only a lower bound.
+    std::optional<std::size_t> cuda_graph_measured_bytes = 0;
     std::size_t kv_payload_bytes                  = 0;
     std::uint32_t host_state_capacity_slots       = 0;
     std::uint32_t host_state_occupied_slots       = 0;
@@ -1516,8 +1672,8 @@ struct MemorySummary {
     std::size_t host_kv_page_group_bytes = 0;
     // Engaged only when the single host RAM budget mode is active.
     std::size_t host_cache_budget_bytes = 0;
-    // Qwen3.8-Flash-Next host or disk experts: device memory lent to the expert cache, over every
-    // device.
+    // Host or disk routed experts: persistent device cache bytes, over every device. Native
+    // Qwen delivery windows are counted separately in workspace.
     std::size_t expert_cache_bytes = 0;
     // A pipeline over several devices: each device in stage order, the primary one (which the
     // single-device fields above describe) first. Empty on one device.
@@ -1550,6 +1706,35 @@ struct RuntimeHostWorkStats {
     std::uint64_t admission_policy_invocations  = 0;
     std::uint64_t context_progress_invocations  = 0;
     std::uint64_t stats_publication_invocations = 0;
+};
+
+// Qwen3.8-Flash-Next's n-gram table reads, monotonic. A batch is the rows of one pass; its latency
+// runs from the pass's request to its last row, and latency_histogram[b] counts the batches that
+// took [2^(b-1), 2^b) microseconds (b = 0: under one). A stall is a pass whose stage waited for
+// the rows after the layers before the first PLE layer, and stall_seconds is the device time it
+// waited.
+struct NgramTableStats {
+    static constexpr std::size_t kLatencyBuckets = 24;
+    std::uint64_t rows                           = 0; // rows the passes addressed
+    std::uint64_t resident_rows                  = 0; // of them, served from RAM
+    std::uint64_t batches                        = 0;
+    double read_seconds                          = 0.0; // latency summed over the batches
+    std::array<std::uint64_t, kLatencyBuckets> latency_histogram{};
+    std::uint64_t stalls = 0;
+    double stall_seconds = 0.0;
+};
+
+// Routed experts with host or disk residency, monotonic. A route is one
+// (token, expert) pair a pass took; a hit found its expert in a device slot. transferred_bytes
+// counts the expert bytes copied to the devices (misses and cache admissions); cpu_routes the
+// pairs computed by the CPU.
+struct ExpertResidencyStats {
+    std::uint64_t routes            = 0;
+    std::uint64_t hits              = 0;
+    std::uint64_t cpu_routes        = 0;
+    std::uint64_t admitted          = 0;
+    std::uint64_t transferred_bytes = 0;
+    std::uint32_t slots             = 0;
 };
 
 // Monotonic execution counters, boundary-consistent current gauges, and explicitly named last
@@ -1604,6 +1789,16 @@ struct RuntimeStats {
     std::uint32_t last_selected_frontier_tokens      = 0;
     // Aborted requests whose live state was published as a continuation endpoint.
     std::uint64_t salvaged_continuations = 0;
+    // Requests that left the queue without being admitted, and the time they had waited: the
+    // client gave up (cancelled) or the pending timeout fired (expired).
+    std::uint64_t waiting_cancelled_requests = 0;
+    std::uint64_t waiting_expired_requests   = 0;
+    double waiting_abandoned_seconds         = 0.0;
+    // Requests cancelled while their prompt prefilled, the prompt tokens they had computed, and
+    // how many of them the context cache salvaged so a retry resumes where they stopped.
+    std::uint64_t cancelled_prefills                = 0;
+    std::uint64_t cancelled_prefill_computed_tokens = 0;
+    std::uint64_t cancelled_prefills_salvaged       = 0;
 
     std::uint64_t state_moves     = 0;
     std::uint64_t state_forks     = 0;
@@ -1691,6 +1886,8 @@ struct RuntimeStats {
     // Host-side failures the worker survived by failing the in-flight requests and clearing the
     // context cache instead of latching the Engine unavailable.
     std::uint64_t engine_recoveries = 0;
+    NgramTableStats ngram_table;
+    ExpertResidencyStats experts;
 };
 
 enum class ContextCostPresetSource : std::uint8_t {
@@ -1789,7 +1986,7 @@ struct LoadSummary {
     std::uint64_t artifact_bytes_read  = 0;
     std::uint64_t host_to_device_bytes = 0;
     std::uint64_t peak_staging_bytes   = 0;
-    std::uint64_t pinned_weight_bytes  = 0; // host-pinned weights (overlay vision tower)
+    std::uint64_t pinned_weight_bytes  = 0; // host-pinned model weights (experts or overlay vision tower)
     std::uint64_t overlay_window_bytes = 0; // device bytes one overlay vision window borrows
     std::size_t device_object_count    = 0;
     std::size_t host_object_count      = 0;

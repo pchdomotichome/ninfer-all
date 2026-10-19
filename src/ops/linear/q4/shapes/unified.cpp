@@ -122,6 +122,21 @@ Q4Launch select_q4_n131072_k2048_unified(std::int32_t tokens) {
     return launch_q4_a16_mma_r64_t128;
 }
 
+Q4Launch select_q4_n131072_k4096_unified(std::int32_t tokens) {
+    if (tokens <= 1) return launch_q4_a16_simt_r4_t1_w2_g8_s2;
+    if (tokens <= 4) return launch_q4_a16_sliced_k4096_t4;
+    if (tokens <= 8) return launch_q4_a16_sliced_r32_t8_w4_s2;
+    if (tokens <= 16) return launch_q4_a16_sliced_r32_t16_w4_s2;
+    if (tokens <= 32) return launch_q4_a16_sliced_r32_t32_w2_s2;
+    if (tokens <= 64) return launch_q4_a16_sliced_r32_t64_w2_s1;
+    if (tokens <= 72) return launch_q4_a16_mma_r64_t72;
+    if (tokens <= 80) return launch_q4_a16_mma_r64_t80;
+    if (tokens <= 96) return launch_q4_a16_mma_r64_t96;
+    if (tokens <= 112) return launch_q4_a16_mma_r64_t112;
+    if (tokens <= 120) return launch_q4_a16_mma_r64_t120;
+    return launch_q4_a16_mma_r64_t128;
+}
+
 Q4Launch select_q4_n3456_k1152_unified(std::int32_t tokens) {
     if (tokens > 131072 || tokens % 4 != 0)
         throw std::invalid_argument("q4 linear: T must be a multiple of 4 in [4,131072]");

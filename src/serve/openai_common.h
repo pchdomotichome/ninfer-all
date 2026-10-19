@@ -53,7 +53,8 @@ struct ModelDescription {
     bool vision                 = false;
     ninfer::ModelMetadata metadata;
     // llama.cpp router status: loaded, sleeping, loading, unloading or unloaded. A model that is
-    // not loaded has no metadata to report; its object carries the id, path and status only.
+    // not loaded has no metadata to report; its object carries the id, path, status and the
+    // configured context limit the catalog already knows.
     std::string status = "loaded";
     bool loaded_facts  = true;
     std::string path;

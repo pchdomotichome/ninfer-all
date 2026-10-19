@@ -14,7 +14,10 @@
 #include "core/startup.h"
 #include "models/qwen3_5/frontend/graft.h"
 #include "models/qwen3_5/load.h"
+#include "models/qwen3_5/execution/expert_runtime.h"
+#include "models/qwen3_5/expert_admission.h"
 #include "models/qwen3_5/measurement.h"
+#include "runtime/engine/host_memory.h"
 
 #include <algorithm>
 #include <cmath>
@@ -33,6 +36,8 @@
 namespace ninfer::runtime {
 namespace {
 using Clock = std::chrono::steady_clock;
+
+constexpr std::uint32_t kMaximumDecodeRoundsPerPrefill = 4096;
 
 void validate_options(const EngineOptions& options) {
     if (options.artifact_path.empty()) {
@@ -66,8 +71,8 @@ void validate_options(const EngineOptions& options) {
     if (options.suspend.enabled) {
         if (options.wddm_evictable_budget) {
             throw std::invalid_argument(
-                "model suspend cannot be combined with the WDDM evictable budget: its arenas come "
-                "from a D3D12 heap rather than releasable virtual memory");
+                "model suspend cannot be combined with the WDDM evictable budget: the budget "
+                "commits the device arenas at startup, and a suspend releases them");
         }
         const std::vector<int> ids =
             options.devices.empty() ? std::vector<int>{options.device} : options.devices;
@@ -84,6 +89,19 @@ void validate_options(const EngineOptions& options) {
     }
     if (options.max_pending_requests == 0 || options.pending_timeout_ms == 0) {
         throw std::invalid_argument("Engine pending request capacity and timeout must be nonzero");
+    }
+    const ContextCacheOptions& cache = options.context_cache;
+    if (cache.host_cache_auto ? cache.host_cache_budget_bytes.has_value()
+                              : cache.host_cache_max_bytes || cache.host_cache_percent) {
+        throw std::invalid_argument(
+            "an automatic host cache takes no budget, and its cap and percent need it");
+    }
+    if (cache.host_cache_percent &&
+        (*cache.host_cache_percent == 0 || *cache.host_cache_percent > 100)) {
+        throw std::invalid_argument("host cache percent must be in [1,100]");
+    }
+    if (options.decode_rounds_per_prefill > kMaximumDecodeRoundsPerPrefill) {
+        throw std::invalid_argument("Engine decode_rounds_per_prefill must be in [0,4096]");
     }
     if (options.enable_vision && options.media_live_bytes == 0) {
         throw std::invalid_argument(
@@ -240,7 +258,6 @@ EngineOptions normalize_engine_options(EngineOptions options) {
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("Engine max_concurrency must be in [1,8]");
     }
-
     ContextCacheOptions& cache = options.context_cache;
     if (options.speculative.ngram_archive_bytes != 0 &&
         options.speculative.ngram_draft_tokens == 0) {
@@ -287,9 +304,12 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         }
         // One pinned Host slab pool serves blocks and snapshots alike; its size is the only
         // capacity a deployment has to choose (docs/maintainer/hybrid-prefix-cache-spec.md §5.4).
-        cache.host_cache_budget_bytes =
-            cache.host_cache_budget_bytes.value_or(kDefaultHybridHostCacheBytes);
-        const bool host_tier             = *cache.host_cache_budget_bytes != 0;
+        // An automatic budget is sized once the weights are loaded, and holds a Host tier.
+        if (!cache.host_cache_auto) {
+            cache.host_cache_budget_bytes =
+                cache.host_cache_budget_bytes.value_or(kDefaultHybridHostCacheBytes);
+        }
+        const bool host_tier = cache.host_cache_auto || *cache.host_cache_budget_bytes != 0;
         HybridPrefixCacheOptions& hybrid = cache.hybrid;
         // One resident snapshot per request lane keeps every live conversation's latest
         // endpoint restorable without PCIe traffic; one more slot stages taps and endpoints while
@@ -326,6 +346,10 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         cache.max_long_anchors_per_continuation = 0;
         cache.host_state_slots                  = 0;
         cache.host_kv_capacity_bytes            = 0;
+        // Endpoint and progress anchors are defaults of the catalog; the hybrid tree resumes a
+        // branch or a cancelled prefill from its content-addressed blocks and ladder snapshots.
+        cache.endpoint_anchors       = false;
+        cache.progress_anchor_tokens = 0;
         return options;
     }
     if (!cache.enabled) {
@@ -335,7 +359,7 @@ EngineOptions normalize_engine_options(EngineOptions options) {
             (cache.max_shared_prefixes && *cache.max_shared_prefixes != 0) ||
             (cache.max_long_anchors_per_continuation &&
              *cache.max_long_anchors_per_continuation != 0) ||
-            cache.host_cache_budget_bytes) {
+            cache.host_cache_budget_bytes || cache.host_cache_auto) {
             throw std::invalid_argument("disabled context cache accepts only root-only capacities");
         }
         cache.device_state_slots                = 0;
@@ -357,6 +381,8 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         cache.kv_lease_growth              = false;
         cache.automatic_long_anchors       = false;
         cache.branch_anchors               = false;
+        cache.endpoint_anchors             = false;
+        cache.progress_anchor_tokens       = 0;
         return options;
     }
 
@@ -370,6 +396,17 @@ EngineOptions normalize_engine_options(EngineOptions options) {
     cache.max_long_anchors_per_continuation =
         cache.max_long_anchors_per_continuation.value_or(cache.automatic_long_anchors ? 4U : 2U);
     cache.max_cache_markers_per_request     = cache.max_cache_markers_per_request.value_or(4U);
+    // Endpoint and progress anchors are long anchors: without long-anchor capacity they have
+    // nowhere to stay.
+    if (*cache.max_long_anchors_per_continuation == 0) {
+        cache.endpoint_anchors       = false;
+        cache.progress_anchor_tokens = 0;
+    }
+    if (cache.progress_anchor_tokens != 0 &&
+        cache.progress_anchor_tokens < kMinimumProgressAnchorTokens) {
+        throw std::invalid_argument("context cache progress anchors need a stride of at least " +
+                                    std::to_string(kMinimumProgressAnchorTokens) + " tokens");
+    }
 
     if (*cache.max_private_continuations < concurrency) {
         throw std::invalid_argument(
@@ -413,8 +450,8 @@ ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
                options.context_cache.automatic_long_anchors
                    ? options.context_cache.max_long_anchors_per_continuation.value_or(0U)
                    : 0U,
-           .long_anchor_min_spacing_tokens =
-               options.context_cache.long_anchor_min_spacing_tokens,
+           .long_anchor_min_spacing_tokens = options.context_cache.long_anchor_min_spacing_tokens,
+           .progress_anchor_tokens         = options.context_cache.progress_anchor_tokens,
            .grafts = models::qwen3_5::load_prompt_grafts(options.grafts, model->config().text)})),
       capacity(options.max_context) {}
 
@@ -448,7 +485,8 @@ void install_device_route_profile_on(const EngineOptions& options, int device) {
     const std::filesystem::path path = options.device_profile_path.empty()
                                            ? default_device_profile_path()
                                            : options.device_profile_path;
-    const std::string& route_catalog = calibration::calibration_route_catalog_digest();
+    const std::string& route_catalog =
+        calibration::calibration_route_catalog_digest(ops::device_tier(device));
     std::optional<ops::DeviceRouteProfile> profile;
     if (!calibrate) {
         try {
@@ -601,11 +639,22 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
     // Every later stage of startup checks its options against the ones the model was loaded with, so
     // the stage split is decided once, here, and carried in the options from then on.
     EngineOptions options = requested;
+    if (options.prefill_chunk == 0) {
+        options.prefill_chunk = options.expert_residency == ExpertResidency::Device ? 1024 : 4096;
+    }
     StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
     // Shared so a suspendable model can keep its files open and upload the weights again on resume.
     const auto retained_reader = std::make_shared<artifact::Reader>(options.artifact_path);
     const artifact::Reader& reader = *retained_reader;
     inspect.complete();
+    // An automatic draft head is the artifact's optimized proposal head when it stores one: it
+    // projects drafts onto a shortlist of the vocabulary instead of all of it.
+    if (options.speculative.proposal_head == ProposalHead::Auto) {
+        const bool stored = options.purpose == EnginePurpose::Generation &&
+                            options.speculative.backend != SpeculativeBackend::None &&
+                            reader.directory().component("text").proposal.has_value();
+        options.speculative.proposal_head = stored ? ProposalHead::Optimized : ProposalHead::Full;
+    }
     if (options.devices.size() > 1 && options.stage_layers.empty()) {
         const std::vector<std::size_t> free_now = free_bytes_by_rank(device);
         const std::vector<std::uint64_t> free_bytes(free_now.begin(), free_now.end());
@@ -616,9 +665,11 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
         options.stage_layers = models::qwen3_5::default_stage_layers(
             reader, models::load_options(options), sizing, free_bytes);
     }
-    core::set_wddm_residency_lock_enabled(options.wddm_evictable_budget);
+    core::set_wddm_evictable_budget(options.wddm_evictable_budget);
     StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
-    auto plan = models::qwen3_5::plan_load(reader, models::load_options(options));
+    auto plan =
+        models::qwen3_5::plan_load(reader, models::load_options(options), options.artifact_path,
+                                   models::qwen3_5::rank_tiers(device));
     binding.complete();
     auto model = models::qwen3_5::materialize_model(
         std::move(plan), device, &options.startup_observer,
@@ -626,6 +677,23 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
             .suspendable     = options.suspend.enabled,
             .retained_reader = options.suspend.enabled ? retained_reader : nullptr});
     device.synchronize();
+    // An automatic Host budget is sized now that the weights are in place, from what the host
+    // still has; the media caches grow after startup, so they are reserved too.
+    if (options.context_cache.host_cache_auto) {
+        const std::uint64_t media_bytes =
+            options.enable_vision
+                ? std::uint64_t(options.media_cache_bytes) + options.media_live_bytes
+                : 0U;
+        options.context_cache = resolve_auto_host_cache_now(options.context_cache, media_bytes);
+        // The checkpoint catalog sizes its Host pools from a nonzero budget; a host with no memory
+        // to spare has none.
+        if (options.context_cache.mode == ContextCacheMode::Legacy &&
+            options.context_cache.host_cache_budget_bytes == 0U) {
+            options.context_cache.host_cache_budget_bytes.reset();
+            options.context_cache.host_state_slots       = 0;
+            options.context_cache.host_kv_capacity_bytes = 0;
+        }
+    }
     StartupPhaseScope frontend(options.startup_observer, StartupPhase::FrontendInitialize);
     auto instance = std::make_unique<ModelInstance>(std::move(model), options);
     frontend.complete();
@@ -650,12 +718,40 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
     auto planner = models::qwen3_5::make_sequence_planner(
         instance->parameters, device,
         artifact_scoped_disk_tier(options, instance->model->info().artifact_id), graft_main_pages);
-    const std::vector<std::size_t> free_by_rank =
+    std::vector<std::size_t> free_by_rank =
         free_bytes_by_rank(device, options.wddm_evictable_budget,
                            instance->model->storage_stats().device_capacity_bytes);
     auto resolution = resolve_kv_capacity(
         options.kv_capacity, planner.capacity_curve(), free_by_rank.front(),
         std::span<const std::size_t>(free_by_rank).subspan(1));
+    std::unique_ptr<models::qwen3_5::execution::NativeExpertRuntime> experts;
+    if (!instance->model->expert_sources().layers.empty()) {
+        // Price startup with the real allocations before the KV plan is finalized: the delivery
+        // keeps free what the runtime reserves (expert_admission.h decides how much KV that is),
+        // and automatic KV then resolves on what the cache left.
+        std::vector<std::uint64_t> reserved{resolution.runtime_reservation_bytes};
+        reserved.insert(reserved.end(), resolution.extra_rank_reservation_bytes.begin(),
+                         resolution.extra_rank_reservation_bytes.end());
+        const bool automatic_kv = options.kv_capacity.mode == KvCapacityMode::Automatic;
+        const std::uint64_t headroom =
+            automatic_kv ? options.kv_capacity.automatic_headroom_bytes : 0;
+        const auto& curve = planner.capacity_curve();
+        reserved[0] = models::qwen3_5::native_expert_runtime_reservation(
+            automatic_kv, options.expert_cache_bytes, reserved[0],
+            curve.minimum_device_reservation_bytes) + headroom;
+        for (std::size_t rank = 1; rank < reserved.size(); ++rank) {
+            reserved[rank] = models::qwen3_5::native_expert_runtime_reservation(
+                automatic_kv, options.expert_cache_bytes, reserved[rank],
+                curve.extra_ranks[rank - 1].minimum_device_reservation_bytes) + headroom;
+        }
+        experts = std::make_unique<models::qwen3_5::execution::NativeExpertRuntime>(
+            *instance->model, device, reserved, options.expert_cache_bytes);
+        free_by_rank = free_bytes_by_rank(device, options.wddm_evictable_budget,
+                                          instance->model->storage_stats().device_capacity_bytes);
+        resolution = resolve_kv_capacity(
+            options.kv_capacity, planner.capacity_curve(), free_by_rank.front(),
+            std::span<const std::size_t>(free_by_rank).subspan(1));
+    }
     auto sequence   = std::move(planner).finalize(resolution.main_page_groups);
     if (sequence.device_reservation_bytes() != resolution.runtime_reservation_bytes ||
         sequence.kv_capacity() != resolution.resolved_tokens ||
@@ -676,7 +772,8 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
     planning.complete();
     StartupPhaseScope program(options.startup_observer, StartupPhase::ProgramInitialize);
     instance->program = models::qwen3_5::create_program(instance->parameters, std::move(sequence),
-                                                        device, options.startup_observer);
+                                                        device, options.startup_observer,
+                                                        std::move(experts));
     LoadSummary::PrefixCacheRestore restore;
     if (resolved.context_cache.enabled && resolved.context_cache.mode == ContextCacheMode::Hybrid) {
         instance->program->set_hybrid_cost(hybrid_cache_cost(context_cost.model));
@@ -718,6 +815,10 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
         for (const auto& part : weight.view.parts) {
             formats.emplace(artifact::format_name(part.parent->geometry.format));
         }
+    }
+    for (const auto& layer : instance->model->expert_sources().layers) {
+        formats.emplace(artifact::format_name(layer.gate_up.format));
+        formats.emplace(artifact::format_name(layer.down.format));
     }
     summary.weight_formats.assign(formats.begin(), formats.end());
     summary.load_seconds         = std::chrono::duration<double>(Clock::now() - start).count();

@@ -1,5 +1,8 @@
 #include "options.h"
+#include "product/ngram_table_options.h"
+#include "product/hybrid_expert_options.h"
 #include "product/post_thinking_options.h"
+#include "product/reasoning_loop_options.h"
 #include "product/rope_yarn_options.h"
 #include "product/speculative_options.h"
 
@@ -148,6 +151,7 @@ std::string usage_text(const char* argv0) {
            "Runs one generation: the answer streams to stdout, reasoning and diagnostics\n"
            "to stderr.\n"
            "  --help, -h                    show this help and exit\n"
+           "  --version                     print the build version and exit\n"
            "\n"
            "INPUT\n"
            "  --prompt TEXT                 one user message\n"
@@ -160,32 +164,29 @@ std::string usage_text(const char* argv0) {
            "CONTEXT\n"
            "  --max-context N               context ceiling in tokens (default 2048)\n"
            "  --prefill-chunk N             prefill chunk in tokens, a multiple of 128\n"
-           "                                (default 1024)\n"
+           "                                (default 1024; 4096 for native MoE experts\n"
+           "                                in host memory or files)\n"
            "  --max-new N                   cap on generated tokens (default 128)\n"
            "  --device N                    CUDA device index (default 0)\n"
            "  --devices A,B,...             one pipeline stage per listed GPU, each owning\n"
            "                                its layers' weights, KV cache and state, the\n"
            "                                first also the embedding, head and round state;\n"
-           "                                Linux only, and a repeated id (--devices 0,0)\n"
+           "                                the cards may differ where the build runs on\n"
+           "                                each, and a repeated id (--devices 0,0)\n"
            "                                exercises the path on one GPU\n"
            "  --stage-layers A,B,...        layers per stage (default: split by each GPU's\n"
            "                                free memory)\n"
-           "  --expert-residency device|host|disk  Qwen3.8-Flash-Next: expert banks in GPU\n"
-           "                                memory (default), in pinned host memory read\n"
-           "                                across the bus, or left in the artifact's files\n"
-           "                                and streamed into the device expert cache\n"
-           "  --expert-cache-mib N|auto     with host or disk experts: device memory for the\n"
-           "                                most used experts (default auto: what is free;\n"
-           "                                0 turns the host cache off; disk needs one)\n"
-           "  --ngram-table PATH            Qwen3.8-Flash-Next: the n-gram table artifact,\n"
-           "                                for a model published without its table\n"
-           "  --ngram-ram                   Qwen3.8-Flash-Next: load the n-gram table into\n"
-           "                                RAM instead of reading its rows from the file\n"
-           "  --no-ngram-table              Qwen3.8-Flash-Next: run without the n-gram table.\n"
-           "                                Non-standard experimental mode: the model was\n"
-           "                                trained with the table and degrades badly\n"
-           "                                without it (WikiText-2 perplexity 2.66 -> 5.01)\n"
+           "  --expert-residency device|host|disk  MoE experts on GPU (default), in pinned\n"
+           "                                host memory, or in artifact files\n"
+           "  --expert-cache-mib N|auto     persistent GPU cache (default auto); native Qwen\n"
+           "                                and Gemma allow 0 (layer banks only).\n"
+           "                                Flash-Next disk requires a nonzero cache\n" +
+           std::string(ninfer::product::kHybridExpertHelp) +
+           std::string(ninfer::product::kNgramTableHelp) +
            "  --no-cuda-graph               decode without CUDA Graphs\n"
+           "  --gpu-clock-floor MHZ         hold the GPUs' graphics clock at MHZ or more while\n"
+           "                                a request runs, so pipeline stages do not wait at\n"
+           "                                idle clocks (needs administrator or root rights)\n"
            "\n"
            "KV CACHE\n"
            "  --kv-capacity N|auto          KV capacity in tokens (default --max-context);\n"
@@ -200,7 +201,11 @@ std::string usage_text(const char* argv0) {
            "SPECULATIVE DECODING (off by default)\n"
            "  --spec mtp|dflash|dflash2     speculative decoding backend\n"
            "  --draft-tokens N              drafts per round, 1..15\n"
-           "  --lm-head-draft               draft with the optimized proposal head\n"
+           "  --draft-min-p P              Flash-Next MTP confidence floor, 0..1 (default 0)\n"
+           "  --lm-head-draft               draft with the optimized proposal head, which\n"
+           "                                the artifact must store (the default when it does)\n"
+           "  --full-draft-head             draft with the full output head even when the\n"
+           "                                artifact stores a proposal head\n"
            "  --mtp-attention-window N      the MTP draft head attends to its first 64 keys\n"
            "                                and the newest N before its query, not the\n"
            "                                whole history; verification is unchanged\n"
@@ -248,8 +253,8 @@ std::string usage_text(const char* argv0) {
            "  --rope-scaling-original-context N\n"
            "                                the interpolation threshold (default: the\n"
            "                                model's native window)\n"
-           "  --wddm-evictable-budget       Windows D3D12 builds: budget against dedicated\n"
-           "                                memory, holding arenas resident\n"
+           "  --wddm-evictable-budget       Windows builds: budget against dedicated\n"
+           "                                memory, committing arenas at startup\n"
            "\n"
            "SAMPLING\n"
            "  --temperature F               0..2\n"
@@ -277,6 +282,11 @@ std::string usage_text(const char* argv0) {
            "  --reasoning-effort E          none, minimal, low, medium, high, xhigh or max\n"
            "  --thinking-budget N           cap model-origin thinking tokens; inserted\n"
            "                                control tokens count toward --max-new\n"
+           "  --reasoning-loop off|stop|conclude\n"
+           "                                every 512 thinking tokens, test whether the\n"
+           "                                thinking repeats whole passages; stop ends the\n"
+           "                                reply, conclude closes the thinking and lets\n"
+           "                                the model answer (default off)\n"
            "\n"
            "OUTPUT\n"
            "  --json                        constrain the answer to a JSON object\n"
@@ -311,6 +321,10 @@ std::string usage_text(const char* argv0) {
 
 Options parse_options(int argc, char** argv) {
     Options options;
+    if (argc >= 2 && std::string_view(argv[1]) == "--version") {
+        options.version_requested = true;
+        return options;
+    }
     if (argc >= 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
@@ -378,18 +392,18 @@ Options parse_options(int argc, char** argv) {
                 options.expert_cache_bytes =
                     std::uint64_t(parse_u32(mib.c_str(), "expert-cache-mib", true)) << 20;
             }
-        } else if (arg == "--ngram-table") {
-            options.ngram_table.path = value(arg);
-        } else if (arg == "--ngram-ram") {
-            options.ngram_table.ram = true;
-        } else if (arg == "--no-ngram-table") {
-            options.ngram_table.disabled = true;
+        } else if (product::parse_hybrid_expert_option(arg, options.hybrid_experts,
+                                                      [&] { return value(arg); })) {
+        } else if (product::parse_ngram_table_option(arg, options.ngram_table,
+                                                     [&] { return value(arg); })) {
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value(arg));
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = parse_u32(value(arg), "draft-tokens");
+        } else if (arg == "--draft-min-p") {
+            options.speculative.draft_min_p = parse_float(value(arg), "draft-min-p", 0.0F, 1.0F);
         } else if (arg == "--ngram-draft-tokens") {
             options.speculative.ngram_draft_tokens =
                 parse_u32(value(arg), "ngram-draft-tokens", true);
@@ -398,6 +412,8 @@ Options parse_options(int argc, char** argv) {
             options.speculative.ngram_min_match = parse_u32(value(arg), "ngram-min-match");
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
+        } else if (arg == "--full-draft-head") {
+            options.speculative.proposal_head = ProposalHead::Full;
         } else if (arg == "--lm-head-q4") {
             options.lm_head_q4 = true;
         } else if (arg == "--lm-head-q6") {
@@ -462,6 +478,8 @@ Options parse_options(int argc, char** argv) {
             options.enable_thinking = false;
         } else if (arg == "--thinking-budget") {
             options.thinking_budget = parse_u32(value(arg), "thinking-budget");
+        } else if (arg == "--reasoning-loop") {
+            options.reasoning_loop = ninfer::product::parse_reasoning_loop_action(value(arg));
         } else if (arg == "--reasoning-effort") {
             options.reasoning_effort = parse_reasoning_effort(value(arg));
         } else if (arg == "--vision") {
@@ -499,6 +517,11 @@ Options parse_options(int argc, char** argv) {
             }
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
+        } else if (arg == "--gpu-clock-floor") {
+            options.gpu_clock_floor_mhz = parse_u32(value(arg), "gpu-clock-floor");
+            if (options.gpu_clock_floor_mhz == 0 || options.gpu_clock_floor_mhz > 5000) {
+                throw std::invalid_argument("--gpu-clock-floor must be in [1, 5000] MHz");
+            }
         } else if (arg == "--stop-token-id") {
             const std::uint32_t token = parse_u32(value(arg), "stop-token-id", true);
             if (token > static_cast<std::uint32_t>(std::numeric_limits<TokenId>::max())) {
@@ -608,6 +631,10 @@ Options parse_options(int argc, char** argv) {
     if (options.reasoning_effort == ReasoningEffort::None) options.enable_thinking = false;
     if (options.enable_thinking == false && options.thinking_budget) {
         throw std::invalid_argument("--thinking-budget cannot be combined with --no-thinking");
+    }
+    if (options.enable_thinking == false &&
+        options.reasoning_loop != ninfer::ReasoningLoopAction::Off) {
+        throw std::invalid_argument("--reasoning-loop cannot be combined with --no-thinking");
     }
     if (options.greedy) {
         options.sampling.temperature = 0.0F;

@@ -181,9 +181,31 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool 
                         k == std::vector<std::uint64_t>{512, 2048} && third == q && fourth == k
                   : q == std::vector<std::uint64_t>{2048, 2048} && k == q &&
                         third == std::vector<std::uint64_t>{4096, 2048} && fourth == third;
-    require(dense || moe, "input projection: unsupported logical projection geometry");
+    // Qwen3.5-9B, hidden 4096. Its shapes are the 2048 model's at a different K, so it is
+    // admitted as its own geometry rather than folded into either neighbour: the two differ
+    // in which parent the contiguous branch admits. The GDN mixer arrives as one Q8_G32
+    // parent like the MoE's, while attention arrives as the Q4/Q5 pair that only the
+    // dense flag reaches today. Neither existing flag is true for both halves, so neither
+    // can be widened without changing the other model's behaviour.
+    const bool qwen9 =
+        attention ? q == std::vector<std::uint64_t>{4096, 4096} &&
+                        k == std::vector<std::uint64_t>{1024, 4096} && third == q && fourth == k
+                  : q == std::vector<std::uint64_t>{2048, 4096} && k == q &&
+                        third == std::vector<std::uint64_t>{4096, 4096} && fourth == third;
+    // Qwen3.5-4B, hidden 2560: the 9B's patterns one width down. Its GDN mixer is the 9B's
+    // (query and key at 2048, value and z at 4096) and its attention is too (query and gate at
+    // 4096, key and value at 1024), so only K differs from the entry above.
+    const bool qwen4 =
+        attention ? q == std::vector<std::uint64_t>{4096, 2560} &&
+                        k == std::vector<std::uint64_t>{1024, 2560} && third == q && fourth == k
+                  : q == std::vector<std::uint64_t>{2048, 2560} && k == q &&
+                        third == std::vector<std::uint64_t>{4096, 2560} && fourth == third;
+    const bool admitted = dense || moe || qwen9 || qwen4;
+    require(admitted, "input projection: unsupported logical projection geometry");
     if (std::any_of(inputs.begin(), inputs.end(), gguf_parent)) {
-        require(dense, "input projection: GGUF parts need the dense geometry");
+        // The GGUF branch below is geometry-agnostic: it lays the parts out from the row counts
+        // it reads off the matrices, so it needs an admitted geometry, not a particular one.
+        require(admitted, "input projection: GGUF parts need an admitted geometry");
         const auto q = static_cast<std::int32_t>(matrix(inputs[0])[0]);
         const auto k = static_cast<std::int32_t>(matrix(inputs[1])[0]);
         if (attention) {
@@ -201,12 +223,14 @@ ProjectionWeights input_projection(std::span<const WeightInput, 4> inputs, bool 
         const auto format = result.weight.qtype;
         const bool supported =
             (moe && format == QType::Q8_G32_FP16) ||
+            (qwen9 && format == QType::Q8_G32_FP16) ||
+            (qwen4 && format == QType::Q8_G32_FP16) ||
             (dense && (format == QType::NVFP4 || format == QType::FP8_E4M3FN_ROW_BF16 ||
                        (attention && format == QType::BF16)));
         require(supported, "input projection: unsupported single-parent format");
         return result;
     }
-    require(dense, "input projection: unsupported multi-parent geometry");
+    require(dense || qwen9 || qwen4, "input projection: unsupported multi-parent geometry");
     const auto first  = single(inputs.first<2>());
     const auto second = single(inputs.last<2>());
     const bool q4_q5 =
@@ -261,8 +285,12 @@ ProjectionWeights prepare_gdn_input_proj_weights(const WeightInput& query, const
 
 ProjectionWeights prepare_gdn_gating_proj_weights(const WeightInput& a, const WeightInput& b) {
     const auto& shape = matrix(a);
+    // Qwen3.5-9B shares the MoE's 32 control rows and differs only in K, like the
+    // projection geometry above.
     require(shape == matrix(b) && (shape == std::vector<std::uint64_t>{48, 5120} ||
-                                   shape == std::vector<std::uint64_t>{32, 2048}),
+                                   shape == std::vector<std::uint64_t>{32, 2048} ||
+                                   shape == std::vector<std::uint64_t>{32, 4096} ||
+                                   shape == std::vector<std::uint64_t>{32, 2560}),
             "GDN control: unsupported A/B geometry");
     const std::array inputs{a, b};
     if (contiguous(concatenate_rows(inputs))) {

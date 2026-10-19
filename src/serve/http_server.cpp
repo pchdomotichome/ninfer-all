@@ -14,6 +14,8 @@
 
 #include <chrono>
 #include <exception>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -205,6 +207,12 @@ std::string response_request_id(const httplib::Response& response) {
 }
 
 } // namespace
+
+bool requires_api_key(const std::string& api_key, bool webui_enabled,
+                      const httplib::Request& request) {
+    return !api_key.empty() && request.path != "/health" && request.method != "OPTIONS" &&
+           !(webui_enabled && request.method == "GET" && !is_api_path(request.path));
+}
 
 void write_openai_error(httplib::Response& response, const ApiError& error) {
     response.status = error.status;
@@ -455,6 +463,11 @@ void HttpServer::stop_stats_reporter() {
 httplib::Server::HandlerResponse HttpServer::pre_route(const httplib::Request& req,
                                                        httplib::Response& res) const {
     ensure_openai_request_id(req, res);
+    // Every response, the loading 503 and authentication failures included, so a caller can tell
+    // which build answered without a credential.
+    if (!options_.build_version.empty()) {
+        res.set_header("X-NInfer-Version", options_.build_version);
+    }
     if (!ready_.load(std::memory_order_acquire)) {
         // Runs for every route, including /health and OPTIONS, so a caller cannot tell "not
         // ready" apart from "unauthenticated" -- and skips the API-key check below, since a
@@ -474,12 +487,7 @@ httplib::Server::HandlerResponse HttpServer::pre_route(const httplib::Request& r
         }
         return httplib::Server::HandlerResponse::Handled;
     }
-    // The MCP relay carries no API key: the WebUI prefixes every header it means for the MCP
-    // server, its own Authorization included, so requiring the key would break the relay
-    // rather than protect it. It is opt-in, and the bind address is its boundary.
-    if (options_.api_key.empty() || req.path == "/health" || req.method == "OPTIONS" ||
-        (options_.webui_mcp_proxy && req.path == kMcpProxyPath) ||
-        (webui_enabled() && req.method == "GET" && !is_api_path(req.path))) {
+    if (!requires_api_key(options_.api_key, webui_enabled(), req)) {
         return httplib::Server::HandlerResponse::Unhandled;
     }
     // Accept both the OpenAI-style bearer token and the Anthropic-style
@@ -989,7 +997,9 @@ void HttpServer::handle_health(httplib::Response& res) const {
         }
     }
     res.status           = available ? 200 : 503;
-    res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
+    res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"},
+                                   {"version", options_.build_version}}
+                        .dump(),
                     "application/json");
 }
 
@@ -1007,7 +1017,21 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
     try {
         lease = lease_query_model(req);
     } catch (const ApiException& exception) {
-        write_openai_error(res, exception.error());
+        // The WebUI reads /props before any model is loaded to learn that it may switch models:
+        // answer the way llama.cpp's router does instead of failing the lease.
+        if (!options_.router() || req.has_param("model")) {
+            write_openai_error(res, exception.error());
+            return;
+        }
+        const nlohmann::json router_props = {
+            {"role", "router"},
+            {"model_alias", "ninfer"},
+            {"model_path", "none"},
+            {"default_generation_settings", {{"params", nlohmann::json::object()}, {"n_ctx", 0}}},
+            {"build_info", "ninfer " + options_.build_version},
+            {"cors_proxy_enabled", options_.webui_mcp_proxy},
+        };
+        res.set_content(router_props.dump(), "application/json");
         return;
     }
     GenerationService& service          = lease.service();
@@ -1031,7 +1055,13 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
         {"frequency_penalty", overrides.frequency_penalty.value_or(preset.frequency_penalty)},
     };
     params["seed"] = overrides.seed ? nlohmann::json(*overrides.seed) : nlohmann::json(-1);
-    const nlohmann::json props = {
+    // llama.cpp's WebUI shows its model list, and switches models, only when /props says the
+    // server is a router, and it takes its thinking controls from this template.
+    std::string chat_template;
+    if (std::ifstream in(options.chat_template_path); in) {
+        chat_template.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    nlohmann::json props = {
         {"default_generation_settings",
          {{"n_ctx", facts.capacity.max_context},
           {"speculative", options.speculative.backend != ninfer::SpeculativeBackend::None},
@@ -1040,6 +1070,7 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
         {"model_alias", lease.model()},
         {"model_path", options.artifact_path},
         {"modalities", {{"vision", options.enable_vision}, {"audio", false}}},
+        {"build_info", "ninfer " + options_.build_version},
         {"is_sleeping", service.residency().state == ninfer::ModelResidency::Suspended},
         {"endpoint_slots", true},
         {"endpoint_props", true},
@@ -1047,6 +1078,12 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
         // The WebUI ungreys its "Use llama-server proxy" option from this flag alone.
         {"cors_proxy_enabled", options_.webui_mcp_proxy},
     };
+    if (options_.router()) {
+        props["role"] = "router";
+    }
+    if (!chat_template.empty()) {
+        props["chat_template"] = std::move(chat_template);
+    }
     res.set_content(props.dump(), "application/json");
 }
 
@@ -1075,13 +1112,14 @@ void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) 
             models.push_back(std::move(description));
             continue;
         }
-        models.push_back(ModelDescription{.id           = status.id,
-                                          .status       = model_state_name(status.state),
-                                          .loaded_facts = false,
-                                          .args         = status.arguments,
-                                          .aliases      = status.aliases,
-                                          .failed       = status.failed,
-                                          .last_error   = status.last_error});
+        models.push_back(ModelDescription{.id            = status.id,
+                                          .max_model_len = status.max_context,
+                                          .status        = model_state_name(status.state),
+                                          .loaded_facts  = false,
+                                          .args          = status.arguments,
+                                          .aliases       = status.aliases,
+                                          .failed        = status.failed,
+                                          .last_error    = status.last_error});
     }
     res.set_content(make_models_list(models, unix_time_now()), "application/json");
 }
