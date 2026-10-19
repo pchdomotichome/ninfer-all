@@ -116,6 +116,77 @@ console.log(JSON.stringify(bad));
 """
 
 
+# loadFit driven with the smallest DOM that will take it. Every bug this catches is a bug that
+# shows up on screen as three controls that do nothing, with nothing said about why -- the shape
+# the user reported: an empty model list, an empty budget box and a dead button.
+LOADFIT = r"""
+import fs from 'node:fs';
+const [dataPath, coreUrl, fitUrl] = process.argv.slice(1);
+const GIB = 1024 ** 3;
+
+// Not a browser: querySelector by id, cached so state persists across calls, and any property
+// assignment accepted.
+const nodes = new Map();
+const STRINGS = new Set(['value', 'innerHTML', 'textContent', 'placeholder']);
+const node = () => new Proxy({value: '', innerHTML: '', onclick: null}, {
+  get: (t, k) => t[k],
+  set: (t, k, v) => { t[k] = STRINGS.has(k) ? String(v) : v; return true; },
+});
+globalThis.document = {querySelector: s => {
+  if (!nodes.has(s)) nodes.set(s, node());
+  return nodes.get(s);
+}};
+
+// Every path loadFit asks for, so a new one fails loudly here instead of 404ing in the browser.
+const fixtures = {
+  '/api/fit/data': JSON.parse(fs.readFileSync(dataPath, 'utf8')),
+  '/api/router/catalog': {models: [
+    {id: 'qwen38-27b-iq3s', artifact: '/m/Qwen3.8-27B-IQ3_S.ninfer',
+     flags: {spec: 'mtp', 'draft-tokens': '3', 'max-context': '131072'}},
+    {id: 'flash-next-128k', artifact: '/m/Qwen3.8-FlashNext.ninfer',
+     flags: {'expert-residency': 'disk'}},
+  ]},
+  '/api/gpu': {gpus: [
+    {index: 0, name: 'RTX 3090', mem_total_mib: 24576, mem_used_mib: 4096},
+    {index: 1, name: 'RTX 3090', mem_total_mib: 24576, mem_used_mib: 1024},
+  ], host: {ram: {total: 72 * GIB, available: 40 * GIB}}},
+  '/api/convert/files': {artifacts: [{path: '/m/Qwen3.8-27B-IQ3_S.ninfer', size: 12 * GIB}]},
+};
+globalThis.fetch = async path => path in fixtures
+  ? {ok: true, status: 200, statusText: 'OK', json: async () => fixtures[path]}
+  : {ok: false, status: 404, statusText: 'no fixture', json: async () => ({error: `no fixture for ${path}`})};
+
+const core = await import(coreUrl);
+const fit = await import(fitUrl);
+const bad = [];
+const eq = (what, got, want) => {
+  if (got !== want) bad.push(`${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+};
+const ok = (what, cond) => { if (!cond) bad.push(`${what}: not true`); };
+
+await fit.loadFit();
+const out = nodes.get('#fit-out').innerHTML;
+ok('the model list is filled', nodes.get('#fit-src').innerHTML.includes('qwen38-27b-iq3s'));
+ok('the budget is rendered', out.length > 800);
+eq('the prober button is wired', typeof nodes.get('#fit-hf-go').onclick, 'function');
+eq('the profile follows the model name', nodes.get('#fit-profile').value, '27b');
+eq('the spec follows the model flags', nodes.get('#fit-spec').value, 'mtp3');
+eq('the default card is the one with room', nodes.get('#fit-gpu').value, '1');
+// The artifact's own size, in MiB, rather than the profile's 19.59 GiB reference quant.
+ok('the artifact size on disk is used', out.includes('12,288 MiB'));
+
+// Nothing selected: the box still has to be worth looking at, which is what was reported empty.
+core.state.fit.open = '';
+await fit.loadFit();
+const bare = nodes.get('#fit-out').innerHTML;
+ok('an empty selection still renders', bare.length > 800);
+ok('and still reports the card', bare.includes('Free on GPU'));
+ok('and says what is missing', bare.includes('No weights yet'));
+
+console.log(JSON.stringify(bad));
+"""
+
+
 def _node(script: str, *args: str) -> str:
     out = subprocess.run(["node", "--input-type=module", "-e", script, *args],
                          capture_output=True, text=True, timeout=120)
@@ -161,6 +232,19 @@ def test_the_arithmetic():
                     (HERE / "js" / "fit.js").as_uri())
     bad = json.loads(out)
     assert not bad, "js/fit.js disagrees with its method notes:\n  " + "\n  ".join(bad)
+
+
+def test_the_view_loads_and_answers():
+    """A scope mistake or a missing element inside loadFit leaves the section blank and silent,
+    which is what reached the user: the two tests above cannot see it, because they only touch
+    the arithmetic."""
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "load.mjs"
+        script.write_text(LOADFIT)
+        out = _node(script.read_text(), str(HERE / "fit-data.json"),
+                    (HERE / "js" / "core.js").as_uri(), (HERE / "js" / "fit.js").as_uri())
+    bad = json.loads(out)
+    assert not bad, "js/fit.js does not survive its own load:\n  " + "\n  ".join(bad)
 
 
 def test_every_control_it_binds_exists():

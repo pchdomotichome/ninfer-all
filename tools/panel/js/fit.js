@@ -141,8 +141,14 @@ export function specFor(profile, flags) {
 export async function loadFit() {
   if (!state.fit) state.fit = {open: null, hf: null, wired: false, profile: null};
   const ui = state.fit;
+  /* Wired before anything is fetched, and the fetches kept out of the wiring's scope by
+     declaring their results here: a rejected handler leaves three controls that look fine and
+     do nothing -- an empty list, an empty box and a dead button -- with nothing on screen to
+     say why. That is exactly how the undefined `data` below reached the user. */
+  if (!ui.wired) { bindFit(); ui.wired = true; }
+  let data, cat, gpu;
   try {
-    const [data, cat, gpu] = await Promise.all([
+    [data, cat, gpu] = await Promise.all([
       api('/api/fit/data'), api('/api/router/catalog'), api('/api/gpu'),
     ]);
     ui.data = data;
@@ -155,11 +161,11 @@ export async function loadFit() {
       const files = await api('/api/convert/files');
       ui.sizes = Object.fromEntries((files.artifacts || []).map(a => [a.path, a.size]));
     } catch (e) { ui.sizes = {}; }
-  } catch (e) {
+  } catch (err) {
     // Without constants there is no arithmetic to show, and a rejected handler would leave the
     // section silently empty.
     $('#fit-out').innerHTML = `<div class="err">The Fit constants could not be read:
-      ${esc(e.message)}</div>`;
+      ${esc(err.message)}</div>`;
     return;
   }
   if (ui.open === null) ui.open = ui.catalog.length ? ui.catalog[0].id : '';
@@ -170,7 +176,6 @@ export async function loadFit() {
     ui.gpu = ui.gpus.reduce((a, b) =>
       (b.mem_total_mib - b.mem_used_mib) > (a.mem_total_mib - a.mem_used_mib) ? b : a).index;
   }
-  if (!ui.wired) { bindFit(); ui.wired = true; }
   fillControls(data);
   renderFit();
 }
@@ -213,7 +218,9 @@ function bindFit() {
 
 function fillControls(data) {
   const ui = state.fit;
-  $('#fit-src').innerHTML = `<option value="">— pick a model —</option>` +
+  $('#fit-src').innerHTML = (ui.catalog.length
+      ? `<option value="">— pick a model —</option>`
+      : `<option value="">the router catalog is empty — is the router running?</option>`) +
     ui.catalog.map(m => {
       const size = ui.sizes[m.artifact_real || m.artifact];
       const p = profileFor(data, m);
@@ -268,7 +275,12 @@ async function hfProbe() {
   const ui = state.fit;
   const repo = $('#fit-hf-repo').value.trim();
   if (!repo) return;
-  $('#fit-hf-out').innerHTML = '<div class="note" style="padding-top:8px">reading the Hub…</div>';
+  if (!ui.data) {
+    $('#fit-hf-out').innerHTML = `<div class="err">The Fit constants are not loaded, so there is
+      nothing to size these files against.</div>`;
+    return;
+  }
+  $('#fit-hf-out').innerHTML = '<div class="note" style="padding:10px 0 4px">reading the Hub…</div>';
   try {
     // Only the weights size comes from the repo. The cache cost never does: it is the profile's.
     ui.hf = await api(`/api/convert/ggufs?model=${encodeURIComponent(repo)}`);
@@ -276,7 +288,13 @@ async function hfProbe() {
   } catch (e) {
     ui.hf = {error: e.message};
   }
-  renderFit();
+  // Whatever went wrong, it has to end up on screen: a render that throws here used to leave
+  // "reading the Hub…" as the only thing on screen, which reads exactly like doing nothing.
+  try {
+    renderFit();
+  } catch (err) {
+    $('#fit-hf-out').innerHTML = `<div class="err">${esc(err.message)}</div>`;
+  }
 }
 
 function renderFit() {
@@ -304,26 +322,24 @@ function renderFit() {
       no VRAM figure to fit against.</div>`;
     return;
   }
-  if (wb === null) {
-    out.innerHTML = `<div class="err">No weights size. Pick a model whose artifact is on disk,
-      or type a size in GiB above.</div>`;
-    return;
-  }
+  // The memory available is worth showing before a model is picked, so nothing here returns
+  // early on a missing size: the weights simply count as zero and the verdict says so.
+  const haveWeights = wb !== null;
 
   // Free VRAM, as the user asked: the whole card is not available when something else already
   // holds part of it. The reserve is the additional headroom refused on top of that.
   const freeVram = (gpu.mem_total_mib - gpu.mem_used_mib) * MIB;
   const usable = Math.max(0, freeVram - reserve);
-  const b = budget(data, profile, specKey, kv, ctx, wb, usable);
-  const fits = b.total <= usable;
-  const maxCtx = maxContext(data, profile, specKey, kv, wb, usable);
+  const b = budget(data, profile, specKey, kv, ctx, haveWeights ? wb : 0, usable);
+  const fits = haveWeights && b.total <= usable;
+  const maxCtx = haveWeights ? maxContext(data, profile, specKey, kv, wb, usable) : null;
+  const ram = (ui.host || {}).ram;
 
   /* Host RAM is the real bound in the two modes where weights live off the GPU, and getting this
      wrong is not abstract: it is what had the OOM killer take flash-next with its experts
      mapped, while VRAM still had room. */
   const residency = cur && cur.flags && cur.flags['expert-residency'];
-  const ram = (ui.host || {}).ram;
-  if (residency && HOST_BACKED[residency]) {
+  if (haveWeights && residency && HOST_BACKED[residency]) {
     const fitsHost = ram ? wb <= ram.available : null;
     warn.push(`<b>Host RAM is the bound here, not VRAM.</b> This model keeps its experts in
       ${HOST_BACKED[residency]}, so the artifact has to fit in host memory too.
@@ -360,13 +376,16 @@ function renderFit() {
     ${warn.map(w => `<div class="warn-msg">${w}</div>`).join('')}
     <div class="tiles">
       <div class="tile"><div class="k">Verdict</div>
-        <div class="v" style="color:${fits ? 'var(--green)' : 'var(--red)'}">${fits ? 'Fits' : 'No fit'}</div>
-        <div class="s">${fits ? giB(b.free) + ' to spare' : 'over by ' + giB(-b.free)}</div>
+        <div class="v" style="color:${fits ? 'var(--green)' : haveWeights ? 'var(--red)' : 'var(--dim)'}">${
+          haveWeights ? (fits ? 'Fits' : 'No fit') : '—'}</div>
+        <div class="s">${!haveWeights ? 'no weights size yet'
+          : fits ? giB(b.free) + ' to spare' : 'over by ' + giB(-b.free)}</div>
         <div class="bar"><i style="width:${Math.min(100, 100 * b.total / usable)}%;
-          background:${fits ? 'var(--green)' : 'var(--red)'}"></i></div></div>
+          background:${fits ? 'var(--green)' : haveWeights ? 'var(--red)' : 'var(--dim)'}"></i></div></div>
       <div class="tile"><div class="k">Max context at this size</div>
         <div class="v">${maxCtx ? toks(maxCtx) : '—'}</div>
-        <div class="s">${per === null ? `this format has no cache to size`
+        <div class="s">${!haveWeights ? 'needs a weights size'
+          : per === null ? `this format has no cache to size`
           : !maxCtx ? 'nothing fits on this card'
           : maxCtx === profile.nativeMaxContext ? "the model's native limit"
           : 'largest context that fits'}${asked && maxCtx ? ` · the router asks ${toks(asked)}`
@@ -389,12 +408,17 @@ function renderFit() {
       <span><b style="background:rgba(255,255,255,.07)"></b>Free
         <i>${giB(Math.max(0, b.free))}</i></span>
     </div>
+    ${haveWeights ? '' : `<div class="note" style="padding:14px 2px 0;white-space:normal">
+      <b>No weights yet.</b> The card's room and the cache cost below are already the real ones;
+      pick a model above, or type a size in <b>Weights, GiB</b>, and the weights join the
+      budget.</div>`}
 
     <table style="margin-top:18px"><tbody>
       <tr><td class="l">Weights${b.weightsBytes !== wb ? ' + speculation heads' : ''}</td>
-        <td>${giB(b.weightsBytes)}</td>
-        <td class="l muted">${miB(wb)} for this quant${
-          b.weightsBytes !== wb ? ', plus ' + miB(b.weightsBytes - wb) + ' of draft heads' : ''}</td></tr>
+        <td>${haveWeights ? giB(b.weightsBytes) : '—'}</td>
+        <td class="l muted">${!haveWeights ? 'not counted yet, no size chosen'
+          : `${miB(wb)} for this quant${
+            b.weightsBytes !== wb ? ', plus ' + miB(b.weightsBytes - wb) + ' of draft heads' : ''}`}</td></tr>
       <tr><td class="l">KV cache (${esc(kv)})</td><td>${giB(b.kvBytes)}</td>
         <td class="l muted">${per === null ? 'this format has no cache to size'
           : toks(per) + ' B/token × ' + toks(atPage) + ' tok (reserved by the page)'}</td></tr>
