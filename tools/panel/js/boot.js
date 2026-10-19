@@ -7,6 +7,7 @@ import { loadControl } from './control.js';
 import { loadRouter } from './router.js';
 import { loadProbe, wireProbe } from './probe.js';
 import { loadRank, wireRank } from './rank.js';
+import { loadFit } from './fit.js';
 
 // Bench is one page with three views, not three pages: the subnav switches which
 // container is visible inside #pg-bench. Clicking the group reveals it and, when
@@ -33,6 +34,7 @@ export function initNav(){
       return; }
     show(b.dataset.pg);
     if (b.dataset.pg === 'router'){ loadRouter(); }
+    if (b.dataset.pg === 'fit'){ loadFit(); }
     if (b.dataset.sub === 'probe'){ loadProbe(); }
     if (b.dataset.sub === 'rank'){ loadRank(); }
     if (b.dataset.pg === 'bench'){

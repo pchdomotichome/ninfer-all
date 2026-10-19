@@ -27,6 +27,7 @@
     </div>
     <button data-pg="control"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a1 1 0 0 1 0 1.82 1.65 1.65 0 0 1-1.82.33 1.65 1.65 0 0 0-1 1.51V21a1 1 0 0 1-1 1 1 1 0 0 1-1-1v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a1 1 0 0 1-1.82 0 1.65 1.65 0 0 1-.33-1.82 1.65 1.65 0 0 0-1.51-1H3a1 1 0 0 1-1-1 1 1 0 0 1 1-1h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a1.65 1.65 0 0 0 1.82-1.82 1.65 1.65 0 0 0-.33-1.82 1.65 1.65 0 0 0-1.51-1H3a1 1 0 0 1-1-1 1 1 0 0 1 1-1h.09A1.65 1.65 0 0 0 4.6 5a1.65 1.65 0 0 0 .33-1.82l-.06-.06a1.65 1.65 0 0 0 1.82 0 1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a1 1 0 0 1-1-1 1 1 0 0 1 1-1h.09A1.65 1.65 0 0 0 4.6 3a1.65 1.65 0 0 0-.33-1.82l-.06-.06a1 1 0 0 1 0-1.82A1.65 1.65 0 0 1 6.03 3z"/></svg>Models</button>
     <button data-pg="router"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a11 11 0 0 0 11 11"/></svg>Router</button>
+    <button data-pg="fit"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="8" y="9" width="8" height="6" rx="1"/></svg>Fit</button>
     <button data-pg="convert"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Convert</button>
   </nav>
   <span class="sidenav-foot sub" id="hdrsub">loading…</span>
@@ -262,6 +263,52 @@
       <div style="padding:15px">
         <div id="router-rows" class="router-rows"></div>
         <div id="router-restart-note" class="note" style="margin-top:10px"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ═══════════════ FIT ═══════════════ -->
+  <div class="pg" id="pg-fit">
+    <section id="fit-form">
+      <div class="sechead">
+        <h2>Fit</h2>
+        <span class="note">does this model fit on this card — every constant measured on this
+          fork, none of them estimated</span>
+      </div>
+      <form class="run" autocomplete="off">
+        <label class="f grow">Model (router catalog)<select id="fit-src"></select></label>
+        <label class="f">Weights, GiB<input id="fit-size" type="text" inputmode="decimal"
+          size="7" placeholder="from disk"></label>
+        <label class="f">Measured profile<select id="fit-profile"></select></label>
+        <label class="f">Speculation<select id="fit-spec"></select></label>
+        <label class="f">KV format<select id="fit-kv"></select></label>
+        <label class="f">Context<input id="fit-ctx" type="text" inputmode="numeric" size="8"></label>
+        <label class="f">OS reserve, MiB<input id="fit-reserve" type="text" inputmode="numeric"
+          size="6"></label>
+        <label class="f">GPU<select id="fit-gpu"></select></label>
+      </form>
+    </section>
+
+    <section id="fit-budget">
+      <div class="sechead"><h2>Memory budget</h2>
+        <span class="spacer"></span>
+        <span class="note">weights + cache + state + graphs, against the card's free VRAM</span>
+      </div>
+      <div style="padding:15px" id="fit-out"></div>
+    </section>
+
+    <section id="fit-prober">
+      <div class="sechead"><h2>Prober</h2>
+        <span class="note">a size nobody measured here: the artifact you are about to convert, or
+          a GGUF straight from the Hub</span>
+      </div>
+      <div style="padding:15px">
+        <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+          <label class="f grow" style="min-width:280px">Hugging Face repo
+            <input id="fit-hf-repo" type="text" placeholder="owner/repo"></label>
+          <button class="primary" id="fit-hf-go">Read sizes</button>
+        </div>
+        <div id="fit-hf-out"></div>
       </div>
     </section>
   </div>

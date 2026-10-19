@@ -194,6 +194,28 @@ tr.run.selected td{background:rgba(56,189,248,0.12);border-color:rgba(56,189,248
 .pill.text{border-color:rgba(96,165,250,0.35);color:var(--blue);background:rgba(96,165,250,0.08)}
 .pill.vision{border-color:rgba(34,211,238,0.35);color:var(--cyan);background:rgba(34,211,238,0.08)}
 .pill.dflash{border-color:rgba(251,191,36,0.35);color:var(--amber);background:rgba(251,191,36,0.08)}
+/* The row the rest of the page is describing. */
+.pill.on{border-color:rgba(56,189,248,0.5);color:var(--teal);background:rgba(56,189,248,0.12)}
+
+/* ── Fit: the memory budget as one bar ────────────────────────────────────
+   Segments are inline-styled from the palette, so the bar and the legend under
+   it always carry the same colours. */
+.stack{display:flex;height:14px;border-radius:7px;overflow:hidden;margin-top:18px;position:relative;
+  background:rgba(255,255,255,0.05);border:1px solid var(--line-subtle)}
+.stack i{display:block;height:100%;transition:width .4s}
+.stack i + i{box-shadow:-1px 0 0 var(--panel)}
+/* Where the budget ends, once the total has passed it. */
+.stack-line{position:absolute;top:0;bottom:0;width:2px;background:var(--red);
+  box-shadow:0 0 6px var(--red);z-index:2}
+.stack-legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:10px;font:11.5px var(--mono);
+  color:var(--dim)}
+.stack-legend span{display:inline-flex;align-items:center;gap:6px}
+.stack-legend b{width:9px;height:9px;border-radius:2px;flex:none}
+.stack-legend i{font-style:normal;color:var(--text-muted)}
+.warn-msg{background:rgba(40,28,8,0.85);border:1px solid rgba(251,191,36,0.4);color:#fde68a;
+  padding:12px 16px;border-radius:var(--radius);margin-bottom:14px;font-size:12.5px;
+  line-height:1.55;white-space:normal;box-shadow:0 2px 10px rgba(251,191,36,0.12)}
+.warn-msg code{background:rgba(251,191,36,0.15);padding:2px 6px;border-radius:4px;color:#fff}
 
 /* Ranking gate and surface gap: the same semantic language as the registry's
    ENGINE/SPEC pills; red for a miss (an engine defect), bone-white for a gate.

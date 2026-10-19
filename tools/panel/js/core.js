@@ -4,7 +4,8 @@ export const $ = s => document.querySelector(s);
 export const state = { cfg:null, runs:[], open:new Set(), selected:new Set(), more:false, live:false, job:null,
                  page:1, size:10, total:0, convert:null, download:null, probe:null, win:'5m', hist:[],
                  histLoaded:false, series:{counters:{}, up:{}}, charts:{}, reqs:[], ctlLive:null,
-                 alerts:null, alertsSig:'', recipeModel:null, recipeArtifact:null, recipeFlags0:null};
+                 alerts:null, alertsSig:'', recipeModel:null, recipeArtifact:null, recipeFlags0:null,
+                 fit:null};
 export const esc = s => String(s??'').replace(/[&<>"]/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 export function num(v, d=1){

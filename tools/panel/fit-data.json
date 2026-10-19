@@ -1,0 +1,210 @@
+{
+  "source": {
+    "project": "ninfer",
+    "file": "docs/config-calculator.html",
+    "note": "Measured on the ninfer fork, copied verbatim from the DATA block of docs/config-calculator.html, which documents the method for every constant. If those sweeps are rerun, regenerate this file from that block instead of editing it: test_fit.py compares the two. The page's decode-vs-depth sweeps are deliberately not copied here.",
+    "verified": "python3 test_fit.py"
+  },
+  "cardMiB": 24576,
+  "pageTokens": 64,
+  "kvOrder": [
+    "bf16",
+    "int8",
+    "fp8",
+    "rk8v4",
+    "rk4v4",
+    "k8v4",
+    "nvfp4"
+  ],
+  "kvLabels": {
+    "bf16": "bf16 \u2014 full precision reference",
+    "int8": "int8 \u2014 rotated INT8, group-64",
+    "fp8": "fp8 \u2014 row-scaled E4M3",
+    "rk8v4": "rk8v4 \u2014 RotorQuant, INT8 keys + 4-bit values",
+    "rk4v4": "rk4v4 \u2014 Lloyd-Max 4-bit keys + 4-bit values",
+    "k8v4": "k8v4 \u2014 INT8 keys + 4-bit values",
+    "nvfp4": "nvfp4 \u2014 NVFP4 keys and values"
+  },
+  "kvNotes": {
+    "bf16": "The reference. Twice the cache of int8 for a perplexity difference too small to measure, and slower at depth. Useful for comparison, rarely the right choice.",
+    "int8": "The quality default: +0.0009% perplexity is effectively free, and it holds its decode rate at depth better than anything except rk8v4.",
+    "fp8": "No longer dominated on all three axes: it now has *better* perplexity than rk8v4, by 0.039%. That edge costs 26% more KV memory per token and 8.5% of decode speed at 32K depth -- a genuine trade, and a bad one for almost everyone, but a trade rather than a strict loss.",
+    "rk8v4": "The best all-round choice. 23% smaller than int8, the flattest decode curve of any format measured, and +0.08% perplexity.",
+    "rk4v4": "The context choice. 31% smaller than rk8v4 and within 3% of nvfp4, with better perplexity than nvfp4 (+0.21% against int8) and rk8v4's decode and prefill speed. Measured on a newer build than the other rows, so its speed and perplexity here are that session's ratios to rk8v4 and int8 applied to their rows, not a direct reading.",
+    "k8v4": "Within 1.5% of rk8v4's size but the worst decode falloff measured (-25% by 32k) and slightly worse quality. Prefer rk8v4.",
+    "nvfp4": "Maximum context: 45% smaller than int8. You pay about 15% of decode speed at a 32k cache and +0.36% perplexity for it."
+  },
+  "perplexity": {
+    "bf16": 4.342517,
+    "int8": 4.342425,
+    "fp8": 4.344724,
+    "rk8v4": 4.346413,
+    "rk4v4": 4.351701,
+    "k8v4": 4.347258,
+    "nvfp4": 4.352201
+  },
+  "models": {
+    "27b": {
+      "label": "Qwen3.8-27B (dense, groupwise-int weights)",
+      "weightsBytes": 17093490688,
+      "workspaceBytes": 159981568,
+      "nativeMaxContext": 262144,
+      "kv": {
+        "bf16": 65536,
+        "int8": 33792,
+        "fp8": 33024,
+        "rk8v4": 26112,
+        "rk4v4": 17920,
+        "k8v4": 25728,
+        "nvfp4": 18432
+      },
+      "spec": {
+        "none": {
+          "label": "None",
+          "weightsGiB": 15.92,
+          "decode": 34.41,
+          "accept": null,
+          "graphBytes": 12582912,
+          "seqFixedBytes": 166438656,
+          "seqPerToken": 0.0625,
+          "kvRatio": 1,
+          "kvExtraPerToken": 0
+        },
+        "mtp3": {
+          "label": "MTP, 3 draft tokens",
+          "weightsGiB": 16.34,
+          "decode": 39.9,
+          "accept": null,
+          "graphBytes": 90177536,
+          "seqFixedBytes": 175693056,
+          "seqPerToken": 0.125,
+          "kvRatio": 1.062988281,
+          "kvExtraPerToken": 0
+        },
+        "mtp3+head": {
+          "label": "MTP3 + draft head",
+          "weightsGiB": 16.67,
+          "decode": 42.33,
+          "accept": 0.302,
+          "graphBytes": 90177536,
+          "seqFixedBytes": 175693056,
+          "seqPerToken": 0.125,
+          "kvRatio": 1.062988281,
+          "kvExtraPerToken": 0
+        },
+        "dflash2-7": {
+          "label": "DFlash2, 7 tokens",
+          "weightsGiB": 17.99,
+          "decode": 27.57,
+          "accept": 0.108,
+          "graphBytes": [
+            [
+              8192,
+              301989888
+            ],
+            [
+              null,
+              402653184
+            ]
+          ],
+          "seqFixedBytes": 279090432,
+          "seqPerToken": 0.0625,
+          "kvRatio": 1,
+          "kvExtraPerToken": 0
+        },
+        "dflash2-7+head": {
+          "label": "DFlash2-7 + draft head",
+          "weightsGiB": 18.33,
+          "decode": 28.33,
+          "accept": null,
+          "graphBytes": [
+            [
+              8192,
+              301989888
+            ],
+            [
+              null,
+              402653184
+            ]
+          ],
+          "seqFixedBytes": 279090432,
+          "seqPerToken": 0.0625,
+          "kvRatio": 1,
+          "kvExtraPerToken": 0
+        }
+      }
+    },
+    "35b": {
+      "label": "Qwen3.6-35B-A3B (MoE, groupwise-int weights)",
+      "weightsBytes": 21038469632,
+      "workspaceBytes": 109453312,
+      "nativeMaxContext": 262144,
+      "kv": {
+        "bf16": 20480,
+        "int8": 10560,
+        "fp8": 10320,
+        "rk8v4": 8160,
+        "rk4v4": 5600,
+        "k8v4": 8040,
+        "nvfp4": 5760
+      },
+      "spec": {
+        "none": {
+          "label": "None",
+          "weightsGiB": 19.59,
+          "decode": 178,
+          "accept": null,
+          "graphBytes": 12582912,
+          "seqFixedBytes": 70579968,
+          "seqPerToken": 0.0625,
+          "kvRatio": 1,
+          "kvExtraPerToken": 0
+        },
+        "mtp3": {
+          "label": "MTP, 3 draft tokens",
+          "weightsGiB": 20.43,
+          "decode": 214.37,
+          "accept": null,
+          "graphBytes": 90177536,
+          "seqFixedBytes": 76086528,
+          "seqPerToken": 0.125,
+          "kvRatio": 1.10078125,
+          "kvExtraPerToken": 0
+        },
+        "mtp3+head": {
+          "label": "MTP3 + draft head",
+          "weightsGiB": 20.56,
+          "decode": 256.03,
+          "accept": 0.594,
+          "graphBytes": 90177536,
+          "seqFixedBytes": 76086528,
+          "seqPerToken": 0.125,
+          "kvRatio": 1.10078125,
+          "kvExtraPerToken": 0
+        },
+        "dflash-3": {
+          "label": "DFlash, 3 tokens",
+          "weightsGiB": 19.98,
+          "decode": 173.73,
+          "accept": null,
+          "graphBytes": 167772160,
+          "seqFixedBytes": 193136896,
+          "seqPerToken": 0.125,
+          "kvRatio": 1,
+          "kvExtraPerToken": 4096
+        },
+        "dflash-3+head": {
+          "label": "DFlash-3 + draft head",
+          "weightsGiB": 20.11,
+          "decode": 196.65,
+          "accept": 0.379,
+          "graphBytes": 167772160,
+          "seqFixedBytes": 193136896,
+          "seqPerToken": 0.125,
+          "kvRatio": 1,
+          "kvExtraPerToken": 4096
+        }
+      }
+    }
+  }
+}

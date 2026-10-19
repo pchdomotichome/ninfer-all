@@ -628,6 +628,21 @@ class API:
         self._gpu_ts, self._gpu_cache = now, out
         return out
 
+    def fit_data(self) -> tuple[int, dict]:
+        """
+        The measured constants the Fit view computes with.
+
+        Copied from docs/config-calculator.html, not derived here: the panel measures
+        nothing, it only combines what was measured. test_fit.py holds the two together.
+        """
+        path = HERE / "fit-data.json"
+        try:
+            return 200, json.loads(path.read_text())
+        except OSError as err:
+            return 500, {"error": f"fit-data.json is missing: {err}"}
+        except json.JSONDecodeError as err:
+            return 500, {"error": f"fit-data.json is not JSON: {err}"}
+
     def _host_resources(self) -> dict:
         """
         What the host itself holds: RAM, CPU load and the disks we actually fill.
@@ -1905,6 +1920,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self.api.engine())
         if path == "/api/gpu":
             return self._json(self.api.gpu())
+        if path == "/api/fit/data":
+            code, payload = self.api.fit_data()
+            return self._json(payload, code)
         if path == "/api/help":
             code, payload = self.api.help_flags()
             return self._json(payload, code)
