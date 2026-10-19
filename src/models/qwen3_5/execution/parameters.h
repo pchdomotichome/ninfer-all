@@ -61,8 +61,18 @@ struct GgufMoeParameters {
 // A dense block's FFN, or its experts. A MoE block is one or the other: the GGUF form is separate
 // from the native one because the two run different Ops over different weight representations, not
 // because the mathematics differs.
-using FfnParameters =
-    std::variant<DenseParameters, ops::SparseMoeWeights, GgufMoeParameters>;
+struct StreamedMoeParameters {
+    // Routed Weight fields contain only the codec profile; all operand addresses come from the
+    // delivery tables. Router and shared expert remain immutable resident native operands.
+    ops::SparseMoeWeights weights;
+    std::size_t delivery_layer = 0;
+};
+
+// A dense block's FFN, or its experts. A MoE block is one or the other, and there are three MoE
+// forms: the native banks, the GGUF blocks this fork added, and the streamed delivery upstream
+// added. They run different Ops over different weight representations, not different mathematics.
+using FfnParameters = std::variant<DenseParameters, ops::SparseMoeWeights, GgufMoeParameters,
+                                    StreamedMoeParameters>;
 
 struct AttentionParameters {
     ops::ProjectionWeights projection;
