@@ -852,6 +852,26 @@ void parse_sampling(const Json& body, GenerationRequest& output) {
     sampling.frequency_penalty = get_number(body, "frequency_penalty");
     sampling.seed              = get_seed(body);
 
+    // The DRY repetition penalty, with the same names and ranges as llama.cpp's DRY sampler.
+    sampling.dry_multiplier     = get_number(body, "dry_multiplier");
+    sampling.dry_base           = get_number(body, "dry_base");
+    sampling.dry_allowed_length = optional_int(body, "dry_allowed_length");
+    sampling.dry_penalty_last_n = optional_int(body, "dry_penalty_last_n");
+    if (sampling.dry_multiplier && !(*sampling.dry_multiplier >= 0.0 && *sampling.dry_multiplier <= 2.0)) {
+        bad_request("dry_multiplier must be in [0,2]", "dry_multiplier");
+    }
+    if (sampling.dry_base && !(*sampling.dry_base >= 1.0 && *sampling.dry_base <= 100.0)) {
+        bad_request("dry_base must be in [1,100]", "dry_base");
+    }
+    if (sampling.dry_allowed_length &&
+        !(*sampling.dry_allowed_length >= 1 && *sampling.dry_allowed_length <= 64)) {
+        bad_request("dry_allowed_length must be in [1,64]", "dry_allowed_length");
+    }
+    if (sampling.dry_penalty_last_n &&
+        !(*sampling.dry_penalty_last_n >= 0 && *sampling.dry_penalty_last_n <= 4096)) {
+        bad_request("dry_penalty_last_n must be in [0,4096]", "dry_penalty_last_n");
+    }
+
     // vLLM and SGLang expose top_k/min_p on their OpenAI-compatible endpoints; both map directly
     // to NInfer's native sampler and are useful for Qwen's published sampling presets.
     sampling.top_k = optional_int(body, "top_k");

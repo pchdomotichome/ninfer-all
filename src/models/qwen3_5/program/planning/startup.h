@@ -46,6 +46,9 @@ struct PersistentLayout {
     TensorLayout prefill_hidden;
     std::optional<TensorLayout> score_hidden;
     std::optional<TensorLayout> token_counts;
+    // One DRY penalty vector per lane: the tokens that would extend a stretch the request
+    // already wrote, and how much logit each of them loses.
+    std::optional<TensorLayout> dry_penalty;
     std::optional<TensorLayout> sampling_config;
     std::optional<TensorLayout> grammar_masks;
     // Pinned Host cost of one complete Main Text KV page group, taken from the same planned

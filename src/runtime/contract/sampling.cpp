@@ -9,7 +9,8 @@ namespace {
 void validate(const ResolvedSamplingParameters& sampling) {
     if (!std::isfinite(sampling.temperature) || !std::isfinite(sampling.top_p) ||
         !std::isfinite(sampling.min_p) || !std::isfinite(sampling.presence_penalty) ||
-        !std::isfinite(sampling.frequency_penalty)) {
+        !std::isfinite(sampling.frequency_penalty) || !std::isfinite(sampling.dry_multiplier) ||
+        !std::isfinite(sampling.dry_base)) {
         throw std::invalid_argument("sampling parameters must be finite");
     }
     if (sampling.temperature < 0.0F || sampling.temperature > 2.0F) {
@@ -30,6 +31,18 @@ void validate(const ResolvedSamplingParameters& sampling) {
     if (sampling.frequency_penalty < -2.0F || sampling.frequency_penalty > 2.0F) {
         throw std::invalid_argument("frequency_penalty must be in [-2,2]");
     }
+    if (sampling.dry_multiplier < 0.0F || sampling.dry_multiplier > 2.0F) {
+        throw std::invalid_argument("dry_multiplier must be in [0,2]");
+    }
+    if (sampling.dry_base < 1.0F || sampling.dry_base > 100.0F) {
+        throw std::invalid_argument("dry_base must be in [1,100]");
+    }
+    if (sampling.dry_allowed_length < 1 || sampling.dry_allowed_length > 64) {
+        throw std::invalid_argument("dry_allowed_length must be in [1,64]");
+    }
+    if (sampling.dry_penalty_last_n < 0 || sampling.dry_penalty_last_n > 4096) {
+        throw std::invalid_argument("dry_penalty_last_n must be in [0,4096]");
+    }
 }
 
 } // namespace
@@ -48,6 +61,11 @@ ResolvedSamplingParameters resolve_sampling(const SamplingPreset& preset,
         .min_p             = overrides.min_p.value_or(preset.min_p),
         .presence_penalty  = overrides.presence_penalty.value_or(preset.presence_penalty),
         .frequency_penalty = overrides.frequency_penalty.value_or(preset.frequency_penalty),
+        .dry_multiplier    = overrides.dry_multiplier.value_or(preset.dry_multiplier),
+        .dry_base          = overrides.dry_base.value_or(preset.dry_base),
+        .dry_allowed_length =
+            overrides.dry_allowed_length.value_or(preset.dry_allowed_length),
+        .dry_penalty_last_n = overrides.dry_penalty_last_n.value_or(preset.dry_penalty_last_n),
         .seed              = overrides.seed.value_or(0),
     };
     // The registered sampling pipeline has an exact top-20 candidate domain. Preserve the

@@ -44,7 +44,7 @@ bool same_config(const ops::SamplingConfig& a, const ops::SamplingConfig& b) {
            a.min_p == b.min_p && a.presence_penalty == b.presence_penalty &&
            a.frequency_penalty == b.frequency_penalty && a.seed == b.seed &&
            a.token_counts == b.token_counts && a.token_mask == b.token_mask &&
-           a.token_mask_stride == b.token_mask_stride;
+           a.token_mask_stride == b.token_mask_stride && a.dry_penalty == b.dry_penalty;
 }
 
 std::vector<std::uint16_t> bf16_bits(const std::vector<float>& values) {
@@ -64,7 +64,8 @@ std::vector<float> repeat_column(const std::vector<float>& column, int columns) 
 
 std::vector<int> greedy_oracle(const std::vector<float>& logits, int physical_rows,
                                int token_domain, int columns, const ops::SamplingConfig& config,
-                               const std::vector<int>& counts) {
+                               const std::vector<int>& counts,
+                               const std::vector<float>* dry = nullptr) {
     std::vector<int> expected(static_cast<std::size_t>(columns));
     for (int t = 0; t < columns; ++t) {
         const std::size_t base = static_cast<std::size_t>(t) * physical_rows;
@@ -72,8 +73,11 @@ std::vector<int> greedy_oracle(const std::vector<float>& logits, int physical_ro
         for (int token = 1; token < token_domain; ++token) {
             const auto adjusted = [&](int candidate) {
                 const int count = counts[static_cast<std::size_t>(candidate)];
-                return logits[base + candidate] - config.presence_penalty * (count > 0) -
-                       config.frequency_penalty * count;
+                const double dry_penalty =
+                    dry == nullptr ? 0.0 : static_cast<double>((*dry)[static_cast<std::size_t>(candidate)]);
+                return static_cast<double>(logits[base + candidate]) -
+                       config.presence_penalty * (count > 0) - config.frequency_penalty * count -
+                       dry_penalty;
             };
             if (adjusted(token) > adjusted(best)) { best = token; }
         }
@@ -84,13 +88,15 @@ std::vector<int> greedy_oracle(const std::vector<float>& logits, int physical_ro
 
 Distribution distribution_oracle(const std::vector<float>& column, int token_domain,
                                  const ops::SamplingConfig& config,
-                                 const std::vector<int>* counts = nullptr) {
+                                 const std::vector<int>* counts = nullptr,
+                                 const std::vector<float>* dry = nullptr) {
     std::vector<Candidate> candidates(static_cast<std::size_t>(token_domain));
     for (int token = 0; token < token_domain; ++token) {
         const int count = counts == nullptr ? 0 : (*counts)[static_cast<std::size_t>(token)];
         double adjusted = static_cast<double>(column[static_cast<std::size_t>(token)]);
         if (count > 0) { adjusted -= static_cast<double>(config.presence_penalty); }
         adjusted -= static_cast<double>(config.frequency_penalty) * static_cast<double>(count);
+        if (dry != nullptr) { adjusted -= static_cast<double>((*dry)[static_cast<std::size_t>(token)]); }
         candidates[static_cast<std::size_t>(token)] = {adjusted, token};
     }
     std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
@@ -144,7 +150,8 @@ Distribution distribution_oracle(const std::vector<float>& column, int token_dom
 RunResult run_batch(const std::vector<float>& logits, int physical_rows, int token_domain,
                     std::vector<ops::SamplingConfig> configs,
                     const std::vector<int>& logical_positions, int purpose,
-                    const std::vector<std::vector<int>>& initial_counts = {}) {
+                    const std::vector<std::vector<int>>& initial_counts = {},
+                    const std::vector<float>* dry_penalty = nullptr) {
     const int batch = static_cast<int>(configs.size());
     if (batch <= 0 || logical_positions.size() != configs.size() ||
         logits.size() != static_cast<std::size_t>(physical_rows) * configs.size() ||
@@ -170,6 +177,19 @@ RunResult run_batch(const std::vector<float>& logits, int physical_rows, int tok
             counts->copy_from_host(initial_counts[row].data(), counts->bytes());
             configs[row].token_counts = static_cast<std::int32_t*>(counts->data());
             device_counts.push_back(std::move(counts));
+        }
+    }
+    std::vector<std::unique_ptr<GuardedDeviceBuffer>> device_dry;
+    if (dry_penalty != nullptr) {
+        device_dry.reserve(configs.size());
+        for (std::size_t row = 0; row < configs.size(); ++row) {
+            if (dry_penalty->size() != static_cast<std::size_t>(token_domain)) {
+                throw std::invalid_argument("invalid sample dry-penalty fixture");
+            }
+            auto penalty = std::make_unique<GuardedDeviceBuffer>(dry_penalty->size() * sizeof(float));
+            penalty->copy_from_host(dry_penalty->data(), penalty->bytes());
+            configs[row].dry_penalty = static_cast<const float*>(penalty->data());
+            device_dry.push_back(std::move(penalty));
         }
     }
     const std::vector<ops::SamplingConfig> expected_configs = configs;
@@ -222,7 +242,8 @@ RunResult run_batch(const std::vector<float>& logits, int physical_rows, int tok
 RunResult run_homogeneous_batch(const std::vector<float>& logits, int physical_rows,
                                 int token_domain, int batch, ops::SamplingConfig config,
                                 int first_position, int purpose,
-                                const std::vector<int>* initial_counts = nullptr) {
+                                const std::vector<int>* initial_counts = nullptr,
+                                const std::vector<float>* dry_penalty = nullptr) {
     std::vector<ops::SamplingConfig> configs(static_cast<std::size_t>(batch), config);
     std::vector<int> positions(static_cast<std::size_t>(batch));
     for (int row = 0; row < batch; ++row) {
@@ -233,11 +254,12 @@ RunResult run_homogeneous_batch(const std::vector<float>& logits, int physical_r
         row_counts.assign(static_cast<std::size_t>(batch), *initial_counts);
     }
     return run_batch(logits, physical_rows, token_domain, std::move(configs), positions, purpose,
-                     row_counts);
+                     row_counts, dry_penalty);
 }
 
 RunResult run_repeated(const std::vector<float>& column, int token_domain, int total, int batch,
-                       ops::SamplingConfig config, int position, int purpose) {
+                       ops::SamplingConfig config, int position, int purpose,
+                       const std::vector<float>* dry_penalty = nullptr) {
     if (batch <= 0 || total <= 0 || total % batch != 0) {
         throw std::invalid_argument("repeated sample count must be a positive batch multiple");
     }
@@ -247,6 +269,19 @@ RunResult run_repeated(const std::vector<float>& column, int token_domain, int t
     DeviceBuffer device_logits                  = to_device(input_bits);
     GuardedDeviceBuffer collected(static_cast<std::size_t>(total) * sizeof(std::int32_t));
     std::vector<ops::SamplingConfig> configs(static_cast<std::size_t>(batch), config);
+    std::vector<std::unique_ptr<GuardedDeviceBuffer>> device_dry;
+    if (dry_penalty != nullptr) {
+        device_dry.reserve(configs.size());
+        for (std::size_t row = 0; row < configs.size(); ++row) {
+            if (dry_penalty->size() != static_cast<std::size_t>(token_domain)) {
+                throw std::invalid_argument("invalid repeated sample dry-penalty fixture");
+            }
+            auto penalty = std::make_unique<GuardedDeviceBuffer>(dry_penalty->size() * sizeof(float));
+            penalty->copy_from_host(dry_penalty->data(), penalty->bytes());
+            configs[row].dry_penalty = static_cast<const float*>(penalty->data());
+            device_dry.push_back(std::move(penalty));
+        }
+    }
     const std::vector<ops::SamplingConfig> expected_configs = configs;
     DeviceBuffer device_configs                             = to_device(configs);
     std::vector<int> positions(static_cast<std::size_t>(total));
@@ -405,6 +440,67 @@ int deterministic_stochastic_contract() {
         failures += verify_exact(test_case.label, result.tokens, {oracle.tokens.front()});
         failures += verify_exact("sample increments only selected token", result.counts.front(),
                                  expected_counts);
+    }
+    return failures;
+}
+
+// The DRY repetition penalty subtracts a per-token amount the engine computed from the generated
+// text. The oracle applies the same amount, so the device must pick the same token.
+int dry_penalty_contract() {
+    std::vector<float> column = {5.0f, 4.5f, 4.0f, 3.0f, -1.0f};
+    round_to_bf16(column);
+    const int token_domain = static_cast<int>(column.size());
+    int failures          = 0;
+
+    // A penalty on the leading token hands the lead to the runner up.
+    {
+        std::vector<float> dry(static_cast<std::size_t>(token_domain), 0.0f);
+        dry[0] = 2.0f;
+        ops::SamplingConfig config;
+        config.temperature = 0.0f;
+        config.top_k       = 1;
+        config.seed        = 4242;
+        const std::vector<int> counts(static_cast<std::size_t>(token_domain), 0);
+        const RunResult result =
+            run_homogeneous_batch(column, token_domain, token_domain, 1, config, 5,
+                                  ops::kSamplePurposeDecode, &counts, &dry);
+        failures += result.integrity_failures;
+        failures += verify_exact("sample dry penalty moves the greedy pick",
+                                 result.tokens,
+                                 greedy_oracle(column, token_domain, token_domain, 1, config, counts,
+                                               &dry));
+        failures += verify_exact("sample dry penalty keeps the runner up", result.tokens, {1});
+    }
+
+    // Without the penalty the leading token wins again.
+    {
+        ops::SamplingConfig config;
+        config.temperature = 0.0f;
+        config.top_k       = 1;
+        config.seed        = 4242;
+        const std::vector<int> counts(static_cast<std::size_t>(token_domain), 0);
+        const RunResult result =
+            run_homogeneous_batch(column, token_domain, token_domain, 1, config, 5,
+                                  ops::kSamplePurposeDecode, &counts);
+        failures += result.integrity_failures;
+        failures += verify_exact("sample without a dry penalty keeps the leading token",
+                                 result.tokens, {0});
+    }
+
+    // The stochastic route follows the same adjusted distribution.
+    {
+        std::vector<float> dry(static_cast<std::size_t>(token_domain), 0.0f);
+        dry[0] = 0.75f;
+        ops::SamplingConfig config;
+        config.temperature = 0.8f;
+        config.top_k       = 2;
+        config.seed        = 9981;
+        const Distribution oracle = distribution_oracle(column, token_domain, config, nullptr, &dry);
+        constexpr int samples      = 8192;
+        const RunResult result     = run_repeated(column, token_domain, samples, 8, config, 400,
+                                                  ops::kSamplePurposeDecode, &dry);
+        failures += result.integrity_failures;
+        failures += verify_distribution("sample dry penalty", result.tokens, oracle);
     }
     return failures;
 }
@@ -697,6 +793,7 @@ int main() {
         ++failures;
     } catch (const std::invalid_argument&) {}
     failures += masked_sampling_contract();
+    failures += dry_penalty_contract();
     failures += greedy_contract();
     failures += deterministic_stochastic_contract();
     failures += heterogeneous_batch_contract();

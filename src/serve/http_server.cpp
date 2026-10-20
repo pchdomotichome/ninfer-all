@@ -1053,6 +1053,10 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
         {"min_p", overrides.min_p.value_or(preset.min_p)},
         {"presence_penalty", overrides.presence_penalty.value_or(preset.presence_penalty)},
         {"frequency_penalty", overrides.frequency_penalty.value_or(preset.frequency_penalty)},
+        {"dry_multiplier", overrides.dry_multiplier.value_or(preset.dry_multiplier)},
+        {"dry_base", overrides.dry_base.value_or(preset.dry_base)},
+        {"dry_allowed_length", overrides.dry_allowed_length.value_or(preset.dry_allowed_length)},
+        {"dry_penalty_last_n", overrides.dry_penalty_last_n.value_or(preset.dry_penalty_last_n)},
     };
     params["seed"] = overrides.seed ? nlohmann::json(*overrides.seed) : nlohmann::json(-1);
     // llama.cpp's WebUI shows its model list, and switches models, only when /props says the

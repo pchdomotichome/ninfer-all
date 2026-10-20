@@ -50,6 +50,16 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
     if (request.frequency_penalty) {
         sampling.frequency_penalty = static_cast<float>(*request.frequency_penalty);
     }
+    if (request.dry_multiplier) {
+        sampling.dry_multiplier = static_cast<float>(*request.dry_multiplier);
+    }
+    if (request.dry_base) { sampling.dry_base = static_cast<float>(*request.dry_base); }
+    if (request.dry_allowed_length) {
+        sampling.dry_allowed_length = static_cast<std::int32_t>(*request.dry_allowed_length);
+    }
+    if (request.dry_penalty_last_n) {
+        sampling.dry_penalty_last_n = static_cast<std::int32_t>(*request.dry_penalty_last_n);
+    }
     if (request.seed) {
         sampling.seed = *request.seed;
     } else if (server.sampling_overrides.seed) {

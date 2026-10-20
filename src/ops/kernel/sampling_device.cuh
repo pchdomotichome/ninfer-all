@@ -287,6 +287,10 @@ __device__ __forceinline__ float sampling_adjusted_logit(float raw, int v, const
     // back to the id tie-break and the guard sees whichever one wins.
     if (!sampling_value_is_finite(raw)) { return raw; }
     float x = raw;
+    // The DRY penalty is a per-token amount the engine computed from the generated history: the
+    // tokens that would extend a stretch the model already wrote verbatim. It is subtracted whole
+    // and only where the engine found a candidate.
+    if (c.dry_penalty != nullptr) { x -= c.dry_penalty[v]; }
     if (c.presence_penalty == 0.0f && c.frequency_penalty == 0.0f) { return x; }
     int cnt = c.token_counts != nullptr ? c.token_counts[v] : 0;
     for (int j = 0; j < overlay_len; ++j) {

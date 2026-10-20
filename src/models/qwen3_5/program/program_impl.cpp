@@ -260,6 +260,11 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       experts(std::move(expert_runtime)),
       round_host(plan.causal_scoring ? std::nullopt
                                      : std::make_optional<PinnedHostBuffer>(sizeof(TokenId))),
+      dry_penalty_host(plan.causal_scoring
+                           ? std::nullopt
+                           : std::make_optional<PinnedHostBuffer>(
+                                 static_cast<std::size_t>(parameters.model.resources().public_token_count) *
+                                 static_cast<std::size_t>(plan.max_concurrency) * sizeof(float))),
       score_logprobs_host(plan.causal_scoring ? std::make_optional<PinnedHostBuffer>(
                                                     kCausalScoreTile * sizeof(float))
                                               : std::nullopt),
@@ -575,6 +580,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     }
     if (plan.persistent.token_counts) {
         token_counts = plan.persistent.token_counts->bind(backing);
+    }
+    if (plan.persistent.dry_penalty) {
+        dry_penalty = plan.persistent.dry_penalty->bind(backing);
     }
     if (plan.persistent.sampling_config) {
         sampling_config = plan.persistent.sampling_config->bind(backing);

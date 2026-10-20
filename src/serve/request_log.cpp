@@ -206,6 +206,10 @@ Json sampler_json(const ninfer::ResolvedSamplingParameters& sampling) {
                 {"min_p", sampling.min_p},
                 {"presence_penalty", sampling.presence_penalty},
                 {"frequency_penalty", sampling.frequency_penalty},
+                {"dry_multiplier", sampling.dry_multiplier},
+                {"dry_base", sampling.dry_base},
+                {"dry_allowed_length", sampling.dry_allowed_length},
+                {"dry_penalty_last_n", sampling.dry_penalty_last_n},
                 {"seed", sampling.seed}};
 }
 
@@ -215,7 +219,11 @@ Json preset_json(const ninfer::SamplingPreset& preset) {
                 {"top_k", preset.top_k},
                 {"min_p", preset.min_p},
                 {"presence_penalty", preset.presence_penalty},
-                {"frequency_penalty", preset.frequency_penalty}};
+                {"frequency_penalty", preset.frequency_penalty},
+                {"dry_multiplier", preset.dry_multiplier},
+                {"dry_base", preset.dry_base},
+                {"dry_allowed_length", preset.dry_allowed_length},
+                {"dry_penalty_last_n", preset.dry_penalty_last_n}};
 }
 
 Json overrides_json(const ninfer::SamplingOverrides& overrides) {
@@ -225,6 +233,10 @@ Json overrides_json(const ninfer::SamplingOverrides& overrides) {
                 {"min_p", nullptr},
                 {"presence_penalty", nullptr},
                 {"frequency_penalty", nullptr},
+                {"dry_multiplier", nullptr},
+                {"dry_base", nullptr},
+                {"dry_allowed_length", nullptr},
+                {"dry_penalty_last_n", nullptr},
                 {"seed", nullptr}};
     if (overrides.temperature) { result["temperature"] = *overrides.temperature; }
     if (overrides.top_p) { result["top_p"] = *overrides.top_p; }
@@ -232,6 +244,10 @@ Json overrides_json(const ninfer::SamplingOverrides& overrides) {
     if (overrides.min_p) { result["min_p"] = *overrides.min_p; }
     if (overrides.presence_penalty) { result["presence_penalty"] = *overrides.presence_penalty; }
     if (overrides.frequency_penalty) { result["frequency_penalty"] = *overrides.frequency_penalty; }
+    if (overrides.dry_multiplier) { result["dry_multiplier"] = *overrides.dry_multiplier; }
+    if (overrides.dry_base) { result["dry_base"] = *overrides.dry_base; }
+    if (overrides.dry_allowed_length) { result["dry_allowed_length"] = *overrides.dry_allowed_length; }
+    if (overrides.dry_penalty_last_n) { result["dry_penalty_last_n"] = *overrides.dry_penalty_last_n; }
     if (overrides.seed) { result["seed"] = *overrides.seed; }
     return result;
 }

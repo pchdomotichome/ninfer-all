@@ -739,6 +739,11 @@ struct SamplingPreset {
     float min_p             = 0.0F;
     float presence_penalty  = 0.0F;
     float frequency_penalty = 0.0F;
+    // The DRY repetition penalty, the same shape llama.cpp's DRY sampler uses.
+    float dry_multiplier        = 0.0F;
+    float dry_base              = 1.0F;
+    std::int32_t dry_allowed_length = 2;
+    std::int32_t dry_penalty_last_n = 0;
 };
 
 struct ModelSamplingDefaults {
@@ -762,6 +767,11 @@ struct SamplingOverrides {
     std::optional<float> min_p;
     std::optional<float> presence_penalty;
     std::optional<float> frequency_penalty;
+    // The DRY repetition penalty. A multiplier of zero leaves the penalty off.
+    std::optional<float> dry_multiplier;
+    std::optional<float> dry_base;
+    std::optional<std::int32_t> dry_allowed_length;
+    std::optional<std::int32_t> dry_penalty_last_n;
     std::optional<std::uint64_t> seed;
 };
 
@@ -773,6 +783,12 @@ struct ResolvedSamplingParameters {
     float min_p             = 0.0F;
     float presence_penalty  = 0.0F;
     float frequency_penalty = 0.0F;
+    // The DRY repetition penalty: the tokens that would extend a stretch the model already wrote
+    // verbatim lose this much logit.
+    float dry_multiplier        = 0.0F;
+    float dry_base              = 1.0F;
+    std::int32_t dry_allowed_length = 2;
+    std::int32_t dry_penalty_last_n = 0;
     std::uint64_t seed      = 0;
 };
 

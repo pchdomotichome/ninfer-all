@@ -327,6 +327,10 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                                              {dimension(parameters.model.resources().public_token_count),
                                               static_cast<std::int32_t>(plan.max_concurrency)},
                                              "sampling token counts");
+        out.dry_penalty         = add_tensor(builder, DType::FP32,
+                                             {dimension(parameters.model.resources().public_token_count),
+                                              static_cast<std::int32_t>(plan.max_concurrency)},
+                                             "sampling dry penalty");
         if (plan.structured_output) {
             out.grammar_masks =
                 add_tensor(builder, DType::I32,

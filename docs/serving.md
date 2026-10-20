@@ -1109,6 +1109,37 @@ because every pass varies a little.
   records the mode as `reasoning_loop`. It can mistake a long, deliberately repeated checklist for a
   loop; keep it off where the thinking legitimately repeats whole passages.
 
+### The DRY repetition penalty
+
+`--dry-multiplier F`, `--dry-base F`, `--dry-allowed-length N` and `--dry-penalty-last-n N` add
+llama.cpp's DRY repetition penalty. A candidate token is penalised when emitting it would continue a
+stretch of the recent output that the model already wrote verbatim: the penalty is
+`multiplier * base^(stretch - allowed length)`, subtracted from that token's logit before the
+sampler filters and draws.
+
+It targets a different failure than the presence and frequency penalties. Those punish a token for
+being frequent, which in code means punishing the language itself (braces, keywords, indentation);
+the DRY penalty only punishes *copying yourself*. A model that re-reads and re-emits the same block
+of code, or drifts into a verbatim loop, is what it acts on.
+
+- The window is the last `--dry-penalty-last-n` **generated** tokens of the request, as llama.cpp's
+  sampler keeps it; the prompt is not part of it. A stretch counts when it reaches
+  `--dry-allowed-length` tokens.
+- The engine computes the penalised candidates on the host between rounds and hands the sampling
+  kernel one dense vector over the vocabulary, so the cost is one extra read per candidate in the
+  scan and no work at all when the penalty is off.
+- In a speculative round the penalty of the round's continuation point applies to the whole round's
+  columns, where llama.cpp would recompute it per drafted token. The draft window is short and the
+  penalty only fires on a real repeat, so the difference is small, and the acceptance rate of the
+  drafter is the thing to watch when the penalty is strong.
+- The request fields `dry_multiplier`, `dry_base`, `dry_allowed_length` and `dry_penalty_last_n`
+  carry the same values per request; a request without them takes the process-level flags.
+- The model presets carry the same four values, so a router can give one model the penalty and
+  leave another without it.
+- llama.cpp's sequence breakers, which stop a stretch at a line break or a colon, are not exposed
+  here: a stretch is only bounded by the window. A model that legitimately repeats a long checklist
+  pays for it.
+
 For Chat Completions, `reasoning_effort: "none"` requests disabled thinking. The other standard
 values (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`) reach the template unchanged.
 
@@ -2109,6 +2140,10 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--min-p F` | process-level min-p override | unset |
 | `--presence-penalty F` | process-level presence-penalty override | unset |
 | `--frequency-penalty F` | process-level frequency-penalty override | unset |
+| `--dry-multiplier F` | scale of the DRY repetition penalty; a token that would extend a stretch the model already wrote verbatim loses `multiplier * base^(stretch - allowed length)` of logit | off (`0`) |
+| `--dry-base F` | exponential base of the DRY penalty, `1..100` | `1` |
+| `--dry-allowed-length N` | shortest stretch, in tokens, that the DRY penalty counts, `1..64` | `2` |
+| `--dry-penalty-last-n N` | window of generated tokens the DRY penalty reads, `0..4096`; zero leaves the penalty off | off (`0`) |
 | `--seed N` | fixed seed when a request omits one | fresh random seed per request |
 | `--greedy` | force exact argmax for all requests | off |
 | `--post-thinking` | sample the answer of every thinking request with the post-thinking preset once its reasoning closes | off |

@@ -381,6 +381,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
             bind_sequence_kv(sequence);
 
             sequence.ledger.insert(sequence.ledger.end(), forced.begin(), forced.end());
+            record_generated(lane, forced);
             if (sequence.ledger.size() != static_cast<std::size_t>(end) + 1U) {
                 throw std::logic_error("forced-token continuation ledger has an invalid shape");
             }

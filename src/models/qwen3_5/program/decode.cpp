@@ -11,6 +11,8 @@
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scatter.h"
 
+#include <cstring>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -163,6 +165,22 @@ void ProgramImpl::update_sampling(SequenceHandle handle,
     host.min_p                = sampling.min_p;
     host.presence_penalty     = sampling.presence_penalty;
     host.frequency_penalty    = sampling.frequency_penalty;
+    // A penalty that starts now counts only the tokens sampled from here on.
+    request.dry_params.multiplier     = sampling.dry_multiplier;
+    request.dry_params.base           = sampling.dry_base;
+    request.dry_params.allowed_length = sampling.dry_allowed_length;
+    request.dry_params.last_n         = sampling.dry_penalty_last_n;
+    request.dry_window.clear();
+    request.dry_published = false;
+    if (request.dry_params.multiplier > 0.0F && request.dry_params.last_n > 0 &&
+        dry_penalty.data != nullptr) {
+        Tensor lane_penalty = dry_penalty.slice(1, static_cast<std::int32_t>(lane), 1)
+                                   .view({dimension(parameters.model.resources().public_token_count)});
+        CUDA_CHECK(cudaMemsetAsync(lane_penalty.data, 0, lane_penalty.bytes(), device.stream));
+        host.dry_penalty = static_cast<const float*>(lane_penalty.data);
+    } else {
+        host.dry_penalty = nullptr;
+    }
     // Penalties that start now count only the tokens sampled from here on.
     if ((host.presence_penalty != 0.0F || host.frequency_penalty != 0.0F) &&
         host.token_counts == nullptr) {
@@ -177,10 +195,22 @@ void ProgramImpl::update_sampling(SequenceHandle handle,
 }
 
 void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& request,
-                                   const ops::SamplingConfig& config) {
+                                   const ops::SamplingConfig& config,
+                                   const runtime::DryParams& dry) {
     Tensor counts = token_counts.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
                         .view({dimension(parameters.model.resources().public_token_count)});
     request.sampling_host     = config;
+    request.dry_params        = dry;
+    request.dry_window.clear();
+    request.dry_published     = false;
+    if (dry.multiplier > 0.0F && dry.last_n > 0 && dry_penalty.data != nullptr) {
+        Tensor lane_penalty = dry_penalty.slice(1, static_cast<std::int32_t>(sequence.lane), 1)
+                                   .view({dimension(parameters.model.resources().public_token_count)});
+        CUDA_CHECK(cudaMemsetAsync(lane_penalty.data, 0, lane_penalty.bytes(), device.stream));
+        request.sampling_host.dry_penalty = static_cast<const float*>(lane_penalty.data);
+    } else {
+        request.sampling_host.dry_penalty = nullptr;
+    }
     if (request.grammar) {
         request.sampling_host.token_mask        = structured_round->device_mask(sequence.lane);
         request.sampling_host.token_mask_stride = structured_round->stride();
@@ -207,6 +237,38 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
     CUDA_CHECK(cudaMemcpyAsync(config_lane.data, &request.sampling_host,
                                sizeof(request.sampling_host), cudaMemcpyHostToDevice,
                                device.stream));
+}
+
+// Folds the tokens a request just generated into its DRY window and republishes the penalty the
+// next round samples against. The window holds the request's generated text only, as llama.cpp's
+// DRY sampler does, and the penalty reaches the device as a dense vector over the vocabulary.
+void ProgramImpl::record_generated(std::uint32_t lane, std::span<const TokenId> generated) {
+    if (generated.empty()) { return; }
+    RequestControl& request = requests[lane];
+    if (request.dry_params.multiplier <= 0.0F || request.dry_params.last_n <= 0) { return; }
+    if (dry_penalty.data == nullptr || !dry_penalty_host.has_value()) { return; }
+    const std::size_t window = static_cast<std::size_t>(request.dry_params.last_n);
+    request.dry_window.insert(request.dry_window.end(), generated.begin(), generated.end());
+    if (request.dry_window.size() > window) {
+        request.dry_window.erase(request.dry_window.begin(),
+                                 request.dry_window.end() - static_cast<std::ptrdiff_t>(window));
+    }
+    dry_scratch.compute(std::span<const TokenId>(request.dry_window), request.dry_params);
+    if (!request.dry_published && dry_scratch.empty()) { return; }
+    float* host = dry_penalty_host ? static_cast<float*>(dry_penalty_host->data()) : nullptr;
+    if (host == nullptr) { return; }
+    const std::size_t domain = parameters.model.resources().public_token_count;
+    float* lane_host          = host + static_cast<std::size_t>(lane) * domain;
+    std::memset(lane_host, 0, domain * sizeof(float));
+    for (const runtime::DryCandidate& candidate : dry_scratch.candidates()) {
+        if (candidate.token < 0 || static_cast<std::size_t>(candidate.token) >= domain) { continue; }
+        lane_host[candidate.token] = candidate.penalty;
+    }
+    Tensor lane_penalty = dry_penalty.slice(1, static_cast<std::int32_t>(lane), 1)
+                               .view({dimension(domain)});
+    CUDA_CHECK(cudaMemcpyAsync(lane_penalty.data, lane_host, domain * sizeof(float),
+                               cudaMemcpyHostToDevice, device.stream));
+    request.dry_published = !dry_scratch.empty();
 }
 
 void ProgramImpl::arm_logprobs(bool any) {
@@ -633,6 +695,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             commit_sequence_kv(sequence, sequence.text_kv_valid, 0);
             sequence.tail_hidden_valid = true;
             sequence.ledger.push_back(token);
+            record_generated(lanes[row], std::span<const TokenId>(&token, 1));
             sequence.prefix_identity.append_generated(1, sequence.rope_delta);
             sequence.prefix_digests.append_generated(std::span<const TokenId>(&token, 1),
                                                      sequence.rope_delta);

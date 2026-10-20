@@ -1,4 +1,5 @@
 #pragma once
+#include "runtime/contract/dry.h"
 #include "runtime/contract/grammar_masks.h"
 #include "runtime/contract/mtp_adaptive.h"
 #include "models/qwen3_5/program/internal.h"
@@ -213,6 +214,9 @@ struct RequestBasePlanImpl {
     std::uint32_t root_rebuild_tail_begin = 0;
     qwen3_5::PreparedContextCache context_cache;
     ops::SamplingConfig sampling;
+    // The DRY repetition penalty's parameters. The device vector holds the values the kernel
+    // subtracts; these say how the engine computes them.
+    runtime::DryParams dry;
     std::shared_ptr<text::GrammarState> grammar;
     // The request asked for each generated token's log probability.
     bool logprobs = false;
@@ -280,6 +284,8 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
     std::vector<CaptureGroup> capture_groups;
     std::vector<CaptureGroup> shared_candidates;
     ops::SamplingConfig sampling;
+    // The DRY repetition penalty's parameters, as the base plan carries them.
+    runtime::DryParams dry;
     std::shared_ptr<text::GrammarState> grammar;
     bool logprobs                             = false;
     std::uint32_t text_kv_page_entitlement    = 0;
@@ -302,6 +308,8 @@ struct CapturePressureCandidateImpl : ResourceCandidateState {};
 struct HybridQuoteImpl {
     runtime::RequestPlanSummary summary;
     ops::SamplingConfig sampling;
+    // The DRY repetition penalty's parameters, as the base plan carries them.
+    runtime::DryParams dry;
     std::shared_ptr<text::GrammarState> grammar;
     bool logprobs                             = false;
     std::uint32_t text_kv_page_entitlement    = 0;
@@ -532,6 +540,13 @@ struct RequestControl {
     Lifecycle lifecycle             = Lifecycle::Empty;
     PendingCandidate pending;
     ops::SamplingConfig sampling_host;
+    // The DRY repetition penalty: the window of generated text the penalty is computed from, and
+    // the parameters of this request's penalty. The window holds generated tokens only, as
+    // llama.cpp's DRY sampler does.
+    std::vector<TokenId> dry_window;
+    runtime::DryParams dry_params;
+    // Whether the lane's penalty vector still holds a published penalty.
+    bool dry_published = false;
     std::shared_ptr<text::GrammarState> grammar;
     // With a grammar: whether its masks are cheap enough for its rounds to verify drafts, and
     // while they are not, the mask of its next token computing ahead of its next round, started
@@ -702,6 +717,9 @@ public:
     // the lane must not be given a prefill unit, and every other lane keeps running.
     [[nodiscard]] bool vision_pending(SequenceHandle sequence) const noexcept;
     void update_sampling(SequenceHandle sequence, const ResolvedSamplingParameters& sampling);
+    // Folds the tokens a request just generated into its DRY window and republishes the
+    // penalty the next round samples against.
+    void record_generated(std::uint32_t lane, std::span<const TokenId> generated);
     [[nodiscard]] StructuredReadiness structured_readiness(SequenceHandle sequence);
     [[nodiscard]] bool wait_context_transfer() noexcept;
     [[nodiscard]] bool try_claim_seal_window() noexcept;
@@ -940,6 +958,11 @@ public:
     std::optional<Tensor> score_hidden;
     Tensor sampling_config;
     Tensor token_counts;
+    // The DRY penalty vectors, one per lane, and the pinned host staging the engine writes them
+    // from. The device holds the values the sampling kernel subtracts from the logits.
+    Tensor dry_penalty;
+    std::optional<PinnedHostBuffer> dry_penalty_host;
+    runtime::DryPenalty dry_scratch;
     std::unique_ptr<qwen3_5::StructuredRound> structured_round;
 
     std::vector<SequenceState> continuation_states;
@@ -1679,7 +1702,7 @@ private:
     void release_sequence_state(SequenceState& sequence) noexcept;
     void prepare_graphs();
     void install_sampling(SequenceState& sequence, RequestControl& request,
-                          const ops::SamplingConfig& config);
+                          const ops::SamplingConfig& config, const runtime::DryParams& dry);
     void set_device_i32(Tensor& tensor, std::int32_t value);
     // Enables the device logprob gather for the next round when one of its rows asked for it.
     void arm_logprobs(bool any);

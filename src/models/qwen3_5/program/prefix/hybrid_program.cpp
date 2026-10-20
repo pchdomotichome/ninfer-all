@@ -221,6 +221,7 @@ HybridAdmissionQuote ProgramImpl::hybrid_quote(const PreparedPromptData& prompt,
     auto quote                         = std::make_shared<HybridQuoteImpl>();
     quote->summary                     = plan.summary;
     quote->sampling                    = plan.sampling;
+    quote->dry                         = plan.dry;
     quote->grammar                     = plan.grammar;
     quote->logprobs                    = plan.logprobs;
     quote->text_kv_page_entitlement    = plan.text_kv_page_entitlement;
@@ -918,7 +919,7 @@ StartResult ProgramImpl::hybrid_activate(HybridMaterializationTransaction& trans
         ensure_sequence_kv_mapped(sequence, n, backend_materialized);
         request.grammar  = quote.grammar;
         request.logprobs = quote.logprobs;
-        install_sampling(sequence, request, quote.sampling);
+        install_sampling(sequence, request, quote.sampling, quote.dry);
         sequence.mtp_draft_count = 0;
         sequence.rope_delta = prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);

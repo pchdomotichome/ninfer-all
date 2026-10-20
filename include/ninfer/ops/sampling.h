@@ -40,6 +40,10 @@ struct SamplingConfig {
     float frequency_penalty    = 0.0f;
     unsigned long long seed    = 0;
     std::int32_t* token_counts = nullptr; // device [token_domain] i32, or null
+    // Optional device F32 [token_domain] penalty vector, or null. It holds the DRY repetition
+    // penalty for the token ids that would extend a stretch the model already wrote: emitting one
+    // of them starts a verbatim repeat. The engine rebuilds it from the generated history.
+    const float* dry_penalty = nullptr;
     // Optional device bitset [ceil(token_domain/32), speculative_width]. Column i is
     // conditioned on drafts[0..i). Mask BEFORE penalties/temperature/top-k/top-p/min-p.
     // Every reachable column must allow at least one token with a finite logit.

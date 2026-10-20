@@ -53,6 +53,15 @@ std::uint64_t parse_u64(const char* text, const char* label) {
     return static_cast<std::uint64_t>(value);
 }
 
+std::int32_t parse_int_in(const char* text, const char* label, std::int32_t lo, std::int32_t hi) {
+    char* end          = nullptr;
+    const long long value = std::strtoll(text, &end, 10);
+    if (end == text || *end != '\0' || value < lo || value > hi) {
+        throw std::invalid_argument(std::string("invalid ") + label + ": " + text);
+    }
+    return static_cast<std::int32_t>(value);
+}
+
 KvCacheStorage parse_kv_dtype(const char* text) {
     const std::string value(text);
     if (value == "bf16") { return KvCacheStorage::BFloat16; }
@@ -393,6 +402,15 @@ std::string serve_usage_text(const char* argv0) {
            "  --min-p F                     0..1\n"
            "  --presence-penalty F          -2..2\n"
            "  --frequency-penalty F         -2..2\n"
+           "  --dry-multiplier F            DRY repetition penalty scale, 0..2 (default 0, off)\n"
+           "                                penalises a token that would extend a stretch the\n"
+           "                                model already wrote verbatim, by\n"
+           "                                multiplier * base^(stretch - allowed length)\n"
+           "  --dry-base F                  DRY exponential base, 1..100 (default 1)\n"
+           "  --dry-allowed-length N        DRY shortest stretch in tokens that counts, 1..64\n"
+           "                                (default 2)\n"
+           "  --dry-penalty-last-n N        DRY window in generated tokens, 0..4096 (default 0,\n"
+           "                                off)\n"
            "  --seed N                      seed of a request that sets none (default: fresh\n"
            "                                per request)\n"
            "  --greedy                      force temperature 0 (exact argmax)\n"
@@ -1511,6 +1529,26 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         if (arg == "--frequency-penalty") {
             options.sampling_overrides.frequency_penalty = parse_float_in(
                 require_value("--frequency-penalty"), "frequency-penalty", -2.0f, 2.0f);
+            continue;
+        }
+        if (arg == "--dry-multiplier") {
+            options.sampling_overrides.dry_multiplier = parse_float_in(
+                require_value("--dry-multiplier"), "dry-multiplier", 0.0f, 2.0f);
+            continue;
+        }
+        if (arg == "--dry-base") {
+            options.sampling_overrides.dry_base =
+                parse_float_in(require_value("--dry-base"), "dry-base", 1.0f, 100.0f);
+            continue;
+        }
+        if (arg == "--dry-allowed-length") {
+            options.sampling_overrides.dry_allowed_length = parse_int_in(
+                require_value("--dry-allowed-length"), "dry-allowed-length", 1, 64);
+            continue;
+        }
+        if (arg == "--dry-penalty-last-n") {
+            options.sampling_overrides.dry_penalty_last_n = parse_int_in(
+                require_value("--dry-penalty-last-n"), "dry-penalty-last-n", 0, 4096);
             continue;
         }
         if (arg == "--seed") {

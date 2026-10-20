@@ -39,6 +39,10 @@ ninfer_add_test(ninfer_sampling_defaults_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_sampling_defaults.cpp"
   LIBRARIES ninfer_engine ninfer_core)
 
+ninfer_add_test(ninfer_sampling_dry_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_sampling_dry.cpp"
+  LIBRARIES ninfer_engine ninfer_core)
+
 ninfer_add_test(ninfer_prefix_cache_index_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_prefix_cache_index.cpp"
   LIBRARIES ninfer_runtime_support)

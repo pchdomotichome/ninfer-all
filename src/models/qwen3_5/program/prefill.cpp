@@ -718,7 +718,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         ensure_sequence_kv_mapped(sequence, prompt_tokens, backend_materialized);
         request.grammar  = request_plan.grammar;
         request.logprobs = request_plan.logprobs;
-        install_sampling(sequence, request, request_plan.sampling);
+        install_sampling(sequence, request, request_plan.sampling, request_plan.dry);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
 
@@ -1020,6 +1020,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                     ? mtp_host_egress->licensed_tokens.data() + row * width
                     : dflash_host_egress->licensed_tokens.data() + row * width;
             sequence.ledger.insert(sequence.ledger.end(), token_base, token_base + committed);
+            record_generated(lanes[row], std::span<const TokenId>(token_base, committed));
             commit_generated_prefix_identity(sequence, pending.base_S,
                                              std::span<const TokenId>(token_base, committed),
                                              prefix_execution_splits[row]);
@@ -1387,6 +1388,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             throw std::logic_error("candidate token ledger does not match prompt length");
         }
         sequence.ledger.push_back(host_tokens[0]);
+        record_generated(sequence.lane, std::span<const TokenId>(host_tokens, 1));
         sequence.prefix_identity.append_generated(1, sequence.rope_delta);
         sequence.prefix_digests.append_generated(std::span<const TokenId>(host_tokens, 1),
                                                  sequence.rope_delta);

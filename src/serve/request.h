@@ -162,6 +162,11 @@ struct SamplingParams {
     std::optional<int> top_k;
     std::optional<double> presence_penalty;
     std::optional<double> frequency_penalty;
+    // The DRY repetition penalty. A multiplier of zero leaves the penalty off.
+    std::optional<double> dry_multiplier;
+    std::optional<double> dry_base;
+    std::optional<int> dry_allowed_length;
+    std::optional<int> dry_penalty_last_n;
     std::optional<std::uint64_t> seed;
 };
 

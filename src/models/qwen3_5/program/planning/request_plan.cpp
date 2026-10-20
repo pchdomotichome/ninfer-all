@@ -316,6 +316,10 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
                                                ? FinishReason::OutputLimit
                                                : FinishReason::ContextCapacity;
     base->sampling                       = translate_sampling(options.sampling);
+    base->dry.multiplier                 = options.sampling.dry_multiplier;
+    base->dry.base                       = options.sampling.dry_base;
+    base->dry.allowed_length             = options.sampling.dry_allowed_length;
+    base->dry.last_n                     = options.sampling.dry_penalty_last_n;
     base->grammar                        = options.grammar;
     base->logprobs                       = options.logprobs;
     base->allow_prefix_reuse             = options.allow_prefix_reuse;
@@ -546,6 +550,7 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
     auto plan                         = std::make_unique<AdmissionCandidateImpl>();
     plan->summary                     = base.summary;
     plan->sampling                    = base.sampling;
+    plan->dry                         = base.dry;
     plan->grammar                     = base.grammar;
     plan->logprobs                    = base.logprobs;
     plan->text_kv_page_entitlement    = base.text_kv_page_entitlement;

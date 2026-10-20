@@ -10,6 +10,7 @@
 #include "ninfer/ops/logprob_topk.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/speculative_round.h"
+#include "runtime/contract/dry.h"
 #include "ninfer/ops/target_logprobs.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/grammar_masks.h"
@@ -404,6 +405,8 @@ struct Gemma4Core::Impl {
         bool counts                              = false;
         bool logprobs                            = false;
         const std::uint32_t* mask                = nullptr; // a grammar's next-token mask
+        // The request's generated text: the window the DRY repetition penalty is computed from.
+        const std::vector<TokenId>* generated    = nullptr;
     };
 
     Gemma4Instance& instance;
@@ -465,6 +468,11 @@ struct Gemma4Core::Impl {
     std::uint32_t decode_rounds_per_prefill = 1;
 
     DeviceBuffer sample_config, sample_position, sample_out, token_counts, score_targets, score_out;
+    // The DRY repetition penalty: one vector per slot, and the pinned host staging it is written
+    // from before it reaches the sampling kernel.
+    DeviceBuffer dry_penalty;
+    std::unique_ptr<PinnedHostBuffer> dry_penalty_host;
+    runtime::DryPenalty dry_scratch;
     // A row's logits kept while its grammar mask is late (one per sequence), and those of the rows
     // sampled together afterwards, side by side.
     DeviceBuffer saved_logits, deferred_logits;
@@ -538,6 +546,8 @@ struct Gemma4Core::Impl {
         host_sample     = std::make_unique<PinnedHostBuffer>(
             rows * (sizeof(ops::SamplingConfig) + 2 * sizeof(std::int32_t)));
         token_counts  = DeviceBuffer(rows * domain * sizeof(std::int32_t));
+        dry_penalty   = DeviceBuffer(rows * domain * sizeof(float));
+        dry_penalty_host = std::make_unique<PinnedHostBuffer>(rows * domain * sizeof(float));
         score_targets = DeviceBuffer(models::gemma4::Executor::kMaxLogitRows * sizeof(std::int32_t));
         score_out     = DeviceBuffer(models::gemma4::Executor::kMaxLogitRows * sizeof(float));
         const std::size_t top = rows * width * kMaximumTokenLogprobs;
@@ -1187,6 +1197,12 @@ struct Gemma4Core::Impl {
             config.token_counts      = row.counts ? static_cast<std::int32_t*>(token_counts.p) +
                                                         std::size_t(row.slot) * domain
                                                   : nullptr;
+            if (row.params->dry_multiplier > 0.0F && row.params->dry_penalty_last_n > 0 &&
+                row.generated != nullptr) {
+                publish_dry_penalty(row.slot, *row.generated, *row.params, stream);
+                config.dry_penalty =
+                    static_cast<const float*>(dry_penalty.p) + std::size_t(row.slot) * domain;
+            }
             if (row.mask != nullptr) {
                 auto* words = static_cast<std::uint32_t*>(host_mask->data()) + b * mask_words();
                 std::copy_n(row.mask, mask_words(), words);
@@ -1260,6 +1276,29 @@ struct Gemma4Core::Impl {
         }
     }
 
+    // Publishes the DRY repetition penalty for one slot: the tokens that would extend a stretch the
+    // request already wrote, and how much logit each of them loses. The window is the request's
+    // generated text, as llama.cpp's DRY sampler keeps it.
+    void publish_dry_penalty(std::uint32_t slot, const std::vector<TokenId>& generated,
+                              const ResolvedSamplingParameters& params, cudaStream_t stream) {
+        const std::size_t last_n = static_cast<std::size_t>(params.dry_penalty_last_n);
+        const std::size_t begin  = generated.size() > last_n ? generated.size() - last_n : 0;
+        runtime::DryParams dry{.multiplier     = params.dry_multiplier,
+                               .base           = params.dry_base,
+                               .allowed_length = params.dry_allowed_length,
+                               .last_n         = params.dry_penalty_last_n};
+        dry_scratch.compute(
+            std::span<const TokenId>(generated.data() + begin, generated.size() - begin), dry);
+        float* host = static_cast<float*>(dry_penalty_host->data()) + std::size_t(slot) * domain;
+        std::memset(host, 0, domain * sizeof(float));
+        for (const runtime::DryCandidate& candidate : dry_scratch.candidates()) {
+            if (candidate.token < 0 || static_cast<std::size_t>(candidate.token) >= domain) { continue; }
+            host[candidate.token] = candidate.penalty;
+        }
+        CUDA_CHECK(cudaMemcpyAsync(dry_penalty.p + std::size_t(slot) * domain * sizeof(float), host,
+                                   domain * sizeof(float), cudaMemcpyHostToDevice, stream));
+    }
+
     [[nodiscard]] SampleRow sample_row(Request& r) {
         const auto& exec = r.options.execution;
         if (!r.post_thinking && exec.post_thinking_sampling && r.output.reasoning_closed()) {
@@ -1271,7 +1310,8 @@ struct Gemma4Core::Impl {
                          .slot     = r.slot,
                          .counts   = r.penalties,
                          .logprobs = exec.logprobs,
-                         .mask     = r.mask ? r.mask->masks() : nullptr};
+                         .mask     = r.mask ? r.mask->masks() : nullptr,
+                         .generated = &r.generated};
     }
 
     void finish(const std::shared_ptr<Request>& request, FinishReason reason) {
