@@ -124,6 +124,11 @@ draft count produce two different outputs across runs.
 
 ## Measuring it
 
+The switch should be a **per-request field** (like `dry_multiplier`), not a process flag: the
+draft path is graph-captured, but the request's sampler parameters are refreshed into the
+device at the start of every round, so one loaded model can serve both arms and the
+interleaved A/B needs no reload.
+
 The router's request log already carries the numbers:
 
 - `speculative.accepted_per_position` -- the acceptance per draft position, and
