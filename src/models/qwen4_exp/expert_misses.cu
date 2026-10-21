@@ -652,7 +652,14 @@ struct ExpertMisses::Impl {
             backend     = ops::gguf_cpu_backend_selected(ops::GgufCpuBackend::Automatic);
             cpu_threads = threads;
         }
-        service = std::thread([this] { serve(); });
+        service = std::thread([this] {
+            // A new thread's current device is the runtime's default, which this engine may not
+            // serve; RankBinding restores it after each request, and making a device another process
+            // has filled current latches an out-of-memory the next miss check reports as a miss
+            // failure.
+            device.bind_to_current_thread();
+            serve();
+        });
     }
 
     ~Impl() {
