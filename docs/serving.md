@@ -97,6 +97,25 @@ alone decides which tokens are committed, so greedy output is unchanged and only
 rate can move. The Engine rebinds the draft's page table to those pages and shifts its positions,
 so the attention kernels are the unwindowed ones. `server_start` records the window.
 
+### Coupled drafts
+
+An MTP draft is the head's argmax, but a request that samples commits a draw: at a temperature above
+zero the draft survives only when that draw happens to land on the argmax token. The request field
+`spec_coupled_drafts: true` makes each draft step draw instead, with the request's own chain
+(temperature, `top_k`, `top_p`, `min_p`, the presence and frequency penalties and DRY) over the MTP
+head's logits, using the counter the verification's column for that token draws. Both sides pick from
+one uniform, so a draft survives when the two picks agree instead of when a pick equals an argmax.
+
+- Verification stays an exact match against the target's own sample, so the text remains a function
+  of the seed alone; only how many tokens one round yields can move.
+- A row without the field keeps the argmax draft, and a greedy request (`temperature` 0) is
+  unaffected: its chain is the argmax.
+- A draft's chain does not see the round's earlier drafts in its penalties, where the verification
+  does; a strong presence or frequency penalty, or DRY, weakens the coupling.
+- The switch is part of the draft's captured graph key, so a sequence alternating between the two
+  arms pays one capture per switch.
+- The request log records the resolved value under `sampler.spec_coupled_drafts`.
+
 ### Vision residency
 
 `--vision` keeps the Vision tower, its encode workspace and the item handoff resident for the

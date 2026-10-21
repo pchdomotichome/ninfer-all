@@ -87,6 +87,7 @@ int test_request_envelope_and_sampling() {
     body["seed"]                  = -1;
     body["top_k"]                 = 17;
     body["min_p"]                 = 0.05;
+    body["spec_coupled_drafts"]   = true;
     body["timings_per_token"]     = true;
     body["return_progress"]       = true;
 
@@ -111,6 +112,12 @@ int test_request_envelope_and_sampling() {
     failures +=
         check(translated.execution.sampling.seed == std::numeric_limits<std::uint64_t>::max(),
               "signed seed reaches Engine request options");
+    failures +=
+        check(translated.execution.sampling.spec_coupled_drafts &&
+                  *translated.execution.sampling.spec_coupled_drafts,
+              "spec_coupled_drafts reaches Engine request options");
+    failures += check(!options(parse(base_request()).generation).execution.sampling.spec_coupled_drafts,
+                      "coupling stays off unless the request asks");
     failures += check(!translated.execution.post_thinking_sampling,
                       "post-thinking sampling stays off without a post_thinking object");
 

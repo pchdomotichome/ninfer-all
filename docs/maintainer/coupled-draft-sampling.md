@@ -43,13 +43,17 @@ how many tokens one window yields.
 
 ### The counter arithmetic
 
-All positions are sequence indices. A window that starts at `p` with `a` drafts accepted
-continues at `p' = p + a + 1`; chain step `j` runs at cell `p + a + j` and predicts the
-token at `p + a + j + 2`, which is row `j + 1` of the next window and is verified by row
-`j`'s pick, whose counter is `p' + j`. So **a draft made at cell `c` is verified with
-counter `c + 1`**, whatever the window size, the accepted count or a suffix drafter in
-between. The penalty history mirrors the target's: the last `h` tokens of
-`(consumed', x', drafts 0..j-1)`.
+All positions are sequence indices, and a sampling draw's counter is the position of the
+token it selects: `sample()` keys a decode row by `(seed, position, purpose)` of the token
+it emits, and the verification draws the successor of column `i` with
+`(seed, L + i + 1, kSamplePurposeDecode)` where `L` is the sequence's position before the
+round. A draft step whose chain cell sits at `c` proposes the token at `c + 2`, so its draw
+counter is `c + 2` -- the position it proposes, whatever the window size, the accepted count
+or a suffix drafter in between. An earlier revision of this document said `c + 1`; the code
+in `speculative_round.cuh` is the authority.
+
+The penalty history mirrors the target's: the last `h` tokens of `(consumed', x', drafts
+0..j-1)`.
 
 ## What NInfer has today
 
@@ -121,6 +125,59 @@ only changes how many tokens one window yields. The existing determinism guarant
 (every configuration reproduces its own output exactly) has to survive the change: a
 different draft count is already a different output, and coupling must not make the same
 draft count produce two different outputs across runs.
+
+## What was implemented
+
+The port landed as `spec_coupled_drafts`, a request field (Chat Completions and the native
+request), following the pieces above:
+
+- `SamplingConfig::count_selected` (`include/ninfer/ops/sampling.h`): `sample()` adds the
+  selected id to `token_counts` unless this is off. A draft's chain samples the counts the
+  verification will read, without counting a proposal as a committed token.
+- `qwen4_exp_core::sampling_config` builds one row's device parameters; the draft path copies
+  the drafting rows into a compact config array, with `count_selected = false`, and the
+  verification reuses the same builder with the grammar's per-column mask added.
+- `Executor::draft` takes that config array. With it, `mtp_head` samples over the head's
+  logits with `kSamplePurposeDecode` and one staged counter per cell
+  (`mtp_sample_positions`); the argmax remains for the uncoupled rows, whose config resolves
+  to temperature zero and to no other filter, which the sampling Op's greedy route serves with
+  the argmax's exact tie-breaking.
+- The n-gram prefetch still reads the runner-up from `argmax_top2`; the sampled id overwrites
+  the argmax id before the chain's next step.
+- A coupled and an uncoupled draft are different kernels, so the captured draft chain is keyed
+  by the pick (`2 * steps + coupled` in `SequenceState::draft`).
+
+Known gap: a draft step's penalties do not include the round's earlier drafts (the
+verification's do, through `sampling_adjusted_logit`), so a strong presence/frequency penalty
+or DRY reduces the coupling. Greedy requests are unaffected.
+
+## Measured (2026-10-21, RTX 3090, IQ3_XXS, staged expert misses)
+
+Qwen3.8-Flash-Next, 2000 tokens, seed 8080, `--draft-tokens 4`, one request per arm, two
+runs per arm (`spec_coupled_drafts` absent vs true), same binary:
+
+| temperature | penalties | acceptance off | acceptance on | decode t/s off | decode t/s on |
+|---|---|---|---|---|---|
+| 0.6 | none | 65.86 / 66.36% | 66.70 / 66.36% | 87.57 / 87.18 | 87.27 / 86.17 |
+| 0.6 | presence 1.5 | 69.29 / 69.47% | 70.19 / 69.65% | 92.46 / 92.16 | 91.51 / 90.55 |
+| 1.0 | none | 78.72 / 80.55% | 79.81 / 80.18% | 104.36 / 113.37 | 111.87 / 111.21 |
+| 1.5 | none | 21.94 / 21.80% | 21.94 / 21.36% | 45.91 / 48.07 | 46.15 / 45.41 |
+
+The output was byte-identical between the arms in all ten pairs, which is the correctness
+evidence: every committed position is drawn with `kSamplePurposeDecode` and its own counter,
+so the accepted count cannot change the text.
+
+The gain is not there. Coupling equals `sum(min(p, q))` and the argmax draft equals
+`p(argmax q)`; the MTP head's `q` is sharp enough that both are the same number, so the
++0.5 point the first two rows show is inside the run-to-run spread while the sampling pass
+costs about 1% of decode. Only at temperature 1.5 does the mechanism separate from the
+argmax, and then only at the first column (299 and 297 accepted of the rounds that reached
+it, against 279 and 286), because the later columns compound a draft fed its own earlier
+tokens. The switch therefore stays off by default and this document records the result
+rather than a win.
+
+A cheaper draw cannot rescue it: the cost is the top-k selection over the vocabulary that
+the inverse-CDF needs, and it is the same pass whatever candidate count the draw would use.
 
 ## Measuring it
 

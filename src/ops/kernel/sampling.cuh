@@ -64,7 +64,7 @@ __launch_bounds__(kSamplerBlock) __global__
                 out[row] = kSamplerNonFiniteToken;
             } else {
                 out[row] = picked;
-                if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
+                if (cfg.token_counts != nullptr && cfg.count_selected) { atomicAdd(&cfg.token_counts[picked], 1); }
             }
         }
         return;
@@ -101,7 +101,7 @@ __launch_bounds__(kSamplerBlock) __global__
         return;
     }
     out[row] = picked;
-    if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
+    if (cfg.token_counts != nullptr && cfg.count_selected) { atomicAdd(&cfg.token_counts[picked], 1); }
 }
 
 __launch_bounds__(kSamplerBlock) __global__
@@ -218,7 +218,7 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void sampling_group_finalize_sa
                 out[col] = kSamplerNonFiniteToken;
             } else {
                 out[col] = picked;
-                if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
+                if (cfg.token_counts != nullptr && cfg.count_selected) { atomicAdd(&cfg.token_counts[picked], 1); }
             }
             workspace.group_done[col] = 0;
         }
@@ -296,7 +296,7 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void sampling_group_finalize_sa
             out[col] = kSamplerNonFiniteToken;
         } else {
             out[col] = picked;
-            if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
+            if (cfg.token_counts != nullptr && cfg.count_selected) { atomicAdd(&cfg.token_counts[picked], 1); }
         }
         workspace.group_done[col] = 0;
     }

@@ -210,6 +210,7 @@ Json sampler_json(const ninfer::ResolvedSamplingParameters& sampling) {
                 {"dry_base", sampling.dry_base},
                 {"dry_allowed_length", sampling.dry_allowed_length},
                 {"dry_penalty_last_n", sampling.dry_penalty_last_n},
+                {"spec_coupled_drafts", sampling.spec_coupled_drafts},
                 {"seed", sampling.seed}};
 }
 

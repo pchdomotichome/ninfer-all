@@ -851,6 +851,9 @@ void parse_sampling(const Json& body, GenerationRequest& output) {
     sampling.presence_penalty  = get_number(body, "presence_penalty");
     sampling.frequency_penalty = get_number(body, "frequency_penalty");
     sampling.seed              = get_seed(body);
+    // NInfer's own switch: a speculative draft samples with the request's chain and the counter its
+    // verification column draws, instead of taking the MTP head's argmax.
+    sampling.spec_coupled_drafts = get_optional_bool(body, "spec_coupled_drafts");
 
     // The DRY repetition penalty, with the same names and ranges as llama.cpp's DRY sampler.
     sampling.dry_multiplier     = get_number(body, "dry_multiplier");

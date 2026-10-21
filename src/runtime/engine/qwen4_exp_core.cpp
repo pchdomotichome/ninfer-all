@@ -1423,23 +1423,7 @@ struct Qwen4ExpCore::Impl {
         bool masked               = false;
         for (std::size_t b = 0; b < n; ++b) {
             const SampleRow& row = rows[b];
-            ops::SamplingConfig config;
-            config.temperature       = row.params->temperature;
-            config.top_k             = row.params->top_k;
-            config.top_p             = row.params->top_p;
-            config.min_p             = row.params->min_p;
-            config.presence_penalty  = row.params->presence_penalty;
-            config.frequency_penalty = row.params->frequency_penalty;
-            config.seed              = row.params->seed;
-            config.token_counts =
-                row.counts ? static_cast<std::int32_t*>(token_counts.p) + std::size_t(row.slot) * domain
-                           : nullptr;
-            if (row.params->dry_multiplier > 0.0F && row.params->dry_penalty_last_n > 0 &&
-                row.generated != nullptr) {
-                publish_dry_penalty(row.slot, *row.generated, *row.params, stream);
-                config.dry_penalty =
-                    static_cast<const float*>(dry_penalty.p) + std::size_t(row.slot) * domain;
-            }
+            ops::SamplingConfig config = sampling_config(row, stream);
             if (row.mask != nullptr) {
                 auto* words = static_cast<std::uint32_t*>(host_mask->data()) + b * mask_words();
                 std::copy_n(row.mask, mask_words(), words);
@@ -1534,6 +1518,30 @@ struct Qwen4ExpCore::Impl {
         }
         CUDA_CHECK(cudaMemcpyAsync(dry_penalty.p + std::size_t(slot) * domain * sizeof(float), host,
                                    domain * sizeof(float), cudaMemcpyHostToDevice, stream));
+    }
+
+    // A row's device sampling parameters: its resolved chain, its penalty counts and the DRY
+    // vector over its history. The caller adds the grammar's mask, which is per column.
+    [[nodiscard]] ops::SamplingConfig sampling_config(const SampleRow& row, cudaStream_t stream) {
+        ops::SamplingConfig config;
+        config.temperature       = row.params->temperature;
+        config.top_k             = row.params->top_k;
+        config.top_p             = row.params->top_p;
+        config.min_p             = row.params->min_p;
+        config.presence_penalty  = row.params->presence_penalty;
+        config.frequency_penalty = row.params->frequency_penalty;
+        config.seed              = row.params->seed;
+        config.token_counts      = row.counts
+                                       ? static_cast<std::int32_t*>(token_counts.p) +
+                                             std::size_t(row.slot) * domain
+                                       : nullptr;
+        if (row.params->dry_multiplier > 0.0F && row.params->dry_penalty_last_n > 0 &&
+            row.generated != nullptr) {
+            publish_dry_penalty(row.slot, *row.generated, *row.params, stream);
+            config.dry_penalty =
+                static_cast<const float*>(dry_penalty.p) + std::size_t(row.slot) * domain;
+        }
+        return config;
     }
 
     [[nodiscard]] SampleRow sample_row(Request& r) {
@@ -2027,7 +2035,35 @@ struct Qwen4ExpCore::Impl {
             }
             std::vector<TokenId> mtp_drafts(mtp_sequences.size() * drafts);
             std::vector<std::uint32_t> mtp_extents(mtp_sequences.size(), steps);
-            executor.draft(mtp_sequences, mtp_anchors, mtp_drafts, mtp_extents, steps);
+            // A coupled draft draws with its request's own chain and the counter its verification
+            // column draws, so the draft survives when the two picks agree. A row that drafts
+            // greedily carries a default config, whose zero temperature is the argmax.
+            std::vector<ops::SamplingConfig> draft_configs;
+            draft_configs.reserve(mtp_sequences.size());
+            bool coupled = false;
+            for (std::size_t j = 0; j < b; ++j) {
+                if (looked_up[j]) { continue; }
+                const SampleRow row = sample_row(*batch[j]);
+                if (!row.params->spec_coupled_drafts) {
+                    draft_configs.push_back(ops::SamplingConfig{});
+                    continue;
+                }
+                auto config           = sampling_config(row, executor.head_stream());
+                config.count_selected = false; // a draft is a proposal, not a committed token
+                draft_configs.push_back(config);
+                coupled = true;
+            }
+            const ops::SamplingConfig* draft_config = nullptr;
+            if (coupled) {
+                RankBinding bind(device, executor.head_rank());
+                std::memcpy(host_sample->data(), draft_configs.data(),
+                            draft_configs.size() * sizeof(ops::SamplingConfig));
+                CUDA_CHECK(cudaMemcpyAsync(sample_config.p, host_sample->data(),
+                                           draft_configs.size() * sizeof(ops::SamplingConfig),
+                                           cudaMemcpyHostToDevice, executor.head_stream()));
+                draft_config = static_cast<const ops::SamplingConfig*>(sample_config.p);
+            }
+            executor.draft(mtp_sequences, mtp_anchors, mtp_drafts, mtp_extents, steps, draft_config);
             for (std::size_t j = 0, m = 0; j < b; ++j) {
                 if (looked_up[j]) { continue; }
                 std::copy_n(mtp_drafts.begin() + std::ptrdiff_t(m * drafts), drafts,
@@ -2074,17 +2110,7 @@ struct Qwen4ExpCore::Impl {
         bool masked = false;
         for (std::size_t j = 0; j < b; ++j) {
             const SampleRow& row = rows[j];
-            ops::SamplingConfig config;
-            config.temperature       = row.params->temperature;
-            config.top_k             = row.params->top_k;
-            config.top_p             = row.params->top_p;
-            config.min_p             = row.params->min_p;
-            config.presence_penalty  = row.params->presence_penalty;
-            config.frequency_penalty = row.params->frequency_penalty;
-            config.seed              = row.params->seed;
-            config.token_counts      = row.counts ? static_cast<std::int32_t*>(token_counts.p) +
-                                                        std::size_t(row.slot) * domain
-                                                  : nullptr;
+            ops::SamplingConfig config = sampling_config(row, stream);
             if (const auto& job = column_masks[j]) {
                 job->wait();
                 batch[j]->mask_cost.observe(job->seconds());

@@ -49,6 +49,9 @@ struct SamplingConfig {
     // Every reachable column must allow at least one token with a finite logit.
     const std::uint32_t* token_mask = nullptr;
     std::int32_t token_mask_stride  = 0; // words per column; ordinary sample uses column zero
+    // Whether the selected id is added to token_counts. A draft's proposal is not committed, so
+    // a coupled draft samples with this off over the counts the verification will also read.
+    bool count_selected = true;
 };
 
 // Caller-owned transient capacity for every parallel sampling-lane count in the inclusive
@@ -86,7 +89,8 @@ struct SamplingConfig {
  * Row b uses counter-based RNG key
  * (configs[b].seed,logical_positions[b],purpose), without mutable RNG state or dependence on the
  * compact row index. In every mode the selected token atomically increments
- * configs[b].token_counts when it is non-null. Non-null token-count arrays belonging to distinct
+ * configs[b].token_counts when it is non-null and configs[b].count_selected. Non-null token-count
+ * arrays belonging to distinct
  * active requests must not alias. `out` must not overlap logits, configs, logical_positions, or any
  * token-count array. The Op writes all of out, uses caller-owned transient storage reported by
  * sampling_workspace_capacity_bytes(), and has no other persistent-state side effect.

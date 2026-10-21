@@ -773,6 +773,9 @@ struct SamplingOverrides {
     std::optional<std::int32_t> dry_allowed_length;
     std::optional<std::int32_t> dry_penalty_last_n;
     std::optional<std::uint64_t> seed;
+    // Speculative drafts sample with this request's chain and the counter its verification column
+    // draws, so a draft survives when the two draws agree instead of when it equals a draw.
+    std::optional<bool> spec_coupled_drafts;
 };
 
 // Complete parameters after Engine resolution. Target runtimes consume only this type.
@@ -790,6 +793,7 @@ struct ResolvedSamplingParameters {
     std::int32_t dry_allowed_length = 2;
     std::int32_t dry_penalty_last_n = 0;
     std::uint64_t seed      = 0;
+    bool spec_coupled_drafts = false;
 };
 
 enum class OutputChannel : std::uint8_t {

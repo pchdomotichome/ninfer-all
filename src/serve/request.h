@@ -168,6 +168,7 @@ struct SamplingParams {
     std::optional<int> dry_allowed_length;
     std::optional<int> dry_penalty_last_n;
     std::optional<std::uint64_t> seed;
+    std::optional<bool> spec_coupled_drafts;
 };
 
 // Protocol-level effort vocabulary. Each wire adapter accepts the values from

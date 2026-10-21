@@ -67,6 +67,7 @@ ResolvedSamplingParameters resolve_sampling(const SamplingPreset& preset,
             overrides.dry_allowed_length.value_or(preset.dry_allowed_length),
         .dry_penalty_last_n = overrides.dry_penalty_last_n.value_or(preset.dry_penalty_last_n),
         .seed              = overrides.seed.value_or(0),
+        .spec_coupled_drafts = overrides.spec_coupled_drafts.value_or(false),
     };
     // The registered sampling pipeline has an exact top-20 candidate domain. Preserve the
     // existing public meaning of zero (use the target cap), then expose only concrete values to

@@ -60,6 +60,7 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
     if (request.dry_penalty_last_n) {
         sampling.dry_penalty_last_n = static_cast<std::int32_t>(*request.dry_penalty_last_n);
     }
+    if (request.spec_coupled_drafts) { sampling.spec_coupled_drafts = *request.spec_coupled_drafts; }
     if (request.seed) {
         sampling.seed = *request.seed;
     } else if (server.sampling_overrides.seed) {

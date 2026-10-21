@@ -16,6 +16,7 @@
 #include "models/qwen4_exp/ngram_table.h"
 #include "models/qwen3_5/execution/vision.h"
 #include "ninfer/ops/argmax.h"
+#include "ninfer/ops/sampling.h"
 #include "ninfer/ops/cast.h"
 #include "ninfer/ops/causal_conv1d_silu.h"
 #include "ninfer/ops/embedding.h"
@@ -423,12 +424,13 @@ struct SequenceState {
     };
     // The captured record strides and kernels depend on the actual verification width.
     std::array<VerifyGraphs, 17> verify;
-    // Draft chains by step count (adaptive MTP drafts fewer than draft_tokens).
+    // Draft chains by step count and by pick (adaptive MTP drafts fewer than draft_tokens; a
+    // coupled draft samples where an uncoupled one takes the argmax), at 2 * steps + coupled.
     struct DraftGraph {
         DecodeGraphExecutable chain;
         std::uint32_t runs = 0;
     };
-    std::array<DraftGraph, 16> draft;
+    std::array<DraftGraph, 32> draft;
 };
 
 // Consecutive layers on one rank, in pass order. The first segment also embeds the tokens, the
@@ -582,6 +584,9 @@ struct Executor::Impl {
     // The MTP chain on the head rank: token ids and positions of a pass's cells (a draft step's at
     // step * sequences), staged from the host.
     DeviceBuffer mtp_ids, mtp_positions, ngram_prefetch_tokens;
+    // A coupled draft's draw counters: one per cell, the public position of the token that cell
+    // proposes, which is the key the verification's column for that token draws with.
+    DeviceBuffer mtp_sample_positions;
     DeviceBuffer mtp_logprobs;
     std::unique_ptr<PinnedHostBuffer> mtp_staging;
     cudaEvent_t mtp_staged       = nullptr;
@@ -1006,6 +1011,9 @@ struct Executor::Impl {
                  projection_workspace(mtp->fc_hidden,
                                       t * static_cast<std::int32_t>(config.hc_count)),
                  projection_workspace(mtp->head, static_cast<std::int32_t>(max_logit_rows)),
+                 // A coupled draft's sampling lane per sequence over the public tokens.
+                 ops::sampling_workspace_capacity_bytes(
+                     domain, 1, static_cast<std::int32_t>(options.sequences)),
                  // The MTP block's calls over cached experts only: their kept ids and weights.
                  ops::moe_experts_gguf_workspace_bytes(t) +
                      2 * ((std::size_t(config.num_experts_per_tok) * t * 4 + 255) / 256 * 256)});
@@ -1348,7 +1356,9 @@ struct Executor::Impl {
             options.prefill_chunk, std::uint64_t(verify_width) * options.sequences);
         mtp_ids       = DeviceBuffer(cells * 4);
         mtp_positions = DeviceBuffer(cells * 4);
-        mtp_staging   = std::make_unique<PinnedHostBuffer>(cells * 8);
+        mtp_sample_positions = DeviceBuffer(cells * 4);
+        // The ids, the positions and a coupled draft's counters: one pinned region each.
+        mtp_staging   = std::make_unique<PinnedHostBuffer>(cells * 12);
         if (options.draft_min_p > 0) {
             mtp_logprobs = DeviceBuffer(std::uint64_t(options.draft_tokens) * options.sequences * 4);
         }
@@ -1364,7 +1374,9 @@ struct Executor::Impl {
         for (SequenceState& sequence : sequences) {
             sequence.mtp_scratch_tail = DeviceBuffer(sequence.mtp.tail.bytes);
         }
-        memory.ranks[head].workspace_bytes += mtp_ids.bytes + mtp_positions.bytes + mtp_logprobs.bytes + ngram_prefetch_tokens.bytes +
+        memory.ranks[head].workspace_bytes += mtp_ids.bytes + mtp_positions.bytes +
+                                              mtp_sample_positions.bytes + mtp_logprobs.bytes +
+                                              ngram_prefetch_tokens.bytes +
                                               sequences.size() * sequences.front().mtp.tail.bytes;
     }
 
@@ -3117,6 +3129,19 @@ struct Executor::Impl {
         CUDA_CHECK(cudaEventRecord(mtp_staged, rank.stream));
     }
 
+    // A coupled draft's draw counters, at 2 * capacity in the same pinned staging.
+    void stage_mtp_counters(std::span<const std::int32_t> counters) {
+        RankState& rank = ranks[model.head_rank()];
+        CUDA_CHECK(cudaEventSynchronize(mtp_staged));
+        auto* host                 = static_cast<std::int32_t*>(mtp_staging->data());
+        const std::size_t capacity = mtp_ids.bytes / 4;
+        std::memcpy(host + 2 * capacity, counters.data(), counters.size() * 4);
+        CUDA_CHECK(cudaMemcpyAsync(static_cast<std::int32_t*>(mtp_sample_positions.p),
+                                   host + 2 * capacity, counters.size() * 4,
+                                   cudaMemcpyHostToDevice, rank.stream));
+        CUDA_CHECK(cudaEventRecord(mtp_staged, rank.stream));
+    }
+
     // Puts `count` FP32 stacks into an MTP pass's input plane (BF16, plane a of the head rank) from
     // column `column` on.
     void stage_hidden(const void* source, std::int32_t count, std::int32_t column) {
@@ -3239,11 +3264,14 @@ struct Executor::Impl {
         mtp_routes += std::uint32_t(n);
     }
 
-    // The greedy draft of each of the `n` single-cell parts of the last MTP pass: the block's
-    // final mixer, the head, and the argmax over the public tokens into `out` (device I32 [n],
-    // head rank).
+    // The draft of each of the `n` single-cell parts of the last MTP pass: the block's final
+    // mixer, the head, and the pick over the public tokens into `out` (device I32 [n], head rank).
+    // With `configs`, the pick is the request's own chain and the counter `positions` names, which
+    // is the key the verification draws for that token: a coupled draft. Without it, the pick is the
+    // greedy argmax.
     void mtp_head(std::int32_t n, std::int32_t* out, std::int32_t* second = nullptr,
-                  float* logprobs = nullptr) {
+                  float* logprobs = nullptr, const ops::SamplingConfig* configs = nullptr,
+                  const std::int32_t* positions = nullptr) {
         RankState& rank      = ranks[model.head_rank()];
         const cudaStream_t s = rank.stream;
         WorkspaceArena& ws   = *rank.workspace;
@@ -3259,7 +3287,17 @@ struct Executor::Impl {
         Tensor logits(rank.logits, DType::BF16, {static_cast<std::int32_t>(config.vocab_size), n});
         project(mtp->head, mixed, logits, ws, s);
         Tensor tokens(out, DType::I32, {n});
-        if (second) {
+        if (configs != nullptr) {
+            // Only the n-gram prefetch reads the runner-up, so it stays the argmax; the draft's own
+            // id is overwritten by the draw.
+            if (second) {
+                Tensor alternative(second, DType::I32, {n});
+                ops::argmax_top2(logits, tokens, alternative, domain, s);
+            }
+            const Tensor logical(const_cast<std::int32_t*>(positions), DType::I32, {n});
+            auto scope = ws.scope();
+            ops::sample(logits, tokens, domain, configs, logical, ops::kSamplePurposeDecode, ws, s);
+        } else if (second) {
             Tensor alternative(second, DType::I32, {n});
             ops::argmax_top2(logits, tokens, alternative, domain, s);
         } else {
@@ -3319,9 +3357,13 @@ struct Executor::Impl {
         if (hybrid) { hybrid->finish(); }
     }
 
+    // Drafts `steps` tokens per sequence. With `configs` (device, one per sequence of `batch`) the
+    // draft samples instead of taking the argmax: the row's own chain over the MTP head's logits,
+    // drawn with the counter its verification column will draw. A row that resolves to greedy
+    // (temperature <= 0, no penalties) picks the argmax, bit-identical to the uncoupled draft.
     void draft(std::span<const std::uint32_t> batch, std::span<const std::int32_t> anchors,
                std::span<std::int32_t> out, std::span<std::uint32_t> extents = {},
-               std::uint32_t steps = 0) {
+               std::uint32_t steps = 0, const ops::SamplingConfig* configs = nullptr) {
         require_mtp("draft");
         const std::size_t b      = batch.size();
         const std::size_t stride = options.draft_tokens;
@@ -3363,6 +3405,18 @@ struct Executor::Impl {
         }
         if (hybrid) { hybrid->begin(cancelled, !warming); }
         stage_mtp(anchors, 0, positions, 0);
+        if (configs != nullptr) {
+            // The anchor sits at the sequence's position, so step i proposes the token at
+            // position + i + 1, and a draw's counter is the position of the token it selects.
+            std::vector<std::int32_t> counters(k * b);
+            for (std::size_t j = 0; j < b; ++j) {
+                const std::uint32_t at = drafting[j]->position;
+                for (std::size_t i = 0; i < k; ++i) {
+                    counters[i * b + j] = static_cast<std::int32_t>(at + i + 1);
+                }
+            }
+            stage_mtp_counters(counters);
+        }
         if (draft_prefetch) {
             std::vector<NgramContext> contexts;
             for (const auto* sequence : drafting) { contexts.push_back(sequence->context); }
@@ -3370,6 +3424,8 @@ struct Executor::Impl {
         }
         auto* ids        = static_cast<std::int32_t*>(mtp_ids.p);
         const auto* at   = static_cast<const std::int32_t*>(mtp_positions.p);
+        const auto* at_counters =
+            static_cast<const std::int32_t*>(mtp_sample_positions.p);
         const auto n     = static_cast<std::int32_t>(b);
         const auto chain = [&] {
             for (std::size_t j = 0; j < b; ++j) {
@@ -3384,7 +3440,8 @@ struct Executor::Impl {
                 auto* second = draft_prefetch ?
                     static_cast<std::int32_t*>(ngram_prefetch_tokens.p) + i * b : nullptr;
                 auto* logprobs = mtp_logprobs.p ? static_cast<float*>(mtp_logprobs.p) + i * b : nullptr;
-                mtp_head(n, ids + (i + 1) * b, second, logprobs);
+                mtp_head(n, ids + (i + 1) * b, second, logprobs, configs,
+                         configs != nullptr ? at_counters + i * b : nullptr);
                 if (draft_prefetch) {
                     draft_prefetch->enqueue(i, ids + (i + 1) * b, second, rank.stream);
                 }
@@ -3394,7 +3451,8 @@ struct Executor::Impl {
         // Tokens and positions stay in the staged buffers. Native hybrid experts use the same
         // captured exchange as text decode; GGUF host experts replay too, without counting the
         // draft steps' routes.
-        auto& only       = drafting.front()->draft.at(k);
+        const bool coupled = configs != nullptr;
+        auto& only         = drafting.front()->draft.at(2 * k + (coupled ? 1 : 0));
         const bool graph = options.cuda_graphs && b == 1 && device.size() == 1 && !stream;
         if (misses) { misses->keep_alive(); }
         if (graph && !only.chain.ready() && only.runs++ > 0) {
@@ -3849,8 +3907,9 @@ bool Executor::can_draft(std::uint32_t sequence) const { return impl_->can_draft
 
 void Executor::draft(std::span<const std::uint32_t> sequences,
                      std::span<const std::int32_t> anchors, std::span<std::int32_t> out,
-                     std::span<std::uint32_t> extents, std::uint32_t steps) {
-    impl_->draft(sequences, anchors, out, extents, steps);
+                     std::span<std::uint32_t> extents, std::uint32_t steps,
+                     const ops::SamplingConfig* sampling) {
+    impl_->draft(sequences, anchors, out, extents, steps, sampling);
 }
 
 void Executor::verify(std::span<const std::uint32_t> sequences,

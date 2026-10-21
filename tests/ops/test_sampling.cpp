@@ -44,7 +44,8 @@ bool same_config(const ops::SamplingConfig& a, const ops::SamplingConfig& b) {
            a.min_p == b.min_p && a.presence_penalty == b.presence_penalty &&
            a.frequency_penalty == b.frequency_penalty && a.seed == b.seed &&
            a.token_counts == b.token_counts && a.token_mask == b.token_mask &&
-           a.token_mask_stride == b.token_mask_stride && a.dry_penalty == b.dry_penalty;
+           a.token_mask_stride == b.token_mask_stride && a.dry_penalty == b.dry_penalty &&
+           a.count_selected == b.count_selected;
 }
 
 std::vector<std::uint16_t> bf16_bits(const std::vector<float>& values) {
@@ -773,6 +774,39 @@ int masked_sampling_contract() {
 
 } // namespace
 
+// A coupled draft samples over the counts its verification reads without adding a proposal to them:
+// the draw is the same one the counted call makes, and the counts stay as they were.
+int uncounted_selection_contract() {
+    const int domain = 257;
+    std::vector<float> column(domain, -50.0f);
+    std::vector<int> counts(domain, 0), expected(domain, 0);
+    for (int i = 0; i < 20; ++i) {
+        column[i] = 2.0f - static_cast<float>(i) * 0.1f;
+        counts[i] = i % 3; // a penalty history both sides read
+        expected[i] = counts[i];
+    }
+    ops::SamplingConfig config;
+    config.temperature = 0.9f;
+    config.top_k       = 20;
+    config.seed        = 777001;
+    ops::SamplingConfig uncounted = config;
+    uncounted.count_selected      = false;
+    const auto counted =
+        run_batch(repeat_column(column, 1), domain, domain, {config}, {1234},
+                  ops::kSamplePurposeDecode, {counts});
+    const auto draft =
+        run_batch(repeat_column(column, 1), domain, domain, {uncounted}, {1234},
+                  ops::kSamplePurposeDecode, {counts});
+    int failures = counted.integrity_failures + draft.integrity_failures;
+    failures += verify_exact("coupled draft draws the counted id", draft.tokens, counted.tokens);
+    failures += verify_exact("coupled draft leaves token counts", draft.counts,
+                             std::vector<std::vector<int>>{expected});
+    expected[counted.tokens[0]] += 1;
+    failures += verify_exact("counted selection increments its id", counted.counts,
+                             std::vector<std::vector<int>>{expected});
+    return failures;
+}
+
 int main() {
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
@@ -804,6 +838,7 @@ int main() {
     failures += workspace_route_boundary_contract();
     failures += workspace_route_rng_contract();
     failures += increment_counts_contract();
+    failures += uncounted_selection_contract();
 
     std::cout << (failures == 0 ? "OK" : "FAIL") << " sample public contract\n";
     return failures == 0 ? 0 : 1;
