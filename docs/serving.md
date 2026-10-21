@@ -75,9 +75,13 @@ selected for this process.
 With `--adaptive-mtp`, `--draft-tokens K` is the most drafts an MTP round verifies; every round
 still proposes `K` for the next one. Each request tracks how far its drafts survive, position by
 position, with a fast and a slow moving average; the Engine prices each verification width from
-the round times it has measured at that width and batch size (a width not yet run is priced from
-a relative cost shape scaled by the widths that have) and picks the width with the most expected
-committed tokens per second over this round and the next. A width changes only after it has won
+the round times it has measured at that width and batch size and picks the width with the most
+expected committed tokens per second over this round and the next. A width without enough recent
+rounds is priced from a relative cost shape calibrated on the card (a round costs about the same
+plus one draft's work per column) scaled by the width that has run, so a width the controller left
+is not stuck at an old price. Seconds age out after a stretch without a sample, and re-measuring a
+stale width replaces them; the first round at a new width pays the switch and is not a cost
+sample. A width changes only after it has won
 several rounds, and a width is probed upward when every row's drafts have kept surviving. While
 three drafts are ready the width stays at three or more, so the Engine captures CUDA Graphs for
 widths `min(3, K)..K`: the graph memory, and the startup capture time, grow with the number of

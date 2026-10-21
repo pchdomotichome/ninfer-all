@@ -492,7 +492,11 @@ Qwen3.5 models use (see [Adaptive MTP](serving.md#adaptive-mtp)) picks each roun
 the requests' measured draft survival and the round times it has measured at each width, but here
 it goes down to one draft: the MTP block runs one step per draft, so a narrower round also drafts
 less, where the Qwen3.5 models' drafts are ready before the round. Each step count has its own
-draft-chain graph and each width its own verification graph, captured at their second use.
+draft-chain graph and each width its own verification graph, captured at their second use. The
+width it picks is not yet better than the fixed one: on the RTX 3090 at a 2k-token JSON prompt it
+ran 133 t/s against 135 for `--draft-tokens 3`, and at a 12k-token prompt 120 against 125, because
+the survival estimate and the round times it compares move by more than the 2-5% between the two
+widths' real costs.
 
 ## Execution
 

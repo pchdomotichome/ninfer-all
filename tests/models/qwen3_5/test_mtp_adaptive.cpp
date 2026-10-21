@@ -49,8 +49,22 @@ void costs_are_measured_then_scaled() {
     require(costs.cost(2, 3) == shape_three, "batch sizes are measured separately");
 }
 
-struct Simulation {
-    std::uint32_t final_window = 0;
+// A width the controller abandoned keeps its seconds only while they are recent: a cost measured
+// during a cold start must not price that width out of the running for the rest of the process.
+void stale_costs_age_out() {
+    MtpRoundCostModel costs;
+    const float shape_one   = costs.cost(1, 1);
+    const float shape_three = costs.cost(1, 3);
+    for (int round = 0; round < 8; ++round) { costs.observe(1, 3, 0.055); }
+    for (int round = 0; round < 100; ++round) { costs.observe(1, 1, 0.018); }
+    require(std::abs(costs.cost(1, 3) - 0.018F * shape_three / shape_one) < 1e-6F,
+            "a width that has not run is priced from the width that has");
+    for (int round = 0; round < 4; ++round) { costs.observe(1, 3, 0.024); }
+    require(std::abs(costs.cost(1, 3) - 0.024F) < 1e-6F,
+            "re-measuring a stale width replaces its seconds");
+}
+
+struct Simulation {    std::uint32_t final_window = 0;
     std::uint32_t widest       = 0;
 };
 
@@ -108,6 +122,7 @@ int main() {
     try {
         survival_follows_acceptance();
         costs_are_measured_then_scaled();
+        stale_costs_age_out();
         the_controller_widens_and_narrows();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL: %s\n", error.what());

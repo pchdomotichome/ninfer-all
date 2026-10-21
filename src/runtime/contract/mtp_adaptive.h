@@ -4,8 +4,8 @@
 // Qwen3.8-Flash-Next core. Each request keeps an estimate of how far its drafts survive; a batch
 // controller picks the verification width that maximizes expected committed tokens per unit of
 // round cost, moving between widths only after a candidate has won several rounds and a width has
-// held for a few. Round costs are measured per batch size and width as the rounds run; a width not
-// yet run is priced from a relative cost shape scaled by the widths that have.
+// held for a few. Round costs are measured per batch size and width as the rounds run; a width that
+// has not run recently is priced from the widths that have.
 
 #include <algorithm>
 #include <array>
@@ -99,27 +99,39 @@ private:
 };
 
 // Round cost by batch size and verification width, in seconds once measured. A width without
-// enough rounds is priced from the relative shape below, scaled by the most-run width of its batch
-// size; with nothing measured every width is priced in the shape's own units.
+// enough recent rounds is priced from the relative shape below, scaled by the most-run width of
+// its batch size; with nothing measured every width is priced in the shape's own units. Seconds
+// age out after kStaleRounds rounds without a sample, and the next sample replaces them: an
+// estimate taken during a cold start or at another context length must not keep a width from
+// being measured again.
 class MtpRoundCostModel final {
 public:
     void observe(std::size_t batch_size, std::uint32_t window, double seconds) noexcept {
         if (!valid(batch_size, window) || !(seconds > 0.0)) { return; }
+        if (round_ != UINT64_MAX) { ++round_; }
         float& cost           = seconds_[batch_size - 1U][window - 1U];
         std::uint16_t& counts = samples_[batch_size - 1U][window - 1U];
+        std::uint64_t& last   = last_round_[batch_size - 1U][window - 1U];
         const auto sample     = static_cast<float>(seconds);
-        cost                  = counts == 0 ? sample : cost + kAlpha * (sample - cost);
+        const bool stale      = counts != 0 && round_ - last > kStaleRounds;
+        if (stale) { counts = 0; }
+        cost = counts == 0 ? sample : cost + kAlpha * (sample - cost);
         if (counts != UINT16_MAX) { ++counts; }
+        last = round_;
     }
 
     [[nodiscard]] float cost(std::size_t batch_size, std::uint32_t window) const noexcept {
         if (!valid(batch_size, window)) { return 1.0F; }
         const auto& seconds = seconds_[batch_size - 1U];
         const auto& samples = samples_[batch_size - 1U];
-        if (samples[window - 1U] >= kMeasuredRounds) { return seconds[window - 1U]; }
+        const auto& last    = last_round_[batch_size - 1U];
+        const auto recent   = [&](std::size_t index) {
+            return samples[index] >= kMeasuredRounds && round_ - last[index] <= kStaleRounds;
+        };
+        if (recent(window - 1U)) { return seconds[window - 1U]; }
         std::size_t reference = kAdaptiveMtpMaximumDrafts;
         for (std::size_t index = 0; index < kAdaptiveMtpMaximumDrafts; ++index) {
-            if (samples[index] >= kMeasuredRounds &&
+            if (recent(index) &&
                 (reference == kAdaptiveMtpMaximumDrafts || samples[index] > samples[reference])) {
                 reference = index;
             }
@@ -137,14 +149,21 @@ private:
 
     static constexpr float kAlpha                  = 0.125F;
     static constexpr std::uint16_t kMeasuredRounds = 4;
-    // Verification cost of 1..15 drafts relative to one, from the upstream adaptive-MTP baseline.
+    static constexpr std::uint64_t kStaleRounds    = 96;
+    // Verification cost of 1..15 drafts relative to one: a round costs about the same plus one
+    // draft's work per extra column. Measured on the sm_86 card at batch one (Qwen3.8-Flash-Next,
+    // 2k context: 20.0, 21.5, 25.3 and 30.3 ms per round at 1..4 drafts, then one more draft per
+    // column). The upstream baseline's near-flat shape made a wider round look almost free.
     static constexpr std::array<float, kAdaptiveMtpMaximumDrafts> kRelativeCost{
-        1.000F, 1.075F, 1.064F, 1.125F, 1.177F, 1.227F, 1.281F, 1.334F,
-        1.388F, 1.442F, 1.496F, 1.550F, 1.604F, 1.658F, 1.712F};
+        1.000F, 1.075F, 1.265F, 1.515F, 1.765F, 2.015F, 2.265F, 2.515F,
+        2.765F, 3.015F, 3.265F, 3.515F, 3.765F, 4.015F, 4.265F};
 
+    std::uint64_t round_ = 0;
     std::array<std::array<float, kAdaptiveMtpMaximumDrafts>, kAdaptiveMtpMaximumBatch> seconds_{};
     std::array<std::array<std::uint16_t, kAdaptiveMtpMaximumDrafts>, kAdaptiveMtpMaximumBatch>
         samples_{};
+    std::array<std::array<std::uint64_t, kAdaptiveMtpMaximumDrafts>, kAdaptiveMtpMaximumBatch>
+        last_round_{};
 };
 
 class MtpAdaptiveBatchController final {
@@ -173,7 +192,9 @@ public:
             window > maximum_window_) {
             return;
         }
-        costs_.observe(batch_size, window, seconds);
+        // The first round at a width pays the switch (graphs, whatever the new width touches), so it
+        // is not a sample of that width's steady cost; only the rounds after it are.
+        if (rounds_at_window_ > 1U) { costs_.observe(batch_size, window, seconds); }
         const std::size_t batch = batch_size - 1U;
         const std::size_t width = window - 1U;
         if (execution_round_ != UINT64_MAX) { ++execution_round_; }
