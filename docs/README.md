@@ -83,6 +83,7 @@ other references own narrower contracts:
 | [Cutting a release](maintainer/release-process.md) | the release-archive flow, the packagers and their checks |
 | [Launcher profiles](maintainer/launcher-profiles.md) | `run` and `download-model`, the serving profile per model, and the reasons behind each flag |
 | [Known gaps](maintainer/known-gaps.md) | open defects found in this fork: what, how it was found, how to see it, and what a fix touches |
+| [Third-party engines](maintainer/third-party-engines.md) | measurements taken in other engines that bear on this one's design: what closed a proposal, what transfers as an instrument, and the staged expert path |
 
 [CONTRIBUTORS.md](../CONTRIBUTORS.md) credits the work this repository carries from its base and
 other forks. The [conversion guide](weight-conversion.md) is the entry point for making an artifact.
